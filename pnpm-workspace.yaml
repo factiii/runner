@@ -1,0 +1,9 @@
+packages:
+  - "apps/runner"
+  - "shared/*"
+  - "configs/*"
+onlyBuiltDependencies:
+  - "@prisma/engines"
+  - prisma
+  - esbuild
+  - node-datachannel

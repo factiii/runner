@@ -1,0 +1,3 @@
+# rapidocr_onnxruntime asks for opencv-python, which needs libGL; the
+# headless build in requirements-onnx.txt is the same cv2 without it.
+opencv-python; sys_platform == "never"

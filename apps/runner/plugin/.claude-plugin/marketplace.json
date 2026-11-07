@@ -1,0 +1,12 @@
+{
+  "name": "factiii-runner",
+  "description": "Everything a factiii runner hands its CLIs: session status hooks and workspace skills.",
+  "owner": { "name": "Factiii" },
+  "plugins": [
+    {
+      "name": "factiii",
+      "source": "./factiii",
+      "description": "Board terminal integration for claude and codex."
+    }
+  ]
+}

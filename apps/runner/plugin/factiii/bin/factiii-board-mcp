@@ -1,0 +1,206 @@
+#!/usr/bin/env node
+/**
+ * factiii-board-mcp - the board's tools, as a stdio MCP server.
+ *
+ * A PIPE, nothing more. The agent CLI starts this as its `factiii-board` MCP
+ * server and speaks MCP on stdin/stdout (one JSON-RPC message per line). This
+ * process hands each message to the runner over the space's secrets socket
+ * and prints what the runner sends back. The runner is what talks to the
+ * factiii server, with a credential this process never sees: there is no URL,
+ * no port and no access token here or in the plugin manifest.
+ *
+ * It proves which session is asking the way `factiii-secrets` does: with
+ * FACTIII_SECRETS_TOKEN, which the runner sets on every session it spawns.
+ *
+ * stdout carries MCP messages and NOTHING else. Everything this program has
+ * to say goes to stderr, in one line, and then it exits: when there is no
+ * runner to talk to there is nothing to wait for and nothing to retry.
+ */
+'use strict';
+
+const fs = require('fs');
+const net = require('net');
+const path = require('path');
+
+const SOCK_NAME = 'secrets.sock';
+/** Nothing was served: no socket, no runner, or the runner said no. */
+const EXIT_UNAVAILABLE = 3;
+/** The runner went away while this was serving. */
+const EXIT_LOST = 1;
+/** How long the runner gets to accept the connection. It only checks a token
+ *  in memory, so this is a hung runner, not a slow one. */
+const READY_TIMEOUT_MS = 10000;
+
+function isSocket(candidate) {
+  try {
+    return fs.statSync(candidate).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+/** `<spaceDir>/state/secrets.sock`. The runner sets FACTIII_SECRETS_SOCK on
+ *  the sessions it spawns now. A terminal from an earlier runner version has
+ *  no such variable, but it has SCRATCHPAD (`<spaceDir>/scratchpad`), and the
+ *  walk-up covers a caller inside the space tree, as in `factiii-secrets`. */
+function findSocket() {
+  const fromEnv = process.env.FACTIII_SECRETS_SOCK;
+  if (fromEnv) return fromEnv;
+  const scratchpad = process.env.SCRATCHPAD;
+  if (scratchpad) {
+    const candidate = path.join(path.dirname(scratchpad), 'state', SOCK_NAME);
+    if (isSocket(candidate)) return candidate;
+  }
+  let dir = process.cwd();
+  while (dir && dir !== path.dirname(dir)) {
+    const candidate = path.join(dir, 'state', SOCK_NAME);
+    if (isSocket(candidate)) return candidate;
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
+/** Call `onLine` for each complete line of a utf-8 stream. */
+function lines(stream, onLine) {
+  let buffer = '';
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => {
+    buffer += chunk;
+    let newline = buffer.indexOf('\n');
+    while (newline !== -1) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (line.trim()) onLine(line);
+      newline = buffer.indexOf('\n');
+    }
+  });
+}
+
+let finished = false;
+let conn = null;
+
+/** Say why, once, on stderr, and leave. */
+function finish(code, why) {
+  if (finished) return;
+  finished = true;
+  if (why) process.stderr.write(`factiii-board-mcp: ${why}\n`);
+  if (conn) conn.destroy();
+  process.exit(code);
+}
+
+function main() {
+  const socketPath = findSocket();
+  if (!socketPath) {
+    finish(
+      EXIT_UNAVAILABLE,
+      'no factiii runner is reachable here. The board tools work inside a session a factiii runner started.'
+    );
+    return;
+  }
+
+  conn = net.createConnection(socketPath);
+  let ready = false;
+  let stdinEnded = false;
+  /** Messages the agent sent before the runner accepted the connection. */
+  const waiting = [];
+
+  const toRunner = (message) => {
+    conn.write(`${JSON.stringify({ type: 'mcp', message })}\n`);
+  };
+
+  const readyTimer = setTimeout(() => {
+    finish(EXIT_UNAVAILABLE, 'the runner did not answer.');
+  }, READY_TIMEOUT_MS);
+
+  conn.on('connect', () => {
+    conn.write(
+      `${JSON.stringify({
+        op: 'board-mcp',
+        // Proves the caller is a session the runner spawned (not which one:
+        // sessionToken, below). The runner sets it on every session it
+        // spawns; a caller it did not spawn has none and is refused.
+        token: process.env.FACTIII_SECRETS_TOKEN || '',
+        // Which session this is, for the session tools (link_card and the
+        // rest). Absent from a session older than them.
+        session: process.env.FACTIII_SESSION || '',
+        // Proves that FACTIII_SESSION is this session's: the runner sets it
+        // with it, and refuses a session id this does not match. Absent from
+        // a session older than it, which the session tools then trust less.
+        sessionToken: process.env.FACTIII_SESSION_TOKEN || ''
+      })}\n`
+    );
+  });
+
+  lines(conn, (line) => {
+    let frame;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      // A malformed frame is the runner's bug; half a message helps nobody.
+      return;
+    }
+    if (!frame || typeof frame !== 'object') return;
+    if (frame.type === 'mcp') {
+      process.stdout.write(`${JSON.stringify(frame.message)}\n`);
+      return;
+    }
+    if (frame.type === 'board-mcp-ready') {
+      ready = true;
+      clearTimeout(readyTimer);
+      for (const message of waiting.splice(0)) toRunner(message);
+      // The agent already closed its side: what it sent is now on its way.
+      if (stdinEnded) conn.end();
+      return;
+    }
+    if (frame.type === 'log') {
+      process.stderr.write(`factiii-board-mcp: ${frame.text}\n`);
+      return;
+    }
+    if (frame.type === 'error') {
+      // Also what a runner from before this op answers ("Unknown operation.").
+      finish(EXIT_UNAVAILABLE, frame.message);
+    }
+  });
+
+  conn.on('error', (err) => {
+    const why =
+      err.code === 'ENOENT' || err.code === 'ECONNREFUSED'
+        ? 'the runner is not serving this space right now (it is stopped, or still starting)'
+        : `cannot reach the runner (${err.message})`;
+    finish(ready ? EXIT_LOST : EXIT_UNAVAILABLE, `${why}.`);
+  });
+  conn.on('close', () => {
+    if (stdinEnded && ready) {
+      finish(0);
+      return;
+    }
+    // No reconnect: the agent CLI owns this process and decides what a dead
+    // MCP server means. A loop here would hide a stopped runner behind a
+    // server that looks alive and answers nothing.
+    finish(
+      ready ? EXIT_LOST : EXIT_UNAVAILABLE,
+      'the runner closed the connection (it stopped or restarted, or this space went down).'
+    );
+  });
+
+  lines(process.stdin, (line) => {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      process.stderr.write('factiii-board-mcp: ignored a line that is not JSON.\n');
+      return;
+    }
+    if (ready) toRunner(message);
+    else waiting.push(message);
+  });
+  process.stdin.on('end', () => {
+    // The agent is done with us. Let what is in flight go out, then leave.
+    stdinEnded = true;
+    if (ready) conn.end();
+  });
+  // The agent went away without closing stdin first.
+  process.stdout.on('error', () => finish(0));
+}
+
+main();

@@ -1,0 +1,26 @@
+dist/
+node_modules/
+# `vendor/*`, not `vendor/`: git will not descend into an excluded DIRECTORY,
+# so a `!` below it never fires. Excluding the contents is what leaves the
+# directory itself readable and the negation usable.
+vendor/*
+# The rest of vendor/ is fetched binaries (frpc, ~16MB each) that have no place
+# in git. This one is third-party SOURCE we redistribute in the tarball, so it
+# is committed — the code users execute stays reviewable in the diff, and the
+# MIT notice we are obliged to carry travels with it. Regenerate with
+# scripts/fetch-tmux-resurrect.sh.
+!vendor/tmux-resurrect/
+*.tgz
+# The cloud embedder's sources, copied from services/embedder by
+# bundle:embedder for the Vault's search; serve.py and the ONNX files (Linux)
+# are the runner's own.
+embedder/*
+!embedder/serve.py
+!embedder/onnx_backend.py
+!embedder/convert_onnx.py
+!embedder/requirements-onnx.txt
+!embedder/overrides-onnx.txt
+# The vault router probe's generated client (probe/generate.mjs).
+probe/generated/
+probe/vault.prisma
+probe/engine/

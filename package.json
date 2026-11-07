@@ -1,0 +1,10 @@
+{
+  "name": "factiii-runner-source",
+  "version": "0.37.0",
+  "private": true,
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "build": "pnpm --filter @factiii/runner build",
+    "test": "pnpm --filter @factiii/runner test"
+  }
+}

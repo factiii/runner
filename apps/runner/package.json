@@ -1,0 +1,85 @@
+{
+  "name": "@factiii/runner",
+  "version": "0.37.0",
+  "description": "Factiii Runner, run Board AI agents on a machine you control. Pairs with the Factiii web/mobile clients over WebRTC.",
+  "license": "ISC",
+  "homepage": "https://factiii.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/factiii/runner.git",
+    "directory": "apps/runner"
+  },
+  "keywords": [
+    "factiii",
+    "runner",
+    "claude",
+    "ai",
+    "agent",
+    "webrtc",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "contentPolicy": {
+    "class": "dual-use"
+  },
+  "bin": {
+    "factiii-runner": "bin/factiii-runner.js"
+  },
+  "files": [
+    "bin/factiii-runner.js",
+    "dist/cli.js",
+    "dist/vault-db.js",
+    "dist/vault-client.js",
+    "native/",
+    "plugin/",
+    "embedder/",
+    "vendor/frpc-linux-amd64",
+    "vendor/frpc-linux-arm64",
+    "vendor/frpc-darwin-amd64",
+    "vendor/frpc-darwin-arm64",
+    "vendor/tmux-resurrect/",
+    "README.md",
+    "DISCLOSURE"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "check-types": "tsc --noEmit",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "vault:schema": "tsx src/vault/schemaGenCli.ts",
+    "vault:probe": "node probe/generate.mjs && tsx probe/probe.ts && tsx probe/forkProbe.ts",
+    "dev": "FACTIII_RUNNER_DIR=$HOME/.factiii-runner-dev tsx src/cli.ts start",
+    "dev:setup": "FACTIII_RUNNER_DIR=$HOME/.factiii-runner-dev tsx src/cli.ts setup --server http://localhost:5001",
+    "dev:status": "FACTIII_RUNNER_DIR=$HOME/.factiii-runner-dev tsx src/cli.ts status",
+    "dev:cli": "FACTIII_RUNNER_DIR=$HOME/.factiii-runner-dev tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "fetch:frpc": "bash scripts/fetch-frpc.sh",
+    "bundle:embedder": "cd ../../services/embedder && cp app.py clip_tokenizer.py text_tokenizer.py convert_text.py convert_clip.py requirements.txt ../../apps/runner/embedder/",
+    "pack": "node build.mjs && pnpm bundle:embedder && bash scripts/fetch-frpc.sh && bash scripts/fetch-tmux-resurrect.sh && pnpm pack",
+    "prepublishOnly": "node build.mjs && pnpm bundle:embedder && bash scripts/fetch-frpc.sh && bash scripts/fetch-tmux-resurrect.sh",
+    "fetch:resurrect": "bash scripts/fetch-tmux-resurrect.sh"
+  },
+  "dependencies": {
+    "node-datachannel": "^0.12.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.4.3",
+    "@prisma/client": "^7.10.1",
+    "@prisma/driver-adapter-utils": "^7.10.1",
+    "@shared/all": "workspace:*",
+    "@shared/vault-router": "workspace:*",
+    "@types/node": "^20.0.0",
+    "@types/qrcode": "^1.5.6",
+    "commander": "^12.1.0",
+    "esbuild": "0.25.12",
+    "qrcode": "^1.5.4",
+    "socket.io-client": "^4.8.3",
+    "superjson": "^1.13.3",
+    "tsx": "^4.22.4",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  // No path alias to apps/server, unlike shared/all: this package runs on the
+  // server and on the runner, and must not reach either one's code. Each
+  // backend hands it what it needs through the ports (ports.ts).
+  "extends": "@configs/typescript/base.json",
+  "compilerOptions": {
+    "target": "es2018",
+    "lib": ["es2022"],
+    "types": ["jest"],
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

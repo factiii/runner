@@ -1,0 +1,20 @@
+# Serving deps — the running service imports only these (no torch). ftfy+regex
+# back the torch-free CLIP tokenizer (clip_tokenizer.py); tokenizers backs the
+# torch-free WordPiece tokenizer for gte-small (text_tokenizer.py). torch/
+# torchvision/open_clip/transformers are installed separately by setup.sh for the
+# one-time Core ML conversions (convert*.py) and are NOT imported at serve time.
+coremltools>=9.0
+numpy>=2.0
+ftfy>=6.0
+regex>=2024.0
+tokenizers>=0.20.0
+python-dotenv>=1.0
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pillow==11.1.0
+pydantic==2.10.4
+# OCR for scanned PDFs (/extract): CoreGraphics rasterization + Apple Vision text
+# recognition via pyobjc. macOS-only; the embedder already runs natively on the
+# Mac Mini. Vision pulls in CoreML/Quartz frameworks it needs transitively.
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-Vision>=10.0

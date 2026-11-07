@@ -1,0 +1,153 @@
+@factiii/runner: dual-use disclosure
+
+WHAT THIS PACKAGE IS
+
+Factiii Runner lets a person run AI coding agents (Claude Code and similar)
+on a computer they own, and drive them from the Factiii web, desktop and
+mobile apps (https://factiii.com). The owner installs it on their own machine
+and pairs it with their own Factiii account. It then accepts work only from
+that account and from board members the owner has approved.
+
+Doing that job means the runner can do things that malware also does. Each
+one is listed below with why it is there and how the owner controls it.
+Nothing here runs at install: the package has no install scripts.
+
+
+CAPABILITIES THAT RESEMBLE MALWARE
+
+1. Remote shell and command execution
+   The runner starts terminal sessions (tmux) and agent processes on the
+   machine and streams them to the owner's Factiii app over WebRTC. That is
+   the product: the owner, or an approved board member, types into a
+   terminal on their own computer from a phone or browser. Some processes
+   are spawned detached so that a running agent survives a runner restart.
+
+2. iOS Simulator viewing and input (macOS)
+   native/simhid.m and native/simstream.m are built on the owner's Mac and
+   stream the iOS Simulator's video and send it touch input, for testing
+   mobile apps. They reach the Simulator only, never the Mac's own screen,
+   mouse or keyboard. The runner does not capture or control the Mac's
+   desktop; to see it remotely the owner uses macOS Screen Sharing (VNC)
+   over their own Tailscale network, which the runner neither installs nor
+   starts.
+
+3. Reverse tunnels (vendor/frpc-*)
+   The package ships the frp client (https://github.com/fatedier/frp),
+   downloaded unmodified from its official release by scripts/fetch-frpc.sh.
+   The runner uses it only when an agent or the owner shares a local dev
+   server as a preview link, and only to Factiii's own tunnel server, with
+   the runner's own access token. Each tunnel is listed in the app and can be
+   stopped.
+
+4. Starting at login (persistence)
+   Only when the owner runs `factiii-runner service install` does the runner
+   install a per-user login service (a LaunchAgent on macOS, a systemd user
+   unit on Linux, a scheduled task on Windows), so it is available after a
+   reboot. `factiii-runner service
+   remove` deletes it.
+   The runner lists the LaunchAgents folder to find and manage its own
+   entries, and reads the owner's other agents there only to name the
+   services in item 10. It never adds, changes or removes another agent.
+
+5. Credentials and secrets
+   - The runner's connection token is stored encrypted, under a key kept in
+     the OS keychain (macOS Keychain via `security`, libsecret on Linux,
+     DPAPI on Windows).
+   - The owner can keep deploy secrets in a local, encrypted store. They are
+     handed to commands only through named jobs the owner defines, and each
+     use is recorded in an audit log the owner can read.
+   - The runner reads environment variables it is configured with (for
+     example FACTIII_* settings). It never reads `.env` files, SSH keys,
+     browser data, wallets or other programs' credentials. A test in this
+     package (src/packageContents.test.ts) fails if bundled code opens a
+     .env file.
+
+6. System and remote-access inspection
+   Runner > Status, and "Ready to be a server" in Factiii Desktop, show the
+   owner whether their machine can serve as an always-on host. To do this the
+   runner reads disk and memory use (/proc/meminfo on Linux), power settings
+   (`pmset -g`), screen-lock and FileVault state (`sysadminctl`, `ioreg`),
+   whether Screen Sharing is on (a local check of port 5900), and the
+   machine's Tailscale address (`ifconfig`, `tailscale status`). These
+   results go to the owner's own app.
+   - The runner never changes these settings itself. Where a setting needs
+     changing it shows the command, such as `sudo pmset ...`, for the owner
+     to run, or the owner runs it from Factiii Desktop with their password.
+   - "Keep awake" holds `caffeinate` while the owner asks for it.
+   - The runner never installs or starts Tailscale. It only reads its status.
+
+7. Heartbeat to a status page (opt-in)
+   If the owner runs `factiii-runner status-page set` with a token for their
+   own status page, the runner sends a periodic heartbeat to it: its name,
+   version and time, plus this machine's Tailscale name, address and user.
+   That page shows the Tailscale details only on its access-controlled admin
+   view, as the owner's way back in when Factiii itself is down. This is off
+   unless the owner turns it on.
+
+8. Updating itself
+   The runner checks npm for a newer @factiii/runner but installs it only
+   after a person clicks "Approve update" in the Factiii app. It installs
+   only a version newer than the one running. It never downloads code from
+   anywhere but the npm registry.
+
+9. Other downloads
+   On request, the runner installs developer tools the owner asks for: the
+   AI agent CLIs, Python packages for the local embedder (embedder/), and
+   Tart (a pinned release that the runner verifies is signed by Cirrus Labs
+   before installing it).
+
+
+10. Connections, running services and their logs (owner only)
+   Runner > Remote connections shows the runner's owner who is connected
+   (each link's account, transport, start time and open terminals) and what
+   the machine is serving: containers (`docker ps`), pm2 processes
+   (`pm2 jlist`), the user's LaunchAgents (`launchctl list`, and each one's
+   plist to see what it runs), listening ports (`lsof`) and the local
+   embedder's health. On request it shows the last lines of one of those
+   services' logs (`pm2 logs`, `docker logs`, or the log file a LaunchAgent
+   names), at most 2,000 lines. All of it is read-only, answered only to the
+   owner over their own link, and never sent to the Factiii server.
+
+11. Who can connect, how long access lasts, and how to stop it
+   Who: a link opens only for the owner and for board members the owner
+   gave an access level, on a board the owner has joined. The server names
+   who is connecting and their boards, and the runner checks its own grant
+   for that person; if either is missing, the link is refused. Lowering a
+   member's level closes their terminals and video at once. Setting them to
+   None on every board closes their link. A card AI session or a job they
+   already started keeps running until the owner ends it.
+   How long: the runner's access token expires after 30 days and is
+   renewed daily. Its refresh token changes on every use and stops working
+   after 90 days unused. If an old refresh token is reused, the server
+   ends the pairing, cuts live connections and alerts the owner. Terminal
+   sessions have no idle timeout: they run until someone ends them from
+   the app, or until the runner stops.
+   How to stop it:
+   - Stop the `factiii-runner start` process (Ctrl-C, or end the process).
+     Nothing restarts it unless the owner installed the login service
+     (item 4).
+   - `factiii-runner service remove` removes the login service.
+   - "Disconnect" under Settings > Runners in the Factiii app revokes the
+     runner on the server, which checks this at every connection. The
+     runner is told to stop its jobs and delete their containers.
+   - `factiii-runner nuke` erases everything the runner holds, secrets
+     included, and unpairs it.
+   - `npm uninstall -g @factiii/runner` removes the package.
+
+
+WHAT IT DOES NOT DO
+
+- No code runs at install time.
+- It sends no data anywhere except the Factiii servers the owner paired
+  with, the owner's own opt-in status page, and the services the owner's
+  agents and jobs are told to reach.
+- It does not hide itself. It shows up as `factiii-runner` in process lists
+  and as a named login item. `factiii-runner service remove` and
+  `npm uninstall -g @factiii/runner` remove it.
+- Nothing in the published code is obfuscated. dist/cli.js is an esbuild
+  bundle of the TypeScript source, unminified.
+
+
+CONTACT
+
+Publisher: Factiii (https://factiii.com), support@factiii.com

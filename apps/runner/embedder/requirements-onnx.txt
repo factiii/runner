@@ -1,0 +1,22 @@
+# The embedder's serving packages on Linux (onnx_backend.py): the cloud's
+# requirements.txt without Core ML and pyobjc, which are macOS-only, plus
+# ONNX Runtime, a PDF reader and OCR. Keep the shared pins in step with
+# services/embedder/requirements.txt: Pillow resizes the photos, so a
+# different one makes different CLIP vectors.
+onnxruntime>=1.20
+numpy>=2.0
+ftfy>=6.0
+regex>=2024.0
+tokenizers>=0.20.0
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pillow==11.1.0
+pydantic==2.10.4
+# A PDF's text layer, and its pages drawn for OCR (PDFKit's and Quartz's job
+# on the Mac).
+pypdfium2>=4.30
+# OCR for scans (Apple Vision's job on the Mac): PaddleOCR's models on ONNX
+# Runtime, shipped inside the wheel. Its opencv-python needs libGL, which a
+# server often lacks: the headless build stands in (overrides-onnx.txt).
+rapidocr_onnxruntime==1.4.4
+opencv-python-headless>=4.8,<5

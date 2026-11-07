@@ -1,0 +1,7 @@
+{
+  "name": "factiii",
+  "version": "0.1.0",
+  "description": "Board terminal integration: reports what the agent is doing to the session's status dot, and ships the skills a factiii workspace provides.",
+  "author": { "name": "Factiii" },
+  "homepage": "https://factiii.com"
+}

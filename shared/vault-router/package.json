@@ -1,0 +1,26 @@
+{
+  "name": "@shared/vault-router",
+  "version": "0.0.0",
+  "private": true,
+  "sideEffects": false,
+  "exports": {
+    ".": "./index.ts",
+    "./inputs": "./inputs.ts",
+    "./prismaDb": "./prismaDb.ts",
+    "./router": "./router.ts",
+    "./skippedFolders": "./skippedFolders.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.10.1",
+    "@shared/all": "workspace:*",
+    "@trpc/server": "11.8.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@configs/typescript": "workspace:*",
+    "prisma": "^7.10.1"
+  },
+  "scripts": {
+    "postinstall": "prisma generate --schema vault.prisma"
+  }
+}

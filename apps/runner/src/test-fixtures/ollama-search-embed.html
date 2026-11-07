@@ -1,0 +1,883 @@
+
+
+
+
+
+
+
+
+
+
+
+<!doctype html>
+<html class="h-full overflow-y-scroll">
+  <head>
+    <title>embed · Ollama</title>
+
+    <meta charset="utf-8" />
+    <meta name="description" content="Search for models on Ollama."/>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta property="og:title" content="embed · Ollama" />
+    <meta property="og:description" content="Search for models on Ollama." />
+    <meta property="og:url" content="https://ollama.com/search" />
+    <meta property="og:image" content="https://ollama.com/public/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="628" />
+    <meta property="og:image:alt" content="Ollama's black-and-white logo" />
+    <meta property="og:type" content="website" />
+
+    <meta name="robots" content="index, follow" />
+
+    <meta property="twitter:card" content="summary" />
+    <meta property="twitter:title" content="embed · Ollama" />
+    <meta property="twitter:description" content="Search for models on Ollama." />
+    <meta property="twitter:site" content="ollama" />
+
+    <meta property="twitter:image:src" content="https://ollama.com/public/og-twitter.png" />
+    <meta property="twitter:image:width" content="1200" />
+    <meta property="twitter:image:height" content="628" />
+    <meta property="twitter:image:alt" content="Ollama's black-and-white logo" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+
+    <link rel="icon" type="image/png" sizes="16x16" href="/public/icon-16x16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/public/icon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/public/icon-48x48.png" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/public/icon-64x64.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/public/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/public/android-chrome-icon-192x192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/public/android-chrome-icon-512x512.png" />
+
+    
+    
+
+    <link href="/public/tailwind.css?v=2e0db753d3a4f12a36429f6fa6814433" rel="stylesheet" />
+    <link href="/public/vendor/prism/prism.css?v=2e0db753d3a4f12a36429f6fa6814433" rel="stylesheet" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://ollama.com/#organization",
+            "name": "Ollama",
+            "legalName": "Ollama Inc.",
+            "url": "https://ollama.com",
+            "logo": "https://ollama.com/public/ollama.png",
+            "sameAs": ["https://github.com/ollama/ollama", "https://twitter.com/ollama"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://ollama.com/#website",
+            "name": "Ollama",
+            "url": "https://ollama.com",
+            "publisher": { "@id": "https://ollama.com/#organization" }
+          }
+        ]
+      }
+    </script>
+
+    <script type="text/javascript">
+      function copyToClipboard(element) {
+        let commandElement = null;
+        const preElement = element.closest('pre');
+        const languageNoneElement = element.closest('.language-none');
+
+        if (preElement) {
+          commandElement = preElement.querySelector('code');
+        } else if (languageNoneElement) {
+          commandElement = languageNoneElement.querySelector('.command');
+        } else {
+          const parent = element.parentElement;
+          if (parent) {
+            commandElement = parent.querySelector('.command');
+          }
+        }
+
+        if (!commandElement) {
+          console.error('No code or command element found');
+          return;
+        }
+
+        const code = commandElement.textContent ? commandElement.textContent.trim() : commandElement.value;
+
+        navigator.clipboard
+          .writeText(code)
+          .then(() => {
+            const copyIcon = element.querySelector('.copy-icon')
+            const checkIcon = element.querySelector('.check-icon')
+
+            copyIcon.classList.add('hidden')
+            checkIcon.classList.remove('hidden')
+
+            setTimeout(() => {
+              copyIcon.classList.remove('hidden')
+              checkIcon.classList.add('hidden')
+            }, 2000)
+          })
+      }
+    </script>
+    
+    <script>
+      
+      function getIcon(url) {
+        url = url.toLowerCase();
+        if (url.includes('x.com') || url.includes('twitter.com')) return 'x';
+        if (url.includes('github.com')) return 'github';
+        if (url.includes('linkedin.com')) return 'linkedin';
+        if (url.includes('youtube.com')) return 'youtube';
+        if (url.includes('hf.co') || url.includes('huggingface.co') || url.includes('huggingface.com')) return 'hugging-face';
+        return 'default';
+      }
+
+      function setInputIcon(input) {
+        const icon = getIcon(input.value);
+        const img = input.previousElementSibling.querySelector('img');
+        img.src = `/public/social/${icon}.svg`;
+        img.alt = `${icon} icon`;
+      }
+
+      function setDisplayIcon(imgElement, url) {
+        const icon = getIcon(url);
+        imgElement.src = `/public/social/${icon}.svg`;
+        imgElement.alt = `${icon} icon`;
+      }
+    </script>
+    
+    <script src="/public/vendor/htmx/bundle.js"></script>
+  </head>
+
+  <body
+    class="
+      antialiased
+      min-h-screen
+      w-full
+      m-0
+      flex
+      flex-col
+    "
+    hx-on:keydown="
+      if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') {
+        // Ignore key events in input fields.
+        return;
+      }
+      if ((event.metaKey && event.key === 'k') || event.key === '/') {
+        const sp = htmx.find('#search') || htmx.find('#form-input') || htmx.find('#filter');
+        if (sp) {
+          event.preventDefault();
+          sp.focus();
+        }
+      }
+    "
+  >
+    
+      
+<header class="sticky top-0 z-40 flex h-20 shrink-0 items-center border-b border-transparent bg-white px-5 sm:px-6 lg:px-8 text-black data-[scrolled]:border-black/[0.12] lg:static lg:border-b-0">
+  <nav aria-label="Main navigation" class="flex w-full items-center justify-between gap-6 text-lg leading-6 tracking-tight font-normal mx-auto max-w-[137.25rem]">
+    <div class="flex min-w-0 flex-1 items-center gap-6">
+      <a href="/" aria-label="Ollama home" class="-ml-0.5 flex-none"><img src="/public/ollama-nav.png" alt="Ollama logo" width="37" height="43" class="h-auto w-[37px]" /></a>
+      
+    </div>
+    <div class="hidden items-center gap-7 md:flex">
+      <a href="https://github.com/ollama/ollama" class="flex items-center gap-1.5 text-[17px]">
+        <svg class="h-[18px] w-[18px] flex-none" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z" /></svg>
+        <span class="sr-only">GitHub</span>
+        <span class="tabular-nums">184.1K</span>
+      </a>
+      <a href="/download" class="underline-offset-4 hover:underline">Download</a>
+      <a href="/search" class="underline-offset-4 hover:underline">Models</a>
+      <a href="https://docs.ollama.com" class="underline-offset-4 hover:underline">Docs</a>
+      <a href="/pricing" class="underline-offset-4 hover:underline">Pricing</a>
+      
+        <a href="/signin" class="underline-offset-4 hover:underline">Sign in</a>
+      
+    </div>
+    <div class="flex items-center md:hidden">
+      <input type="checkbox" id="menu" class="peer hidden" />
+      <label for="menu" aria-label="Open menu" class="z-50 block cursor-pointer peer-checked:hidden">
+        <svg class="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" /></svg>
+      </label>
+      <label for="menu" aria-label="Close menu" class="fixed right-5 sm:right-6 lg:right-8 top-[26px] z-50 hidden cursor-pointer peer-checked:block">
+        <svg class="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+      </label>
+      <div class="fixed inset-0 z-40 hidden overflow-y-auto bg-white peer-checked:block">
+        <div class="flex flex-col space-y-5 px-5 sm:px-6 lg:px-8 pb-8 pt-[5.5rem] text-3xl">
+          
+          <a href="/download">Download</a>
+          <a href="/search">Models</a>
+          <a href="https://docs.ollama.com">Docs</a>
+          <a href="/pricing">Pricing</a>
+          
+            <a href="/signin">Sign in</a>
+          
+        </div>
+      </div>
+    </div>
+  </nav>
+</header>
+<script>
+  (function (header) {
+    function update() { header.toggleAttribute('data-scrolled', window.scrollY > 0); }
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+  })(document.currentScript.previousElementSibling);
+</script>
+
+    
+
+    
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const formSearch = htmx.find('#form-input');
+    formSearch.setSelectionRange(formSearch.value.length, formSearch.value.length);
+    formSearch.focus();
+  });
+</script>
+
+<main class="w-full px-5 pb-16 pt-8 text-black sm:px-6 sm:pt-10 md:pt-0 lg:px-8">
+  <form
+    class="mx-auto max-w-[137.25rem] md:grid md:grid-cols-[13.75rem_minmax(0,1fr)] md:grid-rows-[auto_1fr] md:gap-x-14"
+    hx-get="/search"
+    hx-target="#searchresults"
+    hx-trigger="submit, keyup changed delay:100ms from:[name=q], search"
+    hx-include="[name=q], [name=c], [name=o], [name=s]"
+    hx-replace-url="true"
+    hx-on:change="
+      if (this.querySelector('[value=cloud]:checked')) this.querySelector('[name=s][value=\'\']').checked = true;
+      document.getElementById('filters-count').textContent = [...this.querySelectorAll('input[name=c]:checked, input[name=s]:checked')].filter(i => i.value).length || '';
+    "
+  >
+    <div class="bg-white md:sticky md:top-20 md:z-10 md:col-start-2 md:row-start-1 md:self-start md:pb-6 md:pt-10 lg:top-0">
+      <h1 class="text-[clamp(1.75rem,3vw,2.5rem)] font-[450] leading-tight tracking-[-0.02em]">Models</h1>
+      <label class="mt-8 flex h-9 items-center gap-2.5 rounded-full border border-black/[0.12] pl-4 pr-2 focus-within:border-black/40">
+        <svg class="h-3.5 w-3.5 flex-none text-black/60" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="m8.5 3c3.0375661 0 5.5 2.46243388 5.5 5.5 0 1.24832096-.4158777 2.3995085-1.1166416 3.3225711l4.1469717 4.1470988c.2928932.2928932.2928932.767767 0 1.0606602-.2662666.2662665-.6829303.2904726-.9765418.0726181l-.0841184-.0726181-4.1470988-4.1469717c-.9230626.7007639-2.07425014 1.1166416-3.3225711 1.1166416-3.03756612 0-5.5-2.4624339-5.5-5.5 0-3.03756612 2.46243388-5.5 5.5-5.5zm0 1.5c-2.209139 0-4 1.790861-4 4s1.790861 4 4 4 4-1.790861 4-4-1.790861-4-4-4z"/>
+        </svg>
+        <input
+          id="form-input"
+          name="q"
+          type="search"
+          value="embed"
+          class="w-full border-0 bg-transparent p-0 text-sm placeholder:text-black/40 focus:outline-none focus:ring-0"
+          placeholder="Search 257 models"
+          aria-label="Search models"
+          autofocus
+          autocomplete="off"
+        />
+      </label>
+    </div>
+
+    <div class="mt-6 md:sticky md:top-20 md:col-start-1 md:row-span-2 md:row-start-1 md:mt-0 md:max-h-[calc(100vh-5rem)] md:self-start md:overflow-y-auto md:pb-16 md:pt-10 lg:top-0 lg:max-h-screen">
+      <input type="checkbox" id="filters-toggle" class="peer sr-only">
+      <label for="filters-toggle" class="inline-flex cursor-pointer select-none items-center gap-2 rounded-full border border-black/[0.12] px-4 py-1.5 text-sm font-medium md:hidden">
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg>
+        Filters
+        <span id="filters-count" class="min-w-5 rounded-full bg-black px-1.5 text-center text-xs leading-5 text-white empty:hidden"></span>
+      </label>
+      <div class="mt-6 hidden peer-checked:block md:mt-0 md:block">
+        
+
+
+<div class="group space-y-7 text-sm leading-6">
+  <fieldset>
+    <legend class="mb-1.5 text-[13px] font-medium leading-5">Where</legend>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="c" value="" checked class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">All</span>
+      <span class="text-[13px] tabular-nums text-black/60">257</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="c" value="local"  class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Local</span>
+      <span class="text-[13px] tabular-nums text-black/60">241</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="c" value="cloud"  class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Cloud</span>
+      <span class="text-[13px] tabular-nums text-black/60">21</span>
+    </label>
+    
+  </fieldset>
+  <fieldset>
+    <legend class="mb-1.5 text-[13px] font-medium leading-5">Capabilities</legend>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="checkbox" name="c" value="tools"  class="h-4 w-4 rounded border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Tools</span>
+      <span class="text-[13px] tabular-nums text-black/60">103</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="checkbox" name="c" value="thinking"  class="h-4 w-4 rounded border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Thinking</span>
+      <span class="text-[13px] tabular-nums text-black/60">53</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="checkbox" name="c" value="vision"  class="h-4 w-4 rounded border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Vision</span>
+      <span class="text-[13px] tabular-nums text-black/60">52</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="checkbox" name="c" value="embedding"  class="h-4 w-4 rounded border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Embedding</span>
+      <span class="text-[13px] tabular-nums text-black/60">14</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="checkbox" name="c" value="decision"  class="h-4 w-4 rounded border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span class="flex-1">Decision</span>
+      <span class="text-[13px] tabular-nums text-black/60">9</span>
+    </label>
+    
+  </fieldset>
+  <fieldset class="group-has-[[value=cloud]:checked]:hidden">
+    <legend class="mb-1.5 text-[13px] font-medium leading-5">Download size</legend>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="s" value="" checked class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span>Any</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="s" value="8"  class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span>Up to 8 GB</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="s" value="16"  class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span>Up to 16 GB</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="s" value="32"  class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span>Up to 32 GB</span>
+    </label>
+    
+    <label class="flex cursor-pointer items-center gap-2.5 py-1">
+      <input hx-get="/search" type="radio" name="s" value="64"  class="h-4 w-4 border-black/30 text-black focus:ring-0 focus:ring-offset-0">
+      <span>Up to 64 GB</span>
+    </label>
+    
+  </fieldset>
+</div>
+
+        <button type="button" id="filters-done" class="mt-8 w-full rounded-full bg-black py-2.5 text-sm font-medium text-white md:hidden" hx-on:click="document.getElementById('filters-toggle').checked = false; document.getElementById('searchresults').scrollIntoView()">Show 20+ models</button>
+      </div>
+    </div>
+
+    <div
+      id="searchresults"
+      class="mt-6 min-w-0 scroll-mt-24 md:col-start-2 md:row-start-2 md:mt-4"
+      hx-on::after-swap="
+        const count = this.querySelector('[data-result-count]');
+        const total = Number(count.dataset.resultCount);
+        document.getElementById('filters-done').textContent = 'Show ' + total.toLocaleString('en-US') + (count.dataset.hasMore === 'true' ? '+' : '') + (total === 1 ? ' model' : ' models');
+
+        const title = this.querySelector('[data-seo=title]');
+        const description = this.querySelector('[data-seo=description]');
+
+        if (title) {
+          document.title = title.textContent;
+        }
+        if (title && description) {
+          document.querySelector('meta[property=\'og:title\']').setAttribute('content', title.textContent);
+          document.querySelector('meta[property=\'og:description\']').setAttribute('content', description.textContent);
+
+          document.querySelector('meta[property=\'twitter:title\']').setAttribute('content', title.textContent);
+          document.querySelector('meta[property=\'twitter:description\']').setAttribute('content', description.textContent);
+
+          document.querySelector('meta[name=\'description\']').setAttribute('content', description.textContent);
+        }
+      "
+    >
+      
+<div hidden data-seo="title">embed · Ollama</div>
+<div hidden data-seo="description">Search for models on Ollama.</div>
+
+<div class="flex items-center justify-between gap-4 border-b border-black/[0.08] pb-3">
+  <p  data-result-count="20" data-has-more="true" class="text-[13px] leading-5 text-black/60">20+ models</p>
+  
+<label class="relative inline-flex shrink-0 cursor-pointer items-center text-[13px] leading-5">
+  <span class="text-black/60" aria-hidden="true">Sort:</span>
+  <select id="search-sort" hx-get="/search" name="o" aria-label="Sort" class="cursor-pointer appearance-none border-0 bg-transparent bg-none py-0 pl-1 pr-4 text-[13px] [field-sizing:content] leading-5 focus:outline-none focus:ring-0">
+    <option value="popular" >Popular</option>
+    <option value="newest" >Newest</option>
+    <option value="name" >Name</option>
+    <option value="price" >Price</option>
+    <option value="context" >Context</option>
+  </select>
+  <svg aria-hidden="true" viewBox="0 0 10 10" class="pointer-events-none absolute right-0 top-1/2 h-2.5 w-2.5 -translate-y-1/2"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+</label>
+
+</div>
+<ul role="list">
+  
+    
+
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/embeddinggemma-2" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma-2">
+        <span >embeddinggemma-2</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="EmbeddingGemma 2 is a multimodal embedding model from Google built on the Gemma 4 architecture.">EmbeddingGemma 2 is a multimodal embedding model from Google built on the Gemma 4 architecture.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">vision</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">audio</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">270m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">440m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">570m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">740m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="71,774 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >71.8K</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/embeddinggemma" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma">
+        <span >embeddinggemma</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="EmbeddingGemma is a 300M parameter embedding model from Google.">EmbeddingGemma is a 300M parameter embedding model from Google.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">300m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="2,554,984 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >2.6M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/nomic-embed-text-v2-moe" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="nomic-embed-text-v2-moe">
+        <span >nomic-embed-text-v2-moe</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="nomic-embed-text-v2-moe is a multilingual MoE text embedding model that excels at multilingual retrieval.">nomic-embed-text-v2-moe is a multilingual MoE text embedding model that excels at multilingual retrieval.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="1,111,519 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >1.1M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/nomic-embed-text" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="nomic-embed-text">
+        <span >nomic-embed-text</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="A high-performing open embedding model with a large token context window.">A high-performing open embedding model with a large token context window.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="91,961,799 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >92M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/qwen3-embedding" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="qwen3-embedding">
+        <span >qwen3-embedding</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Building upon the foundational models of the Qwen3 series, Qwen3 Embedding provides a comprehensive range of text embeddings models in various sizes">Building upon the foundational models of the Qwen3 series, Qwen3 Embedding provides a comprehensive range of text embeddings models in various sizes</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">0.6b</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">4b</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">8b</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="4,349,143 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >4.3M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/mxbai-embed-large" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="mxbai-embed-large">
+        <span >mxbai-embed-large</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="State-of-the-art large embedding model from mixedbread.ai">State-of-the-art large embedding model from mixedbread.ai</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">335m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="16,017,801 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >16M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/all-minilm" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="all-minilm">
+        <span >all-minilm</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Embedding models on very large sentence level datasets.">Embedding models on very large sentence level datasets.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">22m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">33m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="3,782,087 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >3.8M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/snowflake-arctic-embed" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="snowflake-arctic-embed">
+        <span >snowflake-arctic-embed</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="A suite of text embedding models by Snowflake, optimized for performance.">A suite of text embedding models by Snowflake, optimized for performance.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">22m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">33m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">110m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">137m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">335m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="3,161,244 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >3.2M</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/snowflake-arctic-embed2" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="snowflake-arctic-embed2">
+        <span >snowflake-arctic-embed2</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Snowflake&#39;s frontier embedding model. Arctic Embed 2.0 adds multilingual support without sacrificing English performance or scalability.">Snowflake&#39;s frontier embedding model. Arctic Embed 2.0 adds multilingual support without sacrificing English performance or scalability.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">568m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="473,289 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >473.3K</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/granite-embedding" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="granite-embedding">
+        <span >granite-embedding</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="The IBM Granite Embedding 30M and 278M models models are text-only dense biencoder embedding models, with 30M available in English only and 278M serving multilingual use cases.">The IBM Granite Embedding 30M and 278M models models are text-only dense biencoder embedding models, with 30M available in English only and 278M serving multilingual use cases.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">30m</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">278m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="396,603 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >396.6K</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/bge-large" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="bge-large">
+        <span >bge-large</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Embedding model from BAAI mapping texts to vectors.">Embedding model from BAAI mapping texts to vectors.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">335m</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="294,342 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >294.3K</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/library/exaone3.5" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="exaone3.5">
+        <span >exaone3.5</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="EXAONE 3.5 is a collection of instruction-tuned bilingual (English and Korean) generative models ranging from 2.4B to 32B parameters, developed and released by LG AI Research. ">EXAONE 3.5 is a collection of instruction-tuned bilingual (English and Korean) generative models ranging from 2.4B to 32B parameters, developed and released by LG AI Research. </p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60">
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">2.4b</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">7.8b</span>
+        <span  class="inline-flex items-center rounded-md bg-[#ddf4ff] px-2 py-0.5 text-xs font-medium text-blue-600 sm:text-[13px]">32b</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="583,196 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >583.2K</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/turintech/embeddinggemma-2-artemis" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma-2-artemis">
+        <span >turintech/embeddinggemma-2-artemis</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Compact text embeddings: 768-dimensional vectors, with a 156.94 MB default and a 182.04 MB alternative.">Compact text embeddings: 768-dimensional vectors, with a 156.94 MB default and a 182.04 MB alternative.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="27 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >27</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/oza6ut0ne/embeddinggemma-2" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma-2">
+        <span >oza6ut0ne/embeddinggemma-2</span>
+      </h2>
+      
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">vision</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="17 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >17</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/johnwaynelucas/embeddinggemma-2" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma-2">
+        <span >johnwaynelucas/embeddinggemma-2</span>
+      </h2>
+      
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">vision</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">audio</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="270 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >270</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/johnwaynelucas/embeddinggemma-2-gguf" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma-2-gguf">
+        <span >johnwaynelucas/embeddinggemma-2-gguf</span>
+      </h2>
+      
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="156 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >156</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/jmorgan/embeddinggemma-2" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="embeddinggemma-2">
+        <span >jmorgan/embeddinggemma-2</span>
+      </h2>
+      
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">vision</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="34 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >34</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/benjaminj/octen-embedding-8b" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="octen-embedding-8b">
+        <span >benjaminj/octen-embedding-8b</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Octen-Embedding-8B, #1 on the RTEB leaderboard. 4096-dim multilingual embeddings fine-tuned from Qwen3-Embedding-8B for retrieval (legal, finance, healthcare, code).">Octen-Embedding-8B, #1 on the RTEB leaderboard. 4096-dim multilingual embeddings fine-tuned from Qwen3-Embedding-8B for retrieval (legal, finance, healthcare, code).</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="19 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >19</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/milkey/wemm-embedding-2b" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="wemm-embedding-2b">
+        <span >milkey/wemm-embedding-2b</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="WeMM-Embedding-2B is a universal multimodal embedding model built on Qwen3.5.">WeMM-Embedding-2B is a universal multimodal embedding model built on Qwen3.5.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="447 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >447</span></span>
+    
+  </a>
+</li>
+
+
+  
+<li  class="border-b border-black/[0.08]">
+  <a href="/RizwanMalik/qwen3-vl-embedding-2b" class="group flex items-start justify-between gap-6 py-6">
+    <div class="min-w-0 flex-1">
+      <h2 class="truncate text-xl font-medium leading-7 tracking-tight underline-offset-4 group-hover:underline" title="qwen3-vl-embedding-2b">
+        <span >RizwanMalik/qwen3-vl-embedding-2b</span>
+      </h2>
+      <p class="mt-1 max-w-2xl truncate text-sm leading-6 text-black/60" title="Qwen embedding model">Qwen embedding model</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px] leading-5 text-black/60"><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">vision</span><span  class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 sm:text-[13px]">embedding</span>
+      </div>
+    </div>
+    
+    <span class="inline-flex shrink-0 items-center gap-1.5 text-[13px] leading-7 tabular-nums text-black/60" title="421 downloads"><svg class="h-[1.15em] w-[1.15em] flex-none" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg><span >421</span></span>
+    
+  </a>
+</li>
+
+
+
+<li
+  hx-get="/search?page=2&q=embed"
+  hx-trigger="revealed"
+  hx-swap="outerHTML"
+  hx-target="this"
+  hx-include="[name=c], [name=o], [name=s]"
+  hx-replace-url="false"
+></li>
+
+
+  
+</ul>
+
+    </div>
+  </form>
+</main>
+<style>
+  #form-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    height: 16px;
+    width: 16px;
+    background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'><line x1='18' y1='6' x2='6' y2='18'></line><line x1='6' y1='6' x2='18' y2='18'></line></svg>");
+    background-size: 16px 16px;
+    cursor: pointer;
+    margin-right: 5px;
+  }
+</style>
+
+
+    
+      
+<footer class="mt-auto underline-offset-4">
+  <div class="flex flex-col items-center justify-center px-4 py-4 md:flex-row md:justify-between md:px-6 md:py-3.5 lg:px-gutter">
+    <div class="order-2 mt-2 text-sm text-neutral-500 md:order-1 md:mt-0 md:text-xs">&copy; 2026 Ollama</div>
+    <ul data-footer-links class="order-1 flex flex-wrap items-center justify-center text-sm text-neutral-500 md:order-2 md:space-x-6 md:text-xs">
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="/blog" class="hover:underline">Blog</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="https://docs.ollama.com" class="hover:underline">Docs</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="https://github.com/ollama/ollama" class="hover:underline">GitHub</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="https://discord.com/invite/ollama" class="hover:underline">Discord</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="https://twitter.com/ollama" class="hover:underline">X (Twitter)</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="mailto:support@ollama.com" class="hover:underline">Support</a>
+      </li>
+      <li class="mx-2 my-1 md:hidden">
+        <a href="https://lu.ma/ollama" class="hover:underline">Meetups</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="https://jobs.ashbyhq.com/ollama" class="hover:underline">Careers</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="/privacy" class="hover:underline">Privacy</a>
+      </li>
+      <li class="mx-2 my-1 md:mx-0 md:my-0">
+        <a href="/terms" class="hover:underline">Terms</a>
+      </li>
+    </ul>
+  </div>
+</footer>
+
+    
+
+    
+    <span class="hidden" id="end_of_template"></span>
+  </body>
+</html>
