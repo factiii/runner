@@ -190,39 +190,53 @@ export function lazyVaultDb(
   open: () => Promise<VaultDb>,
   idleMs: number
 ): VaultDb & { isOpen(): boolean } {
-  let current: Promise<VaultDb> | null = null;
+  // The process held now, and the interactive transactions the driver holds
+  // open in it: several calls apart, so nothing is busy between them, and
+  // the idle close must not end the process under one. The count is the
+  // process's own, so one that died takes its transactions with it.
+  type Held = { db: Promise<VaultDb>; openTx: number };
+  let current: Held | null = null;
   let timer: NodeJS.Timeout | null = null;
   let busy = 0;
-  // Interactive transactions the driver holds open in the process: several
-  // calls apart, so nothing is busy between them, and the idle close must
-  // not end the process under one.
-  let openTx = 0;
 
   const idle = () => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
-      if (busy > 0 || openTx > 0 || !current) return;
+      if (busy > 0 || !current || current.openTx > 0) return;
       const closing = current;
       current = null;
-      void closing.then((db) => db.close()).catch(() => undefined);
+      void closing.db.then((db) => db.close()).catch(() => undefined);
     }, idleMs);
     timer.unref();
   };
 
-  const use = async <T>(fn: (db: VaultDb) => Promise<T>): Promise<T> => {
-    busy += 1;
-    try {
+  /** The process to ask, started when there is none. Only the one a call
+   *  looked at is let go: another call may have started its replacement
+   *  while this one waited, and that one is shared, not started again. */
+  const hold = async (): Promise<Held> => {
+    const held = current;
+    if (held) {
       // A database process that died (killed, out of memory) is started
       // again on the next call, not left failing until the idle close.
-      if (current && !(await current.catch(() => null))?.alive()) current = null;
-      if (!current) {
-        current = open();
-        // A failed start is not kept: the next call tries again.
-        current.catch(() => {
-          current = null;
-        });
-      }
-      return await fn(await current);
+      if ((await held.db.catch(() => null))?.alive()) return held;
+      if (current === held) current = null;
+    }
+    if (!current) {
+      const opening: Held = { db: open(), openTx: 0 };
+      current = opening;
+      // A failed start is not kept: the next call tries again.
+      opening.db.catch(() => {
+        if (current === opening) current = null;
+      });
+    }
+    return current;
+  };
+
+  const use = async <T>(fn: (db: VaultDb, held: Held) => Promise<T>): Promise<T> => {
+    busy += 1;
+    try {
+      const held = await hold();
+      return await fn(await held.db, held);
     } finally {
       busy -= 1;
       idle();
@@ -233,21 +247,24 @@ export function lazyVaultDb(
     query: <T>(sql: string, params?: unknown[]) =>
       use((db) => db.query<T>(sql, params)),
     batch: (statements) => use((db) => db.batch(statements)),
-    driver: async (op) => {
-      try {
-        const value = await use((db) => db.driver(op));
-        if (op.op === 'begin') openTx += 1;
-        return value;
-      } finally {
-        // Ended either way: a failed commit has no transaction left behind.
-        if (op.op === 'commit' || op.op === 'rollback') openTx = Math.max(0, openTx - 1);
-      }
-    },
+    driver: (op) =>
+      use(async (db, held) => {
+        try {
+          const value = await db.driver(op);
+          if (op.op === 'begin') held.openTx += 1;
+          return value;
+        } finally {
+          // Ended either way: a failed commit has no transaction left behind.
+          if (op.op === 'commit' || op.op === 'rollback') {
+            held.openTx = Math.max(0, held.openTx - 1);
+          }
+        }
+      }),
     close: async () => {
       if (timer) clearTimeout(timer);
       const closing = current;
       current = null;
-      if (closing) await (await closing.catch(() => null))?.close();
+      if (closing) await (await closing.db.catch(() => null))?.close();
     },
     alive: () => true,
     // For the tests: whether a database process is held now.

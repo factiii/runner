@@ -415,6 +415,37 @@ describe('token keeper', () => {
     assert.deepEqual(t.world.refreshed, [false, false, true]);
   });
 
+  it('an expired token said while a pass is going is refreshed when it ends, not dropped', async () => {
+    const t = setup({
+      authToken: expiring(30 * DAY),
+      refreshToken: 'frr_token0',
+      refreshAnswers: [pair(1)],
+      savedAnswers: [{ ok: true }, { ok: true }]
+    });
+    // Not due by this clock: the connect's pass only confirms, and is still
+    // waiting on that when the server says the token expired.
+    const pass = t.keeper.run(false);
+    await t.keeper.run(true);
+    await pass;
+    assert.deepEqual(t.world.refreshCalls, [{ refreshToken: 'frr_token0' }]);
+    assert.equal(t.config.authToken, pair(1).token);
+  });
+
+  it('a pass that refreshed answers a force asked meanwhile: no second refresh', async () => {
+    const t = setup({
+      authToken: expiring(30 * DAY),
+      refreshToken: 'frr_token0',
+      refreshAnswers: [pair(1), pair(2)],
+      savedAnswers: [{ ok: true }, { ok: true }]
+    });
+    t.world.now = T0 + 2 * DAY;
+    const pass = t.keeper.run(false);
+    await t.keeper.run(true);
+    await pass;
+    assert.equal(t.world.refreshCalls.length, 1);
+    assert.equal(t.file()?.refreshToken, 'frr_token1');
+  });
+
   it('restart after a save that was never confirmed: confirms once, without a refresh', async () => {
     const t = setup({
       authToken: expiring(30 * DAY),

@@ -31,20 +31,25 @@ CAPABILITIES THAT RESEMBLE MALWARE
    over their own Tailscale network, which the runner neither installs nor
    starts.
 
-3. Reverse tunnels (vendor/frpc-*)
-   The package ships the frp client (https://github.com/fatedier/frp),
-   downloaded unmodified from its official release by scripts/fetch-frpc.sh.
-   The runner uses it only when an agent or the owner shares a local dev
-   server as a preview link, and only to Factiii's own tunnel server, with
-   the runner's own access token. Each tunnel is listed in the app and can be
-   stopped.
+3. Reverse tunnels (frpc, downloaded on first use)
+   The package does not contain the frp client (https://github.com/fatedier/frp).
+   The first time the owner or an agent shares a local dev server as a
+   preview link (`factiii-expose`), the runner downloads frp's official
+   release from GitHub, checks its SHA-256 against the value frp publishes
+   (pinned in the runner's source), and refuses it if they differ. A runner
+   that never shares a port never has frpc. Tunnels go only to Factiii's own
+   tunnel server, with the runner's own access token. Each tunnel is listed
+   in the app and can be stopped.
 
 4. Starting at login (persistence)
-   Only when the owner runs `factiii-runner service install` does the runner
-   install a per-user login service (a LaunchAgent on macOS, a systemd user
-   unit on Linux, a scheduled task on Windows), so it is available after a
-   reboot. `factiii-runner service
-   remove` deletes it.
+   Off by default. Only the person at the machine turns it on, in its own
+   terminal: by answering yes to setup's "Start this runner at login? [y/N]"
+   (Enter alone means no), or by running `factiii-runner service install`.
+   Either installs one per-user login service (a LaunchAgent on macOS, a
+   systemd user unit on Linux, a scheduled task on Windows), so the runner is
+   available after a reboot. The app and the account can see it and turn it
+   off, never on: a request to install it from anywhere but that terminal is
+   refused. `factiii-runner service remove` deletes it.
    The runner lists the LaunchAgents folder to find and manage its own
    entries, and reads the owner's other agents there only to name the
    services in item 10. It never adds, changes or removes another agent.

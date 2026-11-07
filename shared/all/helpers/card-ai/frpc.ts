@@ -1,7 +1,4 @@
 import { createHash } from 'crypto';
-import { existsSync } from 'fs';
-import fs from 'fs/promises';
-import path from 'path';
 
 import type { ExposedPort } from '../../domains/electron';
 import type { ExecTarget } from '../board-agent-core/exec';
@@ -36,32 +33,6 @@ function frpcPaths(target: ExecTarget) {
     envFile: `${root}/.factiii-frp-env`,
     runDir: `${root}/.frpc`
   };
-}
-
-/** The vendored binary for THIS host. No `uname` round trip: the target is
- *  this machine now, so node already knows. */
-function vendoredBinaryName(): string {
-  const cpu = process.arch === 'x64' ? 'amd64' : process.arch;
-  return `frpc-${process.platform}-${cpu}`;
-}
-
-/** Stage the vendored frpc binary into the session's bin dir. */
-async function installFrpcBinary(target: ExecTarget): Promise<void> {
-  const p = frpcPaths(target);
-  const binaryName = vendoredBinaryName();
-  const src = path.join(__dirname, '..', 'vendor', binaryName);
-  if (!existsSync(src)) {
-    throw new Error(
-      `Vendored frpc missing (${src}). Run apps/runner/scripts/fetch-frpc.sh.`
-    );
-  }
-  // Already staged: a 16MB base64 round trip per session start is pure waste.
-  const staged = await fs.stat(p.binary).catch(() => null);
-  const source = await fs.stat(src);
-  if (staged?.size === source.size) return;
-  await fs.mkdir(p.binDir, { recursive: true });
-  await fs.copyFile(src, p.binary);
-  await fs.chmod(p.binary, 0o755);
 }
 
 /** The skill's name, which is also its directory under the skills root. */
@@ -153,7 +124,9 @@ export async function installFrpcHarness(params: {
   const { target, taskId } = params;
   const p = frpcPaths(target);
 
-  await installFrpcBinary(target);
+  // No frpc here: `factiii-expose` downloads it the first time a tunnel is
+  // opened (scripts.ts frpcDownload), so a session that never shares a port
+  // never has it.
 
   const envLines = frpcEnvLines(taskId);
 
@@ -161,7 +134,8 @@ export async function installFrpcHarness(params: {
     envFile: p.envFile,
     runDir: p.runDir,
     secretsBin: `${p.binDir}/${SECRETS_BIN}`,
-    secretsSock: secretsSocketPath(target.paths.root)
+    secretsSock: secretsSocketPath(target.paths.root),
+    frpcBinary: p.binary
   };
   await target.writeFile(p.expose, frpcExposeScript(scriptPaths));
   await target.writeFile(p.unexpose, frpcUnexposeScript(scriptPaths));

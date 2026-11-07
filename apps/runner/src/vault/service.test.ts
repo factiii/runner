@@ -219,4 +219,70 @@ describe('lazyVaultDb', () => {
     assert.equal(opens, 3);
     await lazy.close();
   });
+
+  /** A fake process per open, each with its own life. */
+  const fakes = () => {
+    const made: { alive: boolean }[] = [];
+    const openFake = async (): Promise<VaultDb> => {
+      const life = { alive: true };
+      made.push(life);
+      return {
+        query: async <T>() => [] as T[],
+        batch: async () => [],
+        driver: async () => undefined,
+        close: async () => {
+          life.alive = false;
+        },
+        alive: () => life.alive
+      };
+    };
+    return { made, openFake };
+  };
+
+  it('calls at once on a process that died start exactly one new one', async () => {
+    const { made, openFake } = fakes();
+    const lazy = lazyVaultDb(openFake, 1000);
+    await lazy.query('a');
+    made[0].alive = false;
+    await Promise.all([lazy.query('b'), lazy.query('c'), lazy.query('d')]);
+    assert.equal(made.length, 2);
+    await lazy.query('e');
+    assert.equal(made.length, 2);
+    await lazy.close();
+  });
+
+  it('a start that failed under calls waiting on it is started again once', async () => {
+    const { made, openFake } = fakes();
+    let opens = 0;
+    const lazy = lazyVaultDb(async () => {
+      opens += 1;
+      if (opens === 1) {
+        await new Promise((r) => setTimeout(r, 5));
+        throw new Error('did not start');
+      }
+      return openFake();
+    }, 1000);
+    const first = lazy.query('a');
+    const waiting = Promise.all([lazy.query('b'), lazy.query('c')]);
+    await assert.rejects(first, /did not start/);
+    // b and c joined the failed start: each tries again, and they share it.
+    await waiting;
+    await lazy.query('d');
+    assert.equal(made.length, 1);
+    await lazy.close();
+  });
+
+  it('a process that died takes its open transactions with it', async () => {
+    const { made, openFake } = fakes();
+    const lazy = lazyVaultDb(openFake, 20);
+    await lazy.driver({ op: 'begin' });
+    await new Promise((r) => setTimeout(r, 60));
+    // Under a transaction: not closed when idle.
+    assert.equal(lazy.isOpen(), true);
+    made[0].alive = false;
+    await lazy.query('a');
+    assert.equal(made.length, 2);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(lazy.isOpen(), false);
+  });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@factiii/runner",
-  "version": "0.37.0",
+  "version": "0.39.0",
   "description": "Factiii Runner, run Board AI agents on a machine you control. Pairs with the Factiii web/mobile clients over WebRTC.",
   "license": "ISC",
   "homepage": "https://factiii.com",
@@ -38,10 +38,6 @@
     "native/",
     "plugin/",
     "embedder/",
-    "vendor/frpc-linux-amd64",
-    "vendor/frpc-linux-arm64",
-    "vendor/frpc-darwin-amd64",
-    "vendor/frpc-darwin-arm64",
     "vendor/tmux-resurrect/",
     "README.md",
     "DISCLOSURE"
@@ -57,10 +53,9 @@
     "dev:status": "FACTIII_RUNNER_DIR=$HOME/.factiii-runner-dev tsx src/cli.ts status",
     "dev:cli": "FACTIII_RUNNER_DIR=$HOME/.factiii-runner-dev tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "fetch:frpc": "bash scripts/fetch-frpc.sh",
     "bundle:embedder": "cd ../../services/embedder && cp app.py clip_tokenizer.py text_tokenizer.py convert_text.py convert_clip.py requirements.txt ../../apps/runner/embedder/",
-    "pack": "node build.mjs && pnpm bundle:embedder && bash scripts/fetch-frpc.sh && bash scripts/fetch-tmux-resurrect.sh && pnpm pack",
-    "prepublishOnly": "node build.mjs && pnpm bundle:embedder && bash scripts/fetch-frpc.sh && bash scripts/fetch-tmux-resurrect.sh",
+    "pack": "node build.mjs && pnpm bundle:embedder && bash scripts/fetch-tmux-resurrect.sh && pnpm pack",
+    "prepublishOnly": "node build.mjs && pnpm bundle:embedder && bash scripts/fetch-tmux-resurrect.sh",
     "fetch:resurrect": "bash scripts/fetch-tmux-resurrect.sh"
   },
   "dependencies": {

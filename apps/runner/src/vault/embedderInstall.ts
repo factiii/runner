@@ -19,8 +19,9 @@ import { toolDirs } from '@shared/all/helpers/board-agent-core/host-env';
 // install stops and says the command that adds it. torch and the downloads
 // are only for the conversion and are deleted after it.
 
-/** Raise to make every runner build the embedder again. */
-const EMBEDDER_VERSION = 1;
+/** Raise to make every runner build the embedder again. 2 (2026-11-07):
+ *  Pillow 11.1.0 -> 13.0.0, so installs from before it get the patched one. */
+export const EMBEDDER_VERSION = 2;
 /** The Linux machines the ONNX build was proven on. */
 const LINUX_ARCHES = new Set(['arm64', 'x64']);
 const PYTHON = '3.12';

@@ -8,6 +8,7 @@ import {
   buildPlan,
   conversionDone,
   EMBEDDER_ARTIFACTS,
+  EMBEDDER_VERSION,
   embedderInstalled,
   embedderPaths,
   embedderRuntime,
@@ -82,11 +83,14 @@ describe('embedder install', () => {
     const paths = embedderPaths(tmp());
     fs.mkdirSync(path.dirname(paths.python), { recursive: true });
     fs.writeFileSync(paths.python, '');
-    fs.writeFileSync(paths.stamp, '{"version":1}');
+    fs.writeFileSync(paths.stamp, JSON.stringify({ version: EMBEDDER_VERSION }));
     for (const name of EMBEDDER_ARTIFACTS.onnx) fs.writeFileSync(path.join(paths.root, name), '');
     assert.equal(embedderInstalled(paths, 'onnx'), true);
     assert.equal(embedderInstalled(paths, 'coreml'), false, 'a Mac needs the .mlmodelc');
     assert.equal(embedderInstalled(paths, null), false);
+    // An install from before the last EMBEDDER_VERSION raise builds again.
+    fs.writeFileSync(paths.stamp, JSON.stringify({ version: EMBEDDER_VERSION - 1 }));
+    assert.equal(embedderInstalled(paths, 'onnx'), false);
   });
 
   it('serves Linux without Core ML or pyobjc, and keeps torch off PyPI there', () => {

@@ -22,7 +22,7 @@ import { renderParts } from './partsCli';
 import { CONFIG_DIR } from './paths';
 import { createPartsManager } from './runnerParts';
 import { storeStatus } from './secureStore';
-import { SECRETS_AFTER_RESTART, serviceStatus } from './service';
+import { SECRETS_AFTER_RESTART, serviceFiles, serviceStatus } from './service';
 
 // All shell-out helpers below take an argv array (no shell), so paths with
 // spaces and untrusted-looking strings can't break the command or inject.
@@ -87,13 +87,21 @@ export async function setup(serverUrl: string): Promise<void> {
   console.log(`${SECRETS_AFTER_RESTART}\n`);
 }
 
-/** Offer the always-on service. Resolves true when it started the runner. */
+/** Offer the always-on service. Resolves true when it started the runner.
+ *  Off unless the person at this terminal types yes: it says exactly what it
+ *  adds to the machine and how to take it out again, and Enter alone skips
+ *  it. Only here and `service install` can turn it on (runnerService.ts). */
 async function offerService(): Promise<boolean> {
   const spec = serviceSpec();
   if (!spec || !process.stdin.isTTY) return false;
   const status = await serviceStatus(spec, serviceIo);
   if (status.installed !== 'no') return status.running;
-  if (!(await confirm('Keep this runner running after a restart? [Y/n] '))) {
+  const { definition } = serviceFiles(spec);
+  console.log('\n=== Start at login (optional) ===\n');
+  console.log(
+    `  The runner can start when you log in and restart if it crashes. That adds a\n  login item for your user only (${definition}); no admin rights.\n  Remove it any time with: factiii-runner service remove\n`
+  );
+  if (!(await confirm('Start this runner at login? [y/N] ', true))) {
     console.log('Later: factiii-runner service install');
     return false;
   }

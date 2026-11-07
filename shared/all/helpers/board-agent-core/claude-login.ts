@@ -27,6 +27,10 @@ export class ClaudeLoginFlow {
   private inFlight = false;
   // Output offset at code submission; the exchange outcome is scanned after it.
   private submitMark = -1;
+  // Which start() this flow is on. The flow is reused, and the login session's
+  // name is the same every time: an earlier run's late close, error or
+  // verification checks it and leaves a newer run alone.
+  private attempt = 0;
 
   constructor(
     private spaceSlug: string,
@@ -46,6 +50,8 @@ export class ClaudeLoginFlow {
     if (this.active) throw new Error('A Claude sign-in is already running.');
     this.reset();
     this.inFlight = true;
+    const attempt = ++this.attempt;
+    const current = () => attempt === this.attempt;
 
     // Created before any await so cancel()/fail() can always release start();
     // the noop catch avoids an unhandled rejection mid-setup.
@@ -62,14 +68,24 @@ export class ClaudeLoginFlow {
         target: this.target,
         cmd: ['claude', 'auth', 'login', '--claudeai']
       });
+      // Cancelled and started again meanwhile: the newer start owns the
+      // login session now, and this one touches nothing of it.
+      if (!current()) throw new Error('Claude sign-in cancelled.');
       this.session = session;
 
-      session.onData((chunk: Buffer) => this.onData(chunk));
-      session.onError(() => this.fail('Claude sign-in connection dropped.'));
-      session.onClose(() => void this.onClose());
+      session.onData((chunk: Buffer) => {
+        if (current()) this.onData(chunk, attempt);
+      });
+      session.onError(() => {
+        if (current()) this.fail('Claude sign-in connection dropped.');
+      });
+      session.onClose(() => {
+        if (current()) void this.onClose(attempt);
+      });
     } catch (err) {
-      // Cancelled mid-setup: report the cancel, not the induced error.
-      if (this.settled) throw new Error('Claude sign-in cancelled.');
+      // Cancelled mid-setup (or cancelled and started again): report the
+      // cancel, not the induced error.
+      if (this.settled || !current()) throw new Error('Claude sign-in cancelled.');
       this.settled = true;
       this.urlResolver = null;
       this.urlRejecter = null;
@@ -105,7 +121,7 @@ export class ClaudeLoginFlow {
     await this.cleanup();
   }
 
-  private onData(chunk: Buffer): void {
+  private onData(chunk: Buffer, attempt: number): void {
     this.output += this.strip(chunk.toString('utf-8'));
     if (this.output.length > 200_000) {
       const removed = this.output.length - 100_000;
@@ -137,7 +153,7 @@ export class ClaudeLoginFlow {
     // settle as soon as either signal shows, verifying the credentials file.
     if (/logged in|login successful/i.test(afterSubmit)) {
       this.settled = true;
-      void this.verifyAndComplete('');
+      void this.verifyAndComplete('', attempt);
       return;
     }
 
@@ -149,7 +165,7 @@ export class ClaudeLoginFlow {
 
   // Process ended (or success was printed): the CLI's own auth status is the
   // ground truth for whether the sign-in worked.
-  private async verifyAndComplete(failTail: string): Promise<void> {
+  private async verifyAndComplete(failTail: string, attempt: number): Promise<void> {
     const ok = await loginCredentialsExist('claude', this.target);
     if (ok) {
       try {
@@ -158,6 +174,9 @@ export class ClaudeLoginFlow {
         // best-effort: without the marker the wizard just shows once
       }
     }
+    // Started again while this was checked: the cleanup would kill the new
+    // run's session (same name), and this answer is no longer the one asked.
+    if (attempt !== this.attempt) return;
     await this.cleanup();
     this.onDone(
       ok
@@ -169,7 +188,7 @@ export class ClaudeLoginFlow {
     );
   }
 
-  private async onClose(): Promise<void> {
+  private async onClose(attempt: number): Promise<void> {
     if (this.settled) return;
     // Prefer the CLI's own error line over a raw output tail.
     const errLine = this.output
@@ -184,7 +203,7 @@ export class ClaudeLoginFlow {
       return;
     }
     this.settled = true;
-    await this.verifyAndComplete(tail);
+    await this.verifyAndComplete(tail, attempt);
   }
 
   private fail(message: string): void {

@@ -244,9 +244,15 @@ function isTerminal(): boolean {
 }
 
 /** `[Y/n]`: a bare Enter is yes. */
-export async function confirm(question: string): Promise<boolean> {
+/** Yes or no. Enter alone means yes, unless `defaultNo`: then only a typed
+ *  y or yes does. */
+export async function confirm(
+  question: string,
+  defaultNo = false
+): Promise<boolean> {
   const answer = (await prompt(question)).toLowerCase();
-  return answer === '' || answer === 'y' || answer === 'yes';
+  if (answer === '') return !defaultNo;
+  return answer === 'y' || answer === 'yes';
 }
 
 export function doctorHost(target: ReturnType<typeof hostTarget>): DoctorHost {

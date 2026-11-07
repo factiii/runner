@@ -29,7 +29,6 @@ apps/runner/probe/ipcChild.ts
 apps/runner/probe/portTypes.ts
 apps/runner/probe/probe.ts
 apps/runner/probe/rss.ts
-apps/runner/scripts/fetch-frpc.sh
 apps/runner/scripts/fetch-tmux-resurrect.sh
 apps/runner/scripts/public-mirror.mjs
 apps/runner/src/access.test.ts
@@ -107,6 +106,7 @@ apps/runner/src/runnerToken.ts
 apps/runner/src/secureActions.ts
 apps/runner/src/secureFile.ts
 apps/runner/src/secureStore.ts
+apps/runner/src/selfUpdate.test.ts
 apps/runner/src/selfUpdate.ts
 apps/runner/src/serverReadinessIo.ts
 apps/runner/src/service.test.ts

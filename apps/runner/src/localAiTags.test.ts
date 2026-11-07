@@ -204,6 +204,20 @@ describe('pull', () => {
     await settled(tags);
   });
 
+  it('two requests at once: one job runs, the other is refused', async () => {
+    const { tags, release } = fake({});
+    // Both pass the first check before either job is set.
+    const both = await Promise.allSettled([
+      tags.act({ action: 'pull', tag: 'llama3.2:1b' }),
+      tags.act({ action: 'pull', tag: 'phi3:mini' })
+    ]);
+    assert.deepEqual(both.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+    const refused = both.find((r) => r.status === 'rejected');
+    assert.match(String(refused?.status === 'rejected' && refused.reason), /still going/);
+    release();
+    await settled(tags);
+  });
+
   it('fails the job when the pull fails', async () => {
     const { tags, release } = fake({ failPull: true });
     await tags.act({ action: 'pull', tag: 'llama3.2:1b' });

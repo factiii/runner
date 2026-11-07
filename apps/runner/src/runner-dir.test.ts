@@ -33,7 +33,10 @@ if (args[0] === 'find-generic-password') {
 }
 `;
 
-describe('FACTIII_RUNNER_DIR', () => {
+// macOS only, as connection-storage.test.ts: the fake is `security`, and on
+// Linux the runner's keychain is secret-tool, which a CI box (the public
+// mirror's --verify) does not have, so the probe refuses to write in plain text.
+describe('FACTIII_RUNNER_DIR', { skip: process.platform !== 'darwin' }, () => {
   it('keeps every file and the Keychain item away from the default runner', () => {
     // /tmp, not os.tmpdir(): macOS's per-user tmpdir is too long for a runner
     // dir (the socket limit this dir is checked against).

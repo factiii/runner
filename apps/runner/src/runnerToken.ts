@@ -256,6 +256,8 @@ export function createTokenKeeper(deps: TokenKeeperDeps): {
   let saved = true;
   let confirmed = false;
   let busy = false;
+  /** A forced run asked for while `busy`: run when the pass going ends. */
+  let forcePending = false;
   let refreshRetryAt = 0;
   let confirmRetryAt = 0;
 
@@ -296,17 +298,17 @@ export function createTokenKeeper(deps: TokenKeeperDeps): {
     confirmRetryAt = now() + RUNNER_TOKEN_REFRESH_RETRY_MS;
   };
 
-  const run = async (force: boolean): Promise<void> => {
-    if (busy) return;
-    busy = true;
+  /** One pass: save, confirm, and refresh when due (or forced). True when
+   *  it traded the refresh token for a new pair. */
+  const once = async (force: boolean): Promise<boolean> => {
     try {
       if (!saved) saved = save();
       await confirm();
 
       if (!force) {
-        if (now() < refreshRetryAt) return;
-        if (!tokenRefreshDue(config.authToken, now())) return;
-        if (!saved) return;
+        if (now() < refreshRetryAt) return false;
+        if (!tokenRefreshDue(config.authToken, now())) return false;
+        if (!saved) return false;
       }
       let res: unknown;
       try {
@@ -314,7 +316,7 @@ export function createTokenKeeper(deps: TokenKeeperDeps): {
       } catch {
         // No answer: a server from before the event, or a dropped connection.
         refreshRetryAt = now() + RUNNER_TOKEN_REFRESH_RETRY_MS;
-        return;
+        return false;
       }
       if (!isUsableRefresh(res, config.authToken)) {
         const refusal = refreshRefusal(res);
@@ -324,7 +326,7 @@ export function createTokenKeeper(deps: TokenKeeperDeps): {
           (refusal.retry
             ? RUNNER_TOKEN_REFRESH_BUSY_RETRY_MS
             : RUNNER_TOKEN_REFRESH_RETRY_MS);
-        return;
+        return false;
       }
       // In place: see `config` above. The refresh token stays in this closure.
       Object.assign(config, applyRefreshedToken(config, res.token));
@@ -341,13 +343,36 @@ export function createTokenKeeper(deps: TokenKeeperDeps): {
         } h.`
       );
       if (res.reconnect) deps.onRefreshed(true);
+      return true;
     } catch (err) {
       // Never let a refresh take the daemon down: it is called unawaited.
       log(
         `[token] Refresh failed: ${err instanceof Error ? err.message : String(err)}`
       );
       refreshRetryAt = now() + RUNNER_TOKEN_REFRESH_RETRY_MS;
+      return false;
+    }
+  };
+
+  const run = async (force: boolean): Promise<void> => {
+    if (busy) {
+      // The server said the token expired while a pass was going (one the
+      // heartbeat or the connect started): kept for when it ends, not
+      // dropped.
+      if (force) forcePending = true;
+      return;
+    }
+    busy = true;
+    try {
+      const refreshed = await once(force);
+      // Not after a pass that refreshed: the new token is the answer, and
+      // forcing again would spend the refresh token it just got.
+      if (forcePending && !refreshed) {
+        forcePending = false;
+        await once(true);
+      }
     } finally {
+      forcePending = false;
       busy = false;
     }
   };

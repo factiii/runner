@@ -60,6 +60,8 @@ export function createDaemonNuke(opts: {
       if (busy) throw new Error(NUKE_ALREADY_RUNNING);
       const plan = await readNukePlan(opts.dir, opts.host);
       if (!parsed.data.confirm) return { plan, started: false };
+      // Again after the await: a second confirm may have begun one meanwhile.
+      if (busy) throw new Error(NUKE_ALREADY_RUNNING);
       busy = true;
       later(() => {
         void runNuke({

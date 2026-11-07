@@ -289,6 +289,50 @@ describe('PartsManager', () => {
     assert.deepEqual(after?.actions, ['remove']);
   });
 
+  it('two requests at once for one part: one runs, the other is refused as busy', async () => {
+    const { machine, calls } = fakeMachine(['claude']);
+    const manager = new PartsManager(machine);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // Both read the same list (Add offered) before either starts.
+      const results = await Promise.allSettled([
+        manager.act({ partId: 'claude', action: 'add' }),
+        manager.act({ partId: 'claude', action: 'add' })
+      ]);
+      assert.deepEqual(results.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+      const refused = results.find((r) => r.status === 'rejected');
+      assert.match(String(refused?.status === 'rejected' && refused.reason), /already busy/);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual(unhandled, []);
+      assert.equal(calls.filter((c) => c.startsWith('install')).length, 1);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('two requests at once for one module: the second is refused as busy', async () => {
+    const { machine } = fakeMachine(['vault-engine']);
+    const manager = new PartsManager(machine);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const results = await Promise.allSettled([
+        manager.act({ moduleId: 'private-vault', action: 'add' }),
+        manager.act({ moduleId: 'private-vault', action: 'add' })
+      ]);
+      assert.deepEqual(results.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+      const refused = results.find((r) => r.status === 'rejected');
+      assert.match(String(refused?.status === 'rejected' && refused.reason), /already busy/);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual(unhandled, []);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('refuses an unknown part and an action the part does not offer', async () => {
     const manager = new PartsManager(fakeMachine([]).machine);
     await assert.rejects(manager.act({ partId: 'docker', action: 'add' }));

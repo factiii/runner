@@ -114,9 +114,12 @@ export class LocalAiTags {
    *  refusal throws before anything runs. */
   async act(payload: unknown): Promise<ActResult> {
     const { action, tag } = localAiActSchema.parse(payload);
-    if (this.job?.state === 'running') {
-      throw new Error(`${ollamaTitle(this.job.tag)} is still going. Wait for it to finish.`);
-    }
+    const busy = () => {
+      if (this.job?.state === 'running') {
+        throw new Error(`${ollamaTitle(this.job.tag)} is still going. Wait for it to finish.`);
+      }
+    };
+    busy();
     const bin = await this.io.model.resolveBin();
     if (!bin) throw new Error('Ollama is not installed. Add Local AI first.');
     const held = this.io.installed().map(ollamaTagKey).includes(ollamaTagKey(tag));
@@ -125,6 +128,8 @@ export class LocalAiTags {
       if (held) throw new Error(`${ollamaTitle(tag)} is already on this runner.`);
       await this.assertFits(tag);
     }
+    // Again after the awaits: a second request may have begun a job meanwhile.
+    busy();
     const job: RunnerLocalAiJob = {
       action,
       tag,

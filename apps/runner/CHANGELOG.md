@@ -7,17 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<!-- Held: no npm publish while GHSA-9j83-qj34-g5vc stands (npm serves 0.27.0). -->
+## [0.39.0] - 2026-11-07
+
+<!-- npm deleted 0.33.0 to 0.37.0, and its automated review blocked 0.38.0 (staged 2026-11-07, still bundling frpc), so neither number can be used. 0.39.0 is the first release without the frpc binaries. It carries the unreleased changes plus the ones below. -->
 
 ### Added
 
+- **Updates and installs from GitHub while npm will not serve a release.** "Update" in the app installs npm's latest as before, unless the newest GitHub Release on github.com/factiii/runner is newer: then the runner looks that release up itself, downloads the tarball, checks it against the release's `.sha256` and installs that file. The app never chooses the version or where it comes from. `curl -fsSL https://factiii.com/runner.sh | sh` installs Node if needed and the newest release the same way, then pairs; setup asks before adding anything that starts at login. Re-running it updates a runner, which is how a runner on 0.27.0 gets past npm once.
 - **Remote connections and logs, for the runner's owner.** Two actions only the owner can call over their own link: `runnerConnections` lists each open link (account, transport, since when, open terminals), each board the runner serves, the running services (containers, pm2, LaunchAgents with what each one runs, listening ports), the embedder's health and the Vault ingest counts; `runnerLogs` returns the last lines (default 200, at most 2,000) of one of those services' logs, or the embedder's own output. A session summary sent to the owner names who started it. `factiii-runner status` prints `Runner id:` for Factiii Desktop. The apps hide the panel against an older runner. `DISCLOSURE` gains item 10.
 - **Short preview links.** `factiii-expose <port> <name>` prints `https://<name>-<tag>.dev.factiii.com`, where the tag is 6 hex of the session id's hash, instead of the whole session id.
 
 - **The IDE git panel writes, the GitHub Desktop way.** `bareGitAct` runs the panel's writes in a session's own worktree: include or exclude files and single lines or hunks (`git apply --cached`, never the working tree), discard, add to `.gitignore`, commit with summary and description (amend while unpushed; no co-author line), undo the newest unpushed commit, revert a commit, create (also from a commit), switch (bringing the changes, or leaving them stashed on the branch as `!!factiii-panel:<branch>`), rename and delete branches, merge into the current branch and abort a stopped merge or revert, fetch, pull, and push or publish, and restore or drop the panel's stash. It never commits, merges, reverts or pushes on the default branch (the space's main branch, and origin's HEAD if that differs), pushes only to the branch of the same name on origin (not the origin/main a session branch starts out tracking), never force pushes, and uses the GitHub connection's token through the existing one-shot helper. A panel showing any other folder only reads, and `bareGitStage` / `bareGitUnstage` now follow the same rule. `bareGitStatus` adds `panel` (what may be written, the branch on origin, last fetch, operation in progress, the stash), and `bareGitFileDiff` gives one file's staged and unstaged diffs. See `.specs/ide-git-panel.md`.
 
+### Changed
+
+- **frpc is no longer in the package.** The four `vendor/frpc-*` binaries (about 16 MB each) are gone, and the tarball drops from 24.8 MB to under 1 MB. The first `factiii-expose` on a machine downloads frp 0.66.0 from its official GitHub release and refuses it unless its SHA-256 matches the value frp publishes, which the runner pins (`card-ai/scripts.ts`). A runner that never shares a port never has frpc. `scripts/fetch-frpc.sh` is removed. `DISCLOSURE` item 3 says so.
+- **Starting at login is opt-in, and only at the machine.** Setup's prompt now explains the login item it adds and how to remove it, and defaults to no: `Start this runner at login? [y/N]`. The app can still see the service and turn it off, but no longer turn it on: `serviceInstall` from an app is refused with the command to run instead (`factiii-runner service install`, in a terminal on the machine). The apps' Turn on button is gone. `DISCLOSURE` item 4 says so.
+
 ### Fixed
 
+- **The vault embedder rebuilds on Pillow 13.** `EMBEDDER_VERSION` is 2: an embedder installed by an earlier runner reads as missing until it is reinstalled from Parts, and the reinstall takes Pillow `13.0.0` (was `11.1.0`, 110 advisories, 10 critical). Image vectors are unchanged: the embedder's preprocessing gives identical tensors under both versions.
 - **The old desktop view's helper is cleaned up.** A runner that once ran the desktop view (removed in 0.37.0 in favour of Screen Sharing over Tailscale) still had `~/.factiii-runner/helpers/FactiiiScreen.app`. On start the runner now removes it, resets the Screen Recording and Accessibility switches macOS kept for it (`tccutil reset ScreenCapture|Accessibility com.factiii.runner.screen`), removes `helpers/` if that leaves it empty, and logs each step under `[cleanup]`. It runs only while the bundle is there, so it happens once. That version installed no LaunchAgent or login item, so there is nothing else to remove.
 
 ## [0.37.0] - 2026-10-30

@@ -12,7 +12,70 @@ type FrpcScriptPaths = {
   secretsBin: string;
   /** That socket, for a shell that does not have FACTIII_SECRETS_SOCK. */
   secretsSock: string;
+  /** Where frpc lives once downloaded. Absent until the first tunnel. */
+  frpcBinary: string;
 };
+
+/** The frp release `factiii-expose` downloads on first use. The package no
+ *  longer ships frpc: a tunnel client inside an npm tarball reads as a hacking
+ *  tool to malware scanners, and most runners never open a tunnel. */
+export const FRP_VERSION = '0.66.0';
+
+/** SHA-256 of each platform's official tarball, as frp publishes them in
+ *  frp_sha256_checksums.txt for this release. A download that does not match
+ *  is refused, so the binary is upstream's, byte for byte. Bump with
+ *  FRP_VERSION. */
+export const FRP_SHA256: Record<string, string> = {
+  darwin_arm64:
+    'eb24c3c172a20056d83379496500b92600a992f68e8ae2e27d128ce1f36d7a92',
+  darwin_amd64:
+    '9558d55a9d8bc40e22018379ea645251f803f9e2d69e7a7a2fd1588f98f8ef43',
+  linux_amd64:
+    '317a17a7adac2e6bed2d7a83dc077da91ced0d110e1636373ece8ae5ac8b578b',
+  linux_arm64:
+    '196ddaa51b716c2e99aeb2916b0a2bf55bb317494c4acdcefab36c383de950ba'
+};
+
+/** `uname -s`-`uname -m` patterns for each of frp's builds. */
+const FRP_UNAME: Record<string, string> = {
+  darwin_arm64: 'Darwin-arm64',
+  darwin_amd64: 'Darwin-x86_64',
+  linux_amd64: 'Linux-x86_64',
+  linux_arm64: 'Linux-aarch64|Linux-arm64'
+};
+
+/** Shell that leaves frpc at FRPC, downloading it the first time a tunnel is
+ *  opened: frp's own GitHub release, checked against FRP_SHA256, nothing run
+ *  from it until the check passes. */
+function frpcDownload(): string {
+  const cases = Object.entries(FRP_UNAME)
+    .map(([plat, uname]) => `    ${uname}) PLAT=${plat}; SUM=${FRP_SHA256[plat]} ;;`)
+    .join('\n');
+  return `if [ ! -x "$FRPC" ]; then
+  case "$(uname -s)-$(uname -m)" in
+${cases}
+    *) echo "factiii-expose: no frp ${FRP_VERSION} build for $(uname -s) $(uname -m)" >&2; exit 1 ;;
+  esac
+  URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_\${PLAT}.tar.gz"
+  echo "factiii-expose: first tunnel here, so downloading the frp client (frpc ${FRP_VERSION}) from $URL" >&2
+  DL="$(mktemp -d)"
+  trap 'rm -rf "$DL"' EXIT
+  curl -fsSL "$URL" -o "$DL/frp.tar.gz"
+  GOT="$( (shasum -a 256 "$DL/frp.tar.gz" 2>/dev/null || sha256sum "$DL/frp.tar.gz") | cut -d' ' -f1)"
+  if [ "$GOT" != "$SUM" ]; then
+    echo "factiii-expose: the download's SHA-256 is $GOT, not frp's published $SUM. Refused; nothing was installed." >&2
+    exit 1
+  fi
+  tar -xzf "$DL/frp.tar.gz" -C "$DL"
+  mkdir -p "$(dirname "$FRPC")"
+  mv "$DL/frp_${FRP_VERSION}_\${PLAT}/frpc" "$FRPC.part"
+  chmod 755 "$FRPC.part"
+  mv "$FRPC.part" "$FRPC"
+  rm -rf "$DL"
+  trap - EXIT
+fi
+`;
+}
 
 // The credential frps wants is the runner's access token. It is not in the env
 // file and not in the toml: `factiii-expose` asks the runner for it when it
@@ -47,7 +110,8 @@ else
   PROXY="\${FACTIII_TASK_ID}-\${NAME}"
 fi
 DOMAIN="\${PROXY}.\${FACTIII_FRP_DOMAIN}"
-TOML="${p.runDir}/\${NAME}.toml"
+FRPC='${p.frpcBinary}'
+${frpcDownload()}TOML="${p.runDir}/\${NAME}.toml"
 if [ -z "$FACTIII_SECRETS_SOCK" ]; then
   FACTIII_SECRETS_SOCK='${p.secretsSock}'
   export FACTIII_SECRETS_SOCK
@@ -73,7 +137,7 @@ EOF
 # nohup, not setsid: setsid does not exist on macOS.
 # The credential is set for this one command, so it is in frpc's environment
 # and in no argv and no file.
-FACTIII_FRP_TOKEN="$FRP_TOKEN" nohup frpc -c "$TOML" > "${p.runDir}/\${NAME}.log" 2>&1 < /dev/null &
+FACTIII_FRP_TOKEN="$FRP_TOKEN" nohup "$FRPC" -c "$TOML" > "${p.runDir}/\${NAME}.log" 2>&1 < /dev/null &
 echo $! > "${p.runDir}/\${NAME}.pid"
 # Which terminal opened it, so the sessions list can show the link beside that
 # terminal. The pane is the one identity a shell has without being told (tmux

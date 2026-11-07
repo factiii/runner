@@ -113,6 +113,8 @@ export class LidHold {
   private current: RunnerLidHoldState = 'off';
   private noGrantAt: number | null = null;
   private watching = false;
+  /** A `disablesleep 1` is on its way and not yet answered. */
+  private taking = false;
   /** Every change runs after the last: sudo calls never interleave. */
   private queue: Promise<void> = Promise.resolve();
   private readonly exec: LidExec;
@@ -168,9 +170,11 @@ export class LidHold {
     );
   }
 
-  /** Off now, synchronously: the runner is exiting. */
+  /** Off now, synchronously: the runner is exiting. A take still waiting on
+   *  sudo counts as held: the exit comes before it could mark it ours, and
+   *  no watcher would turn it off after. */
   releaseNow(): void {
-    if (!this.owned) return;
+    if (!this.owned && !this.taking) return;
     try {
       execFileSync(SUDO_BIN, ['-n', ...lidPmsetArgs(false)], {
         stdio: 'ignore',
@@ -205,7 +209,10 @@ export class LidHold {
       this.current = 'by-hand';
       return;
     }
-    const res = await this.pmset(true);
+    this.taking = true;
+    const res = await this.pmset(true).finally(() => {
+      this.taking = false;
+    });
     if (res.code !== 0) {
       if (noGrant(res.output)) {
         if (this.current !== 'needs-setup') {

@@ -1763,7 +1763,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           // No board: the self-update is the owner's on all of them.
           const anyBoard = scope.role === 'owner' ? 'owner' : 'none';
           if (!rawUseAllowed(anyBoard, 'runner-control')) return;
-          applyUpdateAndRestart();
+          void applyUpdateAndRestart();
           return;
         }
         if (
@@ -2158,6 +2158,13 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       } catch (err) {
         detachIceHandler();
         console.error('Failed to set remote description:', err);
+        // An offer it could not take never connects: let the peer and its
+        // video track go now rather than leave them open.
+        try {
+          peer.close();
+        } catch {
+          // already closed
+        }
       }
     } catch (err) {
       console.error('Failed to handle WebRTC offer:', err);
@@ -2242,13 +2249,20 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   // Update approved: install, tell clients, then exit RESTART_FOR_UPDATE so
   // the supervisor relaunches on the new code. A failed install stays up.
-  const applyUpdateAndRestart = () => {
+  const applyUpdateAndRestart = async () => {
     console.log('[update] update approved by a client — installing latest...');
     const status = (state: 'installing' | 'restarting' | 'failed') =>
       broadcastToAll(JSON.stringify({ type: 'runner-update', state }));
 
+    // A nuke is erasing this runner: a relaunch now would come back up in a
+    // half-erased folder. The nuke ends with an exit of its own.
+    if (nuke.running()) {
+      console.log('[update] not installing: this runner is being nuked.');
+      status('failed');
+      return;
+    }
     status('installing');
-    if (!installLatest()) {
+    if (!(await installLatest())) {
       status('failed');
       return;
     }

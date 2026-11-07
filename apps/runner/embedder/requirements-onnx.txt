@@ -10,7 +10,7 @@ regex>=2024.0
 tokenizers>=0.20.0
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-pillow==11.1.0
+pillow==13.0.0
 pydantic==2.10.4
 # A PDF's text layer, and its pages drawn for OCR (PDFKit's and Quartz's job
 # on the Mac).

@@ -193,7 +193,10 @@ export class PartsManager {
       if (!current.actions.includes(parsed.action)) {
         throw new Error(`${current.title} cannot ${parsed.action} now.`);
       }
-      void this.runModule(parsed.moduleId, parsed.action);
+      // Claimed before anything else awaits: a second request that read the
+      // same list is refused here, not left to reject in the background.
+      const job = this.claimModule(parsed.moduleId, parsed.action);
+      void this.runModuleJob(parsed.moduleId, job, parsed.action);
       return this.list();
     }
     const { partId, action } = parsed;
@@ -205,7 +208,10 @@ export class PartsManager {
     if (!current.actions.includes(action)) {
       throw new Error(`${current.title} cannot ${action} now.`);
     }
-    void this.run(partId, action);
+    // As the module's above: claimed now, run in the background, which
+    // never rejects (runJob catches what the action throws).
+    const job = this.claim(partId, action);
+    void this.runJob(partId, job, action);
     return this.list();
   }
 
@@ -256,6 +262,13 @@ export class PartsManager {
     action: RunnerModuleAction,
     onLine: (line: string) => void = () => {}
   ): Promise<boolean> {
+    const job = this.claimModule(moduleId, action);
+    return this.runModuleJob(moduleId, job, action, onLine);
+  }
+
+  /** Mark the module running, synchronously, or refuse it: one busy check
+   *  and its mark with no await between them. */
+  private claimModule(moduleId: RunnerModuleId, action: RunnerModuleAction): RunnerModuleJob {
     if (this.moduleJobs.get(moduleId)?.state === 'running') {
       throw new Error('That module is already busy.');
     }
@@ -268,10 +281,21 @@ export class PartsManager {
       startedAt: this.now()
     };
     this.moduleJobs.set(moduleId, job);
-    const ids = action === 'add' ? def.parts : [...def.parts].reverse();
-    const offered = partsFor(this.machine.platform);
+    return job;
+  }
+
+  /** The claimed module's run. Never rejects: a throw ends it failed. */
+  private async runModuleJob(
+    moduleId: RunnerModuleId,
+    job: RunnerModuleJob,
+    action: RunnerModuleAction,
+    onLine: (line: string) => void = () => {}
+  ): Promise<boolean> {
     let ok = true;
     try {
+      const def = findModule(moduleId);
+      const ids = action === 'add' ? def.parts : [...def.parts].reverse();
+      const offered = partsFor(this.machine.platform);
       for (const part of ids.map(findPart)) {
         if (!offered.includes(part)) continue;
         // Read again each time: an earlier sub-part may have added or
@@ -312,6 +336,13 @@ export class PartsManager {
     action: RunnerPartAction,
     onLine: (line: string) => void = () => {}
   ): Promise<boolean> {
+    const job = this.claim(partId, action);
+    return this.runJob(partId, job, action, onLine);
+  }
+
+  /** Mark the part running, synchronously, or refuse it: one busy check and
+   *  its mark with no await between them. */
+  private claim(partId: RunnerPartId, action: RunnerPartAction): RunnerPartJob {
     if (this.jobs.get(partId)?.state === 'running') {
       throw new Error('That part is already busy.');
     }
@@ -322,6 +353,17 @@ export class PartsManager {
       startedAt: this.now()
     };
     this.jobs.set(partId, job);
+    return job;
+  }
+
+  /** The claimed part's action to its end. Never rejects: a throw is a line
+   *  and a failed job. */
+  private async runJob(
+    partId: RunnerPartId,
+    job: RunnerPartJob,
+    action: RunnerPartAction,
+    onLine: (line: string) => void = () => {}
+  ): Promise<boolean> {
     const line = (text: string) => {
       job.lines = [...job.lines, text].slice(-KEPT_LINES);
       onLine(text);

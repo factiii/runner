@@ -444,6 +444,30 @@ describe('the daemon road', () => {
     assert.deepEqual(frames.at(-1), { step: 'done', state: 'done', lines: [] });
     assert.ok(fs.existsSync(path.join(home, 'keep.txt')));
   });
+
+  it('two confirms at once start one nuke, and refuse the other', async () => {
+    const { createDaemonNuke } = await import('./daemonNuke');
+    const { dir } = runnerHome();
+    const scheduled: (() => void)[] = [];
+    const nuke = createDaemonNuke({
+      dir,
+      expectedDir: dir,
+      ownerUserId: '7',
+      host: fakeHost([]),
+      broadcast: () => {},
+      exit: () => {},
+      later: (fn) => {
+        scheduled.push(fn);
+      }
+    });
+    const owner = { role: 'owner' as const, userId: '7' };
+    const both = await Promise.allSettled([
+      nuke.handle({ confirm: true, phrase: NUKE_PHRASE }, owner, 'webrtc'),
+      nuke.handle({ confirm: true, phrase: NUKE_PHRASE }, owner, 'webrtc')
+    ]);
+    assert.deepEqual(both.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+    assert.equal(scheduled.length, 1);
+  });
 });
 
 describe('the host', () => {
