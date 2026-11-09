@@ -4,7 +4,13 @@ import type {
   TerminalServerMessage
 } from '../../domains/electron';
 import { isCardPostId } from '../board-agent-core/boardTerminal';
+import {
+  CODEX_ACCESS_DEFAULT,
+  type CodexAccess,
+  codexPermissionArgs
+} from '../board-agent-core/codex-permissions';
 import { type ExecTarget, sessionToken } from '../board-agent-core/exec';
+import { terminalBootCommand } from '../board-agent-core/git-connections';
 import { sessionPortsEnv } from '../board-agent-core/port-blocks';
 import {
   respawnTmuxPane,
@@ -16,9 +22,10 @@ import {
   type TmuxSession,
   tmuxSessionExists
 } from '../board-agent-core/tmux';
+import type { CardAIConfig } from '../board-agent-core/session';
 import { chunkWire } from '../wireChunk';
 import { TERMINAL_FP_OPTION, terminalDigest } from './digest';
-import { terminalInitScript } from './initScript';
+import { newAgentCommand, terminalInitScript } from './initScript';
 
 // One shell per (data channel, sessionId), streamed back only on the
 // originating channel - never broadcast to paired devices.
@@ -99,7 +106,24 @@ export class TerminalManager {
     private getCardTarget: (postId: string) => ExecTarget | null,
     // The card's agent cwd (its worktree). The terminal must cd here so a
     // --resume finds the CLI thread keyed by that dir.
-    private getCardWorkdir: (postId: string) => string | null
+    private getCardWorkdir: (postId: string) => string | null,
+    // The board's Codex access for this card (codex-permissions.ts), read at
+    // each launch. Absent: standard.
+    private getCodexAccess: (postId: string) => CodexAccess = () =>
+      CODEX_ACCESS_DEFAULT,
+    // The session's chat holds its Claude conversation now (chatRun.ts
+    // claimTab): a tab created meanwhile boots to its shell, and Claude opens
+    // in it when the chat's turn ends. Absent: never.
+    private chatClaimsTab: (postId: string) => boolean = () => false,
+    // What the board starts in a new terminal (git-connections.ts
+    // terminalBootCommand): read at the launch of a tab asked to start it
+    // (`bootDefault`). Absent: a plain shell.
+    private getTerminalDefault: (
+      postId: string
+    ) => Pick<
+      CardAIConfig,
+      'terminalDefault' | 'terminalCommand'
+    > | null = () => null
   ) {}
 
   /** Terminals this link has attached now (the runner owner's Remote
@@ -149,24 +173,56 @@ export class TerminalManager {
     }
 
     const tmuxSession = tmuxName(msg.terminalKey);
-    // Only when there's no thread to resume: a resumed conversation already
-    // knows the card. The id check is what keeps the prompt shell-inert -
-    // synthetic launcher/board ids never reach a command line.
-    const cardPostId =
-      msg.briefCard && !msg.resumeAgentSessionId && isCardPostId(msg.postId)
-        ? msg.postId
-        : undefined;
-
-    const init = this.buildInit(target, msg.postId, {
-      resumeAgentSessionId: msg.resumeAgentSessionId,
-      provider: msg.resumeProvider,
-      cardPostId
-    });
 
     // Before the attach-or-create below: the only moment the two can be told
     // apart. Stamping an existing session would erase the staleness we are
     // looking for.
     const creating = !(await tmuxSessionExists(target, tmuxSession));
+
+    // The tab that boots the agent (the primary one), created while the
+    // chat's Claude is on a turn: resuming here would be a second CLI on the
+    // conversation, and a brief a second agent. It boots to its shell, and
+    // the chat opens Claude in it once the turn ends.
+    const bootsAgent = Boolean(
+      msg.resumeAgentSessionId || msg.briefCard || msg.resumeProvider
+    );
+    const chatHolds =
+      creating &&
+      bootsAgent &&
+      msg.resumeProvider !== 'codex' &&
+      this.chatClaimsTab(msg.postId);
+
+    // Only when there's no thread to resume: a resumed conversation already
+    // knows the card. The id check is what keeps the prompt shell-inert -
+    // synthetic launcher/board ids never reach a command line.
+    const cardPostId =
+      msg.briefCard &&
+      !msg.resumeAgentSessionId &&
+      !chatHolds &&
+      isCardPostId(msg.postId)
+        ? msg.postId
+        : undefined;
+
+    // The board's default for a new terminal, on the first tab of a session
+    // opened on the Terminal. Never over a resume or a brief, nor while the
+    // chat holds the conversation: the session is the chat's or the
+    // terminal's, not both. A card's id never gets here (briefCard does).
+    const boot =
+      creating &&
+      msg.bootDefault &&
+      !msg.resumeAgentSessionId &&
+      !cardPostId &&
+      !isCardPostId(msg.postId) &&
+      !this.chatClaimsTab(msg.postId)
+        ? this.getTerminalDefault(msg.postId)
+        : null;
+
+    const init = this.buildInit(target, msg.postId, {
+      resumeAgentSessionId: chatHolds ? undefined : msg.resumeAgentSessionId,
+      provider: msg.resumeProvider,
+      cardPostId,
+      boot
+    });
 
     try {
       const session = await startTmuxSession({
@@ -249,9 +305,19 @@ export class TerminalManager {
       resumeAgentSessionId?: string;
       provider?: AgentProvider;
       cardPostId?: string;
+      boot?: Pick<CardAIConfig, 'terminalDefault' | 'terminalCommand'> | null;
     }
   ): { argv: string[]; cwd: string } {
     const cwd = this.getCardWorkdir(postId) || target.paths.workspace;
+    const bootsCodex = agent?.boot?.terminalDefault === 'codex';
+    const codexFlags =
+      agent?.provider === 'codex' || bootsCodex
+        ? codexPermissionArgs({
+            level: this.getCodexAccess(postId),
+            interactive: true,
+            paths: target.paths
+          })
+        : [];
     return {
       cwd,
       argv: [
@@ -262,7 +328,14 @@ export class TerminalManager {
           target.paths.bin,
           agent?.resumeAgentSessionId,
           agent?.provider,
-          agent?.cardPostId
+          agent?.cardPostId,
+          codexFlags,
+          agent?.boot
+            ? (terminalBootCommand(agent.boot, {
+                claude: newAgentCommand('claude'),
+                codex: newAgentCommand('codex', codexFlags)
+              }) ?? undefined)
+            : undefined
         )
       ]
     };

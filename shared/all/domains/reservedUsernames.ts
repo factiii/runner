@@ -63,6 +63,7 @@ const ROUTE_SEGMENTS = [
   'scheduled',
   'search',
   'settings',
+  'shop',
   'signup',
   'terminal',
   'terms',

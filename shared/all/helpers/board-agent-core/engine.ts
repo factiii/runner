@@ -25,7 +25,6 @@ import {
 } from '../card-ai/card-session';
 import { ClaudeModeEngine } from '../card-ai/claude-mode';
 import { listConversations } from '../terminal-ai/chatHistory';
-import { findAgentPane } from '../terminal-ai/chatPane';
 import { ChatRuns } from '../terminal-ai/chatRun';
 import { terminalInterrupt } from '../terminal-ai/chatTerminal';
 import {
@@ -158,6 +157,7 @@ import type {
   ActivityTracker,
   AgentEventSink,
   BaseSession,
+  CardAIConfig,
   SessionStarter,
   SessionSummary
 } from './session';
@@ -476,7 +476,13 @@ export class BoardAgentEngine {
       store: (id, conversation) =>
         this.terminal.setAgentSessionId(id, conversation),
       // The rail's dot: a chat turn is work, as list_sessions already says
-      onRunning: (id, running) => this.terminal.setChatRunning(id, running)
+      onRunning: (id, running) => this.terminal.setChatRunning(id, running),
+      // The terminal's "Claude is working in Chat" state, cleared once
+      // Claude is in a tab.
+      onHold: (id, hold) => this.terminal.setChatHold(id, hold),
+      codexAccess: () => this.core.codexAccess(),
+      // The session's CLI: its chat runs that one (chatCli.ts).
+      provider: (id) => this.terminal.get(id)?.provider
     });
     this.scratchpad = new ScratchpadStore(
       () => this.core.target(),
@@ -1304,10 +1310,17 @@ export class BoardAgentEngine {
   getConfig() {
     return this.core.getConfig();
   }
+  /** How much Codex may do in this board's sessions (codex-permissions.ts). */
+  codexAccess() {
+    return this.core.codexAccess();
+  }
   setConfig(partial: Parameters<SpaceCore['setConfig']>[0]) {
     const result = this.core.setConfig(partial);
-    // A pasted token is a connect too (see refreshGithubOrigin).
-    if (partial.githubToken) void this.refreshGithubOrigin();
+    // A pasted token is a connect too (see refreshGithubOrigin), and so is
+    // picking a runner Git connection.
+    if (partial.githubToken || partial.gitConnectionId) {
+      void this.refreshGithubOrigin();
+    }
     return result;
   }
   clearToken(key: Parameters<SpaceCore['clearToken']>[0]) {
@@ -2437,7 +2450,14 @@ export class BoardAgentEngine {
   async githubDisconnect(): Promise<
     BoardAgentActionMap['githubDisconnect']['result']
   > {
-    const { githubToken } = this.core.readConfig();
+    const { githubToken, gitConnectionId } = this.core.readConfig();
+    // On a runner Git connection the token is every board's on it: this
+    // board only lets go, and the connection is removed (and revoked) from
+    // the runner's Status > Git. Nothing of this board's is left to revoke.
+    if (gitConnectionId !== undefined) {
+      this.core.clearToken('githubToken');
+      return { success: true, revoked: true };
+    }
     const outcome = githubToken
       ? await this.revokeGithubUpstream(githubToken)
       : 'revoked';
@@ -2484,22 +2504,38 @@ export class BoardAgentEngine {
     }
   }
 
-  async githubListRepos(): Promise<
-    BoardAgentActionMap['githubListRepos']['result']
-  > {
+  /** The token to list repos with: a runner Git connection's when the
+   *  picker names one (the board has not saved the pick yet), else the
+   *  board's own. */
+  private pickerToken(connectionId?: string): string {
+    if (connectionId) {
+      const token = this.core.gitConnectionToken(connectionId);
+      if (!token) throw new Error('That Git connection is not on this runner.');
+      return token;
+    }
     const { githubToken } = this.core.readConfig();
     if (!githubToken)
       throw this.core.notConnectedError('Connect GitHub first.');
-    return listGithubRepos(githubToken);
+    return githubToken;
+  }
+
+  async githubListRepos(
+    p?: BoardAgentActionMap['githubListRepos']['payload']
+  ): Promise<BoardAgentActionMap['githubListRepos']['result']> {
+    return listGithubRepos(this.pickerToken(p ? p.connectionId : undefined));
   }
 
   async githubListBranches(
     p: BoardAgentActionMap['githubListBranches']['payload']
   ): Promise<BoardAgentActionMap['githubListBranches']['result']> {
-    const { githubToken } = this.core.readConfig();
-    if (!githubToken)
-      throw this.core.notConnectedError('Connect GitHub first.');
-    return listGithubBranches(githubToken, p.fullName);
+    return listGithubBranches(this.pickerToken(p.connectionId), p.fullName);
+  }
+
+  /** What a new terminal on this board starts, for the tab of a session
+   *  opened on the Terminal (TerminalManager `bootDefault`). */
+  terminalDefault(): Pick<CardAIConfig, 'terminalDefault' | 'terminalCommand'> {
+    const { terminalDefault, terminalCommand } = this.core.readConfig();
+    return { terminalDefault, terminalCommand };
   }
 
   /** A device-code sign-in is blocked on the user until the code expires, so
@@ -2813,7 +2849,8 @@ export class BoardAgentEngine {
       workspace,
       typeof p.sessionId === 'string' ? p.sessionId : '',
       Number(p.offset),
-      this.chatRuns.conversation(id)
+      this.chatRuns.conversation(id),
+      this.chatRuns.cli(id)
     );
     return {
       ...read,
@@ -2841,6 +2878,12 @@ export class BoardAgentEngine {
   bareChatToTerminal(p: BoardAgentActionMap['bareChatToTerminal']['payload']) {
     return this.chatRuns.toTerminal(String(p.postId));
   }
+  /** A terminal tab is being created for the session: whether the chat's
+   *  Claude holds the conversation, so the tab must not boot one of its own
+   *  (chatRun.ts claimTab). */
+  chatClaimsTab(postId: string): boolean {
+    return this.chatRuns.claimTab(postId);
+  }
   async bareChatConversations(
     p: BoardAgentActionMap['bareChatConversations']['payload']
   ): Promise<BoardAgentActionMap['bareChatConversations']['result']> {
@@ -2848,12 +2891,15 @@ export class BoardAgentEngine {
     const target = this.getCardTarget(id);
     if (!target) return { cwd: '', current: '', conversations: [] };
     // Where the session's agents start, as the transcript read takes it.
-    const pane = await findAgentPane(target, id).catch(() => null);
+    const pane = await this.chatRuns
+      .cli(id)
+      .findPane(target, id)
+      .catch(() => null);
     const cwd =
       pane?.cwd ?? (this.getCardWorkspacePath(id) || target.paths.workspace);
     return {
       cwd,
-      current: pane?.sessionId ?? this.chatRuns.conversation(id) ?? '',
+      current: pane?.conversation ?? this.chatRuns.conversation(id) ?? '',
       conversations: await listConversations(target, cwd)
     };
   }
@@ -2881,7 +2927,7 @@ export class BoardAgentEngine {
     return { message };
   }
   /** Point each terminal session's IDE at where its agent is working: the
-   *  last folder its conversation records (the terminal Claude's, else the
+   *  last folder its conversation records (the terminal CLI's, else the
    *  chat's own), up to that folder's project, inside the space. */
   private async followWorkPaths(): Promise<void> {
     if (this.followingWorkPaths) return;
@@ -2890,13 +2936,15 @@ export class BoardAgentEngine {
       const target = this.core.target();
       const root = target.paths.root;
       for (const id of Object.keys(this.terminal.listSummaries())) {
-        const pane = await findAgentPane(target, id).catch(() => null);
-        const conversation = pane?.sessionId ?? this.chatRuns.conversation(id);
+        const cli = this.chatRuns.cli(id);
+        const pane = await cli.findPane(target, id).catch(() => null);
+        const conversation =
+          pane?.conversation ?? this.chatRuns.conversation(id);
         if (!conversation) continue;
         const cwd =
           pane?.cwd ??
           (this.getCardWorkspacePath(id) || target.paths.workspace);
-        const work = await readWorkPath(target, cwd, conversation);
+        const work = await readWorkPath(target, cwd, conversation, cli);
         // Moves only when the agent did: a set_work_path holds till then.
         if (!work || work.path === this.terminal.followed(id)) continue;
         this.terminal.setFollowed(id, work.path);
@@ -3783,12 +3831,29 @@ export class BoardAgentEngine {
     ctx: ActionContext
   ): Promise<BoardAgentActionMap[A]['result']> {
     switch (action) {
-      case 'getConfig':
-        return (await this.getConfig()) as BoardAgentActionMap[A]['result'];
-      case 'setConfig':
+      case 'getConfig': {
+        const config = await this.getConfig();
+        // The runner's Git connections are its owner's GitHub accounts: a
+        // member sees only whether this board has one. An empty list, not
+        // none: none reads as a runner too old for them, which would offer
+        // the member a per-board GitHub connect.
+        if (isOwnerContext(ctx))
+          return config as BoardAgentActionMap[A]['result'];
+        return {
+          ...config,
+          gitConnections: config.gitConnections ? [] : undefined
+        } as BoardAgentActionMap[A]['result'];
+      }
+      case 'setConfig': {
+        const p = payload as BoardAgentActionMap['setConfig']['payload'];
+        // Codex's access reaches every session on the board, the owner's
+        // included: only the owner changes it. A member's save keeps the rest.
+        // So is the Git connection: it is the owner's GitHub account.
+        const { codexAccess, gitConnectionId, ...rest } = p;
         return this.setConfig(
-          payload as BoardAgentActionMap['setConfig']['payload']
+          isOwnerContext(ctx) ? p : rest
         ) as BoardAgentActionMap[A]['result'];
+      }
       case 'clearToken': {
         const p = payload as BoardAgentActionMap['clearToken']['payload'];
         return this.clearToken(p.key) as BoardAgentActionMap[A]['result'];
@@ -4102,12 +4167,23 @@ export class BoardAgentEngine {
         return (await this.githubDisconnect()) as BoardAgentActionMap[A]['result'];
       case 'githubIdentity':
         return (await this.githubIdentity()) as BoardAgentActionMap[A]['result'];
-      case 'githubListRepos':
-        return (await this.githubListRepos()) as BoardAgentActionMap[A]['result'];
-      case 'githubListBranches':
-        return (await this.githubListBranches(
-          payload as BoardAgentActionMap['githubListBranches']['payload']
-        )) as BoardAgentActionMap[A]['result'];
+      case 'githubListRepos': {
+        // Another connection's repos are the owner's to list.
+        const p = payload as BoardAgentActionMap['githubListRepos']['payload'];
+        const connectionId =
+          p && isOwnerContext(ctx) ? p.connectionId : undefined;
+        return (await this.githubListRepos({
+          connectionId
+        })) as BoardAgentActionMap[A]['result'];
+      }
+      case 'githubListBranches': {
+        const p =
+          payload as BoardAgentActionMap['githubListBranches']['payload'];
+        return (await this.githubListBranches({
+          fullName: p.fullName,
+          connectionId: isOwnerContext(ctx) ? p.connectionId : undefined
+        })) as BoardAgentActionMap[A]['result'];
+      }
       case 'claudeLoginStart':
         return (await this.claudeLoginStart()) as BoardAgentActionMap[A]['result'];
       case 'claudeLoginCode':

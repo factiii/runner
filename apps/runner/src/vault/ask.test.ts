@@ -495,7 +495,10 @@ describe('Ask on a runner', () => {
     assert.equal(state.text, '<p>The policy number is AB-123 (insurance.txt).</p>');
     assert.equal(state.steps[0], 'Asking Codex');
     const { argv } = seen();
-    assert.deepEqual(argv.slice(0, 2), ['exec', '--json']);
+    // The permission flags come right after `exec` (codex-permissions.ts), so
+    // only the subcommand's place is fixed.
+    assert.equal(argv[0], 'exec');
+    assert.ok(argv.includes('--json'));
     assert.equal(argv[argv.indexOf('--sandbox') + 1], 'read-only');
     assert.ok(!argv.some((a) => /dangerously|bypass/.test(a)));
     // Never asks: the Vault's tools approved and the only ones on, its shell

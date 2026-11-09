@@ -324,7 +324,7 @@ model PostFactiii {
   botTaggedPostFactiiis    PostFactiii[] @relation("botTagged")
 
 
-  clusterId Int?
+  clusterId     Int?
 
   @@index([postFactiiiCountId, userId, status])
   @@index([postFactiiiCountId, status, userId])

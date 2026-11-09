@@ -14,6 +14,13 @@
 // No listener, no port, no URL and no bearer on the session's side: the gate
 // is the socket's file mode plus the session token every socket op carries.
 
+/** Which of this runner's sessions is asking, on each POST the relay makes.
+ *  Only a session that proved itself (FACTIII_SESSION_TOKEN) is named. The
+ *  server trusts it no further than the runner's own token reaches: it serves
+ *  a Routine's X tools only to the session the runner started for that
+ *  routine's run (apps/server/src/helpers/routineSessionTools.ts). */
+export const BOARD_MCP_SESSION_HEADER = 'x-factiii-session';
+
 /** What the relay writes to the agent's side of the socket. */
 export type BoardMcpChannel = {
   /** One JSON-RPC message for the agent. */
@@ -36,6 +43,9 @@ export type BoardMcpRelayOptions = {
    *  by the next call with no restart of anything. */
   accessToken: () => string | undefined;
   channel: BoardMcpChannel;
+  /** The asking session's id, when it proved it; sent as
+   *  BOARD_MCP_SESSION_HEADER. */
+  session?: string;
 };
 
 /** JSON-RPC "server error": the call never reached a tool. */
@@ -107,6 +117,7 @@ export function openBoardMcpRelay(opts: BoardMcpRelayOptions): BoardMcpRelay {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
     'user-agent': 'factiii-runner-board-mcp',
+    ...(opts.session ? { [BOARD_MCP_SESSION_HEADER]: opts.session } : {}),
     ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
     ...(protocolVersion ? { 'mcp-protocol-version': protocolVersion } : {})
   });

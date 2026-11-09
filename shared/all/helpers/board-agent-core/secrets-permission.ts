@@ -34,9 +34,7 @@ export const CODEX_RULES_FILE = 'factiii.rules';
  *  what lets the wrapper reach the runner's socket. A script with `$(...)`,
  *  a redirect or a variable is matched whole as `bash -lc <script>`, so it
  *  does not match these and codex asks as before. */
-export const CODEX_SECRETS_RULES = `# Written by the factiii runner. factiii-secrets asks the owner for their
-# password before it runs anything, so codex need not ask as well.
-prefix_rule(
+const SECRETS_RULES_BODY = `prefix_rule(
     pattern = ["${SECRETS_BIN}", "run"],
     decision = "allow",
     justification = "factiii-secrets asks the owner for their password before it runs anything",
@@ -45,6 +43,33 @@ prefix_rule(
     pattern = ["${SECRETS_BIN}", "list"],
     decision = "allow",
     justification = "factiii-secrets list prints key names, never values",
+)
+`;
+
+/** The first version of the file, before the preview-link rules: still the
+ *  runner's own, so cleanup and the rewrite below recognise it. */
+const CODEX_SECRETS_RULES_V1 = `# Written by the factiii runner. factiii-secrets asks the owner for their
+# password before it runs anything, so codex need not ask as well.
+${SECRETS_RULES_BODY}`;
+
+/** factiii-expose and factiii-unexpose start and stop a public preview link:
+ *  a tunnel process with its state in the board's folder, outside codex's
+ *  workspace sandbox, so in the sandbox they cannot run at all. Allowed as
+ *  Claude's sessions run them: the link publishes a port on this machine
+ *  that the session asked for, and the owner sees every link in Remote
+ *  connections and can stop it there. */
+export const CODEX_SECRETS_RULES = `# Written by the factiii runner. factiii-secrets asks the owner for their
+# password before it runs anything, so codex need not ask as well. The
+# preview-link helpers start and stop the links listed in Remote connections.
+${SECRETS_RULES_BODY}prefix_rule(
+    pattern = ["factiii-expose"],
+    decision = "allow",
+    justification = "publishes a preview link the owner can see and stop in Remote connections",
+)
+prefix_rule(
+    pattern = ["factiii-unexpose"],
+    decision = "allow",
+    justification = "stops a public link the session started",
 )
 `;
 
@@ -128,11 +153,12 @@ export function withoutClaudeSecretsRules(text: string): ClaudeRulesRemoval {
   };
 }
 
-/** Is this `factiii.rules` text the one `writeCodexSecretsRules` writes? The
- *  same comparison it makes before writing. There is one version so far; an
- *  older one, if the text ever changes, belongs in this check too. */
+/** Is this `factiii.rules` text one the runner wrote, this version or an
+ *  older one? Cleanup deletes only those. Every older version belongs here. */
 export const isRunnerCodexRules = (text: string): boolean =>
-  text.trim() === CODEX_SECRETS_RULES.trim();
+  [CODEX_SECRETS_RULES, CODEX_SECRETS_RULES_V1].some(
+    (version) => text.trim() === version.trim()
+  );
 
 const passes = (target: ExecTarget, argv: string[]): Promise<boolean> =>
   target.run(argv).then(
@@ -184,6 +210,9 @@ export async function writeCodexSecretsRules(
   if (!codexDir || !(await passes(target, ['test', '-d', codexDir]))) return;
   const file = path.join(codexDir, 'rules', CODEX_RULES_FILE);
   const current = await target.run(['cat', file]).catch(() => null);
-  if (current !== null && isRunnerCodexRules(current)) return;
+  // Only today's text is left alone; an older version is rewritten.
+  if (current !== null && current.trim() === CODEX_SECRETS_RULES.trim()) {
+    return;
+  }
   await replaceFile(target, file, CODEX_SECRETS_RULES);
 }

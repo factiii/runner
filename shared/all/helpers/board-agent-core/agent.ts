@@ -9,10 +9,12 @@ import {
 } from '../../domains/electron';
 import { claudeJsonPath } from './agent-homes';
 import { type ClaudeStreamCallbacks, pipeClaudeStream } from './claude-stream';
+import { codexPermissionArgs } from './codex-permissions';
 import { pipeCodexStream } from './codex-stream';
 import type { ExecTarget } from './exec';
 import prompts from './prompts.json';
 import { type AgentProvider, PROVIDERS } from './providers';
+import type { SpacePaths } from './spacePaths';
 
 /** Assert the space is signed in before an agent pass. One-click sign-in and
  *  an in-terminal login both land in the runner's CLI home (agent-homes.ts). */
@@ -310,26 +312,36 @@ const CODEX_EFFORT: Record<string, string> = {
 
 // Codex argv. `exec --json` emits the JSONL codex-stream.ts parses; `-` reads
 // the prompt from stdin. skip-git-repo-check: some cwds aren't git repos.
-function codexArgs(opts: ArgOptions, imageFiles: string[]): string[] {
+/** Exported for its test (codex-permissions.test.ts). */
+export function codexArgs(
+  opts: ArgOptions,
+  imageFiles: string[],
+  paths?: SpacePaths
+): string[] {
   const args = ['exec'];
-  if (opts.resumeSessionId) args.push('resume', opts.resumeSessionId);
-  // Ahead of the other flags: `--image` takes a list on a fresh exec, and the
-  // next flag is what ends it.
-  for (const file of imageFiles) args.push('--image', file);
-  args.push('--json', '--skip-git-repo-check');
   // Codex's OS sandbox is the only enforcement: 'plan' and 'dontAsk' read,
-  // 'auto' writes in the workspace, anything else runs open (deploy's
-  // guardrails are structural).
+  // 'auto' writes in the workspace (plus the network and the runner's own
+  // folders, codex-permissions.ts), anything else runs open (deploy's
+  // guardrails are structural). Every flag that is exec's own goes before
+  // `resume`: `codex exec resume` rejects `--sandbox`, so a resumed run with
+  // them after it failed outright.
   if (opts.permissionMode === 'plan' || opts.permissionMode === 'dontAsk') {
-    args.push('--sandbox', 'read-only');
+    args.push(...codexPermissionArgs({ level: 'read-only', interactive: false }));
   } else if (opts.permissionMode === 'auto') {
-    args.push('--sandbox', 'workspace-write');
+    args.push(
+      ...codexPermissionArgs({ level: 'standard', interactive: false, paths })
+    );
   } else {
     args.push('--dangerously-bypass-approvals-and-sandbox');
   }
   const effort = opts.effort ? CODEX_EFFORT[opts.effort] : undefined;
   if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
   for (const override of opts.codexConfig ?? []) args.push('-c', override);
+  if (opts.resumeSessionId) args.push('resume', opts.resumeSessionId);
+  // Ahead of the other flags: `--image` takes a list on a fresh exec, and the
+  // next flag is what ends it.
+  for (const file of imageFiles) args.push('--image', file);
+  args.push('--json', '--skip-git-repo-check');
   args.push('-');
   return args;
 }
@@ -356,7 +368,9 @@ export async function spawnAgent(
       ? await writeImageFiles(target, images)
       : [];
   const args =
-    provider === 'codex' ? codexArgs(opts, imageFiles) : claudeArgs(opts);
+    provider === 'codex'
+      ? codexArgs(opts, imageFiles, target.paths)
+      : claudeArgs(opts);
   const proc = await target.spawn([info.bin, ...args], {
     cwd: opts.cwd,
     env: { ...target.agentEnv(), ...opts.env }

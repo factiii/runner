@@ -7,6 +7,16 @@ import {
 import fs from 'fs';
 import path from 'path';
 
+import { resolveBoardGit } from '@shared/all/helpers/board-agent-core/git-connections';
+
+import {
+  type BoardFiles,
+  gitConnectionChoices,
+  gitConnectionToken,
+  readGitStore,
+  reconcileGitConnections,
+  saveTokenConnection
+} from './gitConnections';
 import { CONFIG_DIR, spaceDirPath } from './paths';
 import {
   isVaultSealedFile,
@@ -72,7 +82,20 @@ function fillDefaults(config: Partial<CardAIConfig>): CardAIConfig {
     gitName: config.gitName || '',
     gitEmail: config.gitEmail || '',
     githubToken: config.githubToken || '',
-    provider: config.provider || 'claude'
+    provider: config.provider || 'claude',
+    // Kept as stored: dropping them here would reset them on the next save.
+    ...(config.codexAccess !== undefined
+      ? { codexAccess: config.codexAccess }
+      : {}),
+    ...(config.gitConnectionId !== undefined
+      ? { gitConnectionId: config.gitConnectionId }
+      : {}),
+    ...(config.terminalDefault !== undefined
+      ? { terminalDefault: config.terminalDefault }
+      : {}),
+    ...(config.terminalCommand !== undefined
+      ? { terminalCommand: config.terminalCommand }
+      : {})
   };
 }
 
@@ -174,7 +197,10 @@ function removeOneDriveConnections(): void {
  *  another machine, so the file is the only copy of the token in it; deleting
  *  it as if it were empty is unrecoverable. (A LOCKED vault throws instead, and
  *  the caller's retry covers that.) */
-function readLegacy<T>(filePath: string): { readable: boolean; value: T | null } {
+function readLegacy<T>(filePath: string): {
+  readable: boolean;
+  value: T | null;
+} {
   if (!fs.existsSync(filePath)) return { readable: true, value: null };
   const value = readSecureJson<T>(filePath);
   return { readable: value !== null, value };
@@ -416,7 +442,7 @@ export async function getConfiguredConnections(): Promise<string[]> {
   for (const slug of listConfiguredSlugs()) {
     if (kinds.has('git')) break;
     try {
-      if (readBoard(slug).githubToken) kinds.add('git');
+      if (localConfigProvider.readConfig(slug).githubToken) kinds.add('git');
     } catch {
       // This board's file can't be read (no keychain, or still locked in the
       // vault): don't guess at it, and don't let it hide the other boards.
@@ -444,10 +470,39 @@ export function listConfiguredSlugs(): string[] {
   }
 }
 
+/** The board's own file as stored, for the move to root Git connections
+ *  (gitConnections.ts), which must see a board's old fields, not resolved
+ *  ones. */
+export const boardFiles: BoardFiles = {
+  slugs: () => listConfiguredSlugs(),
+  readRaw: (slug) => fillDefaults(readBoard(slug)),
+  setConnection: (slug, id) => {
+    const raw = readBoard(slug);
+    writeJson(githubPath(slug), { ...raw, gitConnectionId: id });
+  },
+  // Read again here: a board repointed since the plan keeps its fields.
+  clearOwnGit: (slug, id) => {
+    const raw = readBoard(slug);
+    if (raw.gitConnectionId !== id) return;
+    const rest: Partial<CardAIConfig> = { ...raw };
+    const own = ['githubToken', 'gitName', 'gitEmail'] as const;
+    if (!own.some((k) => k in rest)) return;
+    for (const k of own) delete rest[k];
+    writeJson(githubPath(slug), rest);
+  }
+};
+
 export const localConfigProvider: ConfigProvider = {
+  // Resolved: a board on a runner Git connection reads that connection's
+  // token and identity (git-connections.ts resolveBoardGit); a board not
+  // moved yet, its own. The root store is read on every call, like the
+  // board's file, so a reconnect at the root is used at once everywhere.
   readConfig(spaceSlug: string): CardAIConfig {
     try {
-      return fillDefaults(readBoard(spaceSlug));
+      return resolveBoardGit(
+        fillDefaults(readBoard(spaceSlug)),
+        readGitStore()
+      );
     } catch (err) {
       // A runner that cannot read this file must still render its settings
       // panel, since that is where the fix is. Reads degrade to empty and
@@ -473,13 +528,46 @@ export const localConfigProvider: ConfigProvider = {
 
   // The whole config, every time: a cleared field has to persist as cleared,
   // which is what makes disconnect stick.
+  //
+  // `config` is what readConfig gave, edited, so its token and identity are
+  // the resolved ones. A board on a connection never stores those: its file
+  // keeps whatever old fields it had (none once reconcileGitConnections has
+  // deleted them on a verified connection, planOwnGitCleanup).
+  // A token that is NEW (an older client's paste or board sign-in) goes to
+  // the root store and the board is pointed at it; a board let go of its
+  // connection ('' and no token) has its old token cleared too.
   writeConfig(spaceSlug: string, config: CardAIConfig): void {
     // A save can be the first thing a process does, and this file must not
     // become the only copy before the old stores are folded in.
     migrateToSpaceFolders();
     fs.mkdirSync(credsDir(spaceSlug), { recursive: true });
-    writeJson(githubPath(spaceSlug), config);
+    const raw = fillDefaults(readBoard(spaceSlug));
+    const current = resolveBoardGit(raw, readGitStore());
+    const token = config.githubToken.replace(/\s/g, '');
+    let next: CardAIConfig = { ...config };
+    if (token && token !== current.githubToken) {
+      next.gitConnectionId = saveTokenConnection(token, {
+        gitName: config.gitName,
+        gitEmail: config.gitEmail
+      });
+      // Its account is asked of GitHub off this path; a second board on the
+      // same account is merged into one connection then.
+      void reconcileGitConnections(boardFiles).catch(() => undefined);
+    }
+    if (next.gitConnectionId !== undefined) {
+      const cleared = next.gitConnectionId === '' && !token;
+      next = {
+        ...next,
+        githubToken: cleared ? '' : raw.githubToken,
+        gitName: raw.gitName,
+        gitEmail: raw.gitEmail
+      };
+    }
+    writeJson(githubPath(spaceSlug), next);
   },
+
+  gitConnectionChoices,
+  gitConnectionToken,
 
   // No unencrypted mode exists any more, so this is true whenever the store
   // works at all; secureStore() carries the detail.

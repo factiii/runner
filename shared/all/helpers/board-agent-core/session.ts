@@ -1,19 +1,23 @@
 import type {
   AgentProvider,
   BareFsChange,
+  CodexAccess,
   CardAILogEntry as LogEntry,
   CardAIMode,
   CardAISessionPhase as SessionPhase,
   CardAISessionSummary as SessionSummary,
   CardAITodo,
   ExposedPort,
+  GitConnectionChoice,
   RunnerActivity,
   RunnerActivityKind,
   RunnerActivityState,
   SecureStoreStatus,
-  SessionGitSummary
+  SessionGitSummary,
+  TerminalDefault
 } from '../../domains/electron';
 import type { AgentState } from '../terminal-ai/agentState';
+import type { ChatHold } from '../terminal-ai/chatRun';
 
 export type { LogEntry, SessionPhase, SessionSummary };
 
@@ -51,6 +55,8 @@ export type BaseSession = {
   agentState?: AgentState;
   /** See SessionSummary.agentLive. Terminal mode only. */
   agentLive?: boolean;
+  /** See SessionSummary.chatHold. Terminal mode only. */
+  chatHold?: ChatHold;
   /** Live tunnels this session's terminals opened. Terminal mode only. */
   exposed?: ExposedPort[];
   /** See SessionSummary.agentActivity. Terminal mode only. */
@@ -92,8 +98,23 @@ export type BaseSession = {
   startedVia?: string;
 };
 
+/** A terminal's kind from where it works: every worktree is a folder directly
+ *  under the space's `worktrees` directory (spacePaths.ts), so a session there
+ *  is Code and any other is Chat, in the board's workspace. Card AI runs are
+ *  not terminals and have no kind. */
+export function terminalKind(
+  session: Pick<BaseSession, 'mode' | 'workspacePath'>
+): { kind?: 'chat' | 'code'; worktree?: string } {
+  if (session.mode !== 'bare') return {};
+  const parts = (session.workspacePath || '').split(/[\\/]/).filter(Boolean);
+  return parts.at(-2) === 'worktrees'
+    ? { kind: 'code', worktree: parts.at(-1) }
+    : { kind: 'chat' };
+}
+
 export function toSummary(session: BaseSession): SessionSummary {
   return {
+    ...terminalKind(session),
     taskId: session.taskId,
     postId: session.postId,
     phase: session.phase,
@@ -110,6 +131,10 @@ export function toSummary(session: BaseSession): SessionSummary {
     startedAt: session.startedAt,
     agentState: session.agentState,
     agentLive: session.agentLive,
+    // '' rather than absent on a terminal: absent says the runner is too old.
+    chatHold: session.mode === 'bare' ? (session.chatHold ?? '') : undefined,
+    // The chat runs the session's own CLI (SessionSummary.chatCli).
+    chatCli: session.mode === 'bare' ? session.provider : undefined,
     exposed: session.exposed,
     agentActivity: session.agentActivity,
     git: session.git,
@@ -257,6 +282,17 @@ export interface CardAIConfig {
   /** CLI agent running this space's AI work. Defaults to 'claude' when
    *  absent (back-compat for existing configs). */
   provider?: AgentProvider;
+  /** How much Codex may do in this board's sessions (codex-permissions.ts).
+   *  Absent: standard. */
+  codexAccess?: CodexAccess;
+  /** The runner Git connection this board uses (git-connections.ts). Absent:
+   *  a board not moved yet, which still reads its own githubToken, gitName
+   *  and gitEmail. '' is none. Set, the provider's readConfig fills those
+   *  three from the connection. */
+  gitConnectionId?: string;
+  /** What a new terminal starts. Absent: a plain shell, as before. */
+  terminalDefault?: TerminalDefault;
+  terminalCommand?: string;
 }
 
 export interface ConfigProvider {
@@ -274,6 +310,12 @@ export interface ConfigProvider {
    *  panel still renders; this lets a caller that then finds no repository
    *  say the real reason instead of "not connected". */
   configProblem?(spaceSlug: string): string | null;
+  /** The host's Git connections a board may pick from, by name (never the
+   *  token). Absent: a host without root connections (desktop). */
+  gitConnectionChoices?(): GitConnectionChoice[];
+  /** One connection's token, for listing its repos before a board saves
+   *  the pick. Null when there is no such connection. */
+  gitConnectionToken?(id: string): string | null;
   /** The detail behind tokensEncrypted: key store, optional password layer,
    *  lock state, and the remedy when the store is unusable. */
   secureStore?(): SecureStoreStatus;

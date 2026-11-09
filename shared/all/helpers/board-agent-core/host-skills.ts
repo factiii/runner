@@ -15,7 +15,7 @@ import { buildCloneUrl } from './git';
 import { gitCatFileBatch, hostGit, hostGitRemote } from './host-deploy';
 import { libraryOriginOf } from '../librarySkill';
 import { skillMentions } from '../skillConnections';
-import { parseSkill, resolveSkillDir } from './skill-format';
+import { ON_REQUEST_ROOT, parseSkill, resolveSkillDir } from './skill-format';
 import { hostSpacePaths } from './spacePaths';
 
 // Host-side plumbing behind the board's Skills modal. Global skills are written
@@ -192,6 +192,7 @@ async function treeAt(repo: string, ref: string): Promise<TreeEntry[]> {
     ref,
     '--',
     AGENTS_ROOT,
+    ON_REQUEST_ROOT,
     ...CLI_ROOTS
   ).catch(() => '');
   return raw
@@ -210,7 +211,9 @@ async function treeAt(repo: string, ref: string): Promise<TreeEntry[]> {
 export function skillBlobs(entries: TreeEntry[]): Map<string, string> {
   const blobs = new Map<string, string>();
   for (const entry of entries) {
-    const match = /^(.+\/skills)\/([^/]+)\/SKILL\.md$/.exec(entry.filePath);
+    const match = /^(.+\/skills(?:-on-request)?)\/([^/]+)\/SKILL\.md$/.exec(
+      entry.filePath
+    );
     if (match) blobs.set(`${match[1]}/${match[2]}`, entry.sha);
   }
   return blobs;
@@ -247,8 +250,10 @@ export type PendingBranch = { branch: string; blobs: Map<string, string> };
  *  tested directly. */
 export type ResolvedRepoSkill = {
   name: string;
-  /** `.agents/skills/<name>`, the skill's canonical repo-relative dir. */
+  /** `.agents/skills/<name>`, the skill's canonical repo-relative dir, or
+   *  `.agents/skills-on-request/<name>` for a skill on request. */
   dir: string;
+  onRequest: boolean;
   status: SkillStatus;
   pendingBranch: string;
   /** Blob to read the SKILL.md from: the merged one when there is one, else
@@ -256,26 +261,34 @@ export type ResolvedRepoSkill = {
   sha: string;
 };
 
-/** Classify every skill in `.agents/skills`, across the default branch and any
+/** Classify every skill in `.agents/skills` and `.agents/skills-on-request`, across the default branch and any
  *  unmerged `skill/*` branches. `links` maps a symlinked dir to its target, and
  *  is what decides whether Claude Code can actually load each skill. */
 export function resolveRepoSkills(
   liveBlobs: Map<string, string>,
   pending: PendingBranch[]
 ): ResolvedRepoSkill[] {
+  const inRoot = (key: string) =>
+    key.startsWith(`${AGENTS_ROOT}/`) || key.startsWith(`${ON_REQUEST_ROOT}/`);
   const keys = new Set<string>();
   for (const key of liveBlobs.keys()) {
-    if (key.startsWith(`${AGENTS_ROOT}/`)) keys.add(key);
+    if (inRoot(key)) keys.add(key);
   }
   for (const entry of pending) {
     for (const key of entry.blobs.keys()) {
-      if (key.startsWith(`${AGENTS_ROOT}/`)) keys.add(key);
+      if (inRoot(key)) keys.add(key);
     }
   }
 
   const out: ResolvedRepoSkill[] = [];
   for (const key of [...keys].sort()) {
-    const name = key.slice(AGENTS_ROOT.length + 1);
+    const onRequest = key.startsWith(`${ON_REQUEST_ROOT}/`);
+    const name = key.slice(
+      (onRequest ? ON_REQUEST_ROOT : AGENTS_ROOT).length + 1
+    );
+    // One name, one skill: a listed copy wins over one on request, as it is
+    // the only one a CLI would load by that name.
+    if (onRequest && keys.has(`${AGENTS_ROOT}/${name}`)) continue;
     const live = liveBlobs.get(key) || '';
     const onBranch = pending.find((entry) => {
       const sha = entry.blobs.get(key);
@@ -290,6 +303,7 @@ export function resolveRepoSkills(
     out.push({
       name,
       dir: key,
+      onRequest,
       status,
       pendingBranch: status === 'live' ? '' : onBranch?.branch || '',
       sha: live || onBranch?.blobs.get(key) || ''
@@ -315,7 +329,8 @@ async function repoSkills(ctx: RepoContext): Promise<SkillSummary[]> {
       scope: 'repo',
       dir: skill.dir,
       status: skill.status,
-      pendingBranch: skill.pendingBranch
+      pendingBranch: skill.pendingBranch,
+      ...(skill.onRequest ? { onRequest: true } : {})
     })
   );
 }

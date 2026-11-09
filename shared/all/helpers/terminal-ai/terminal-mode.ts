@@ -77,6 +77,7 @@ import {
   postIdForSessionName,
   sessionNamePrefix
 } from './agentState';
+import type { ChatHold } from './chatRun';
 import { terminalDigest } from './digest';
 import { GitRefWatcher } from './gitRefWatcher';
 import type { PaneRef, ProcRow } from './processes';
@@ -93,6 +94,10 @@ import { parseTerminalTabs, TAB_LIST_FORMAT } from './tabNames';
 import { restartTerminalSession, tmuxName } from './terminal';
 import type { Subscribe } from './watcher';
 import { WorkspaceWatcher } from './watcher';
+
+// What bareFsList's shell answers for a missing folder, in place of a listing.
+const FS_ROOT_GONE = '!root-gone';
+const FS_DIR_GONE = '!dir-gone';
 
 // Tiny posix-path helpers. Hand-rolled rather than node's `path` so the file
 // stays platform-portable.
@@ -814,6 +819,15 @@ export class TerminalModeEngine implements ModeEngine {
     if (session) this.rollUp(session);
   }
 
+  /** The chat's hold on the conversation moved (chatRun.ts ChatHold): the
+   *  terminal says so while Claude is in no tab. */
+  setChatHold(postId: string, hold: ChatHold): void {
+    const session = this.sessions.get(postId);
+    if (!session || (session.chatHold ?? '') === hold) return;
+    session.chatHold = hold;
+    this.emitter.emitSessionUpdate(session);
+  }
+
   /** The conversation the session's chat runs (chatRun.ts). Kept with the
    *  card, so a restart resumes it, and a primary tab opened fresh resumes it
    *  in the terminal. */
@@ -1176,10 +1190,17 @@ export class TerminalModeEngine implements ModeEngine {
     // matches found: .*". Every folder with no dotfile in it therefore listed
     // as empty. POSIX sh leaves an unmatched glob as its own literal, which the
     // `-e` test below drops.
+    //
+    // A missing folder answers a marker instead of failing `cd`: the failure
+    // came back as "Command failed: sh -c cd ..." with this whole script in
+    // it, which is what the IDE showed for a session whose worktree had been
+    // removed. Entry lines start with d/ or f/, so a marker can't collide.
     const out = await target.run([
       'sh',
       '-c',
-      `cd ${shEscape(abs)} && for f in .* *; do
+      `if [ ! -d ${shEscape(root)} ]; then echo "${FS_ROOT_GONE}"; exit 0; fi
+      if [ ! -d ${shEscape(abs)} ]; then echo "${FS_DIR_GONE}"; exit 0; fi
+      cd ${shEscape(abs)} && for f in .* *; do
         case "$f" in
           "."|".."|".git"|"*") continue ;;
         esac
@@ -1187,6 +1208,15 @@ export class TerminalModeEngine implements ModeEngine {
         if [ -d "$f" ]; then echo "d/$f"; else echo "f/$f"; fi
       done | LC_ALL=C sort`
     ]);
+    const marker = out.trim();
+    if (marker === FS_ROOT_GONE) {
+      throw new Error(
+        "This session's folder no longer exists (its worktree was removed). End the session and start a new one."
+      );
+    }
+    if (marker === FS_DIR_GONE) {
+      throw new Error(`${relRoot} no longer exists.`);
+    }
     const entries: BoardAgentActionMap['bareFsList']['result'] = [];
     for (const line of out.split('\n')) {
       if (!line) continue;

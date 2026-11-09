@@ -18,6 +18,7 @@ import {
   embedderHealth,
   engineDownRow,
   type FoundService,
+  type HealthIo,
   isEmbedderScript,
   meminfoLevel,
   meminfoUse,
@@ -57,6 +58,22 @@ const READ_TIMEOUT_MS = 3000;
  *  use and what is running, on this machine. */
 export function machineHealth(run: Run): Promise<RunnerMachineHealth> {
   return readHealth({
+    ...levelsIo(run),
+    cpu: () => ({ load1: os.loadavg()[0], cores: os.cpus().length }),
+    memoryUse: () => memoryInUse(run),
+    services: () => runningServices(run)
+  });
+}
+
+/** Only what sets the level: the disks, memory pressure and the process
+ *  count. Cheap enough for the alert's 30 s watch (healthWatch.ts). */
+export function machineHealthLevels(run: Run): Promise<RunnerMachineHealth> {
+  return readHealth(levelsIo(run));
+}
+
+/** The probes behind the level, shared by both reads above. */
+function levelsIo(run: Run): HealthIo {
+  return {
     // Builds and job checkouts live in each board's folder, under the
     // runner folder (spacePaths.ts).
     folders: [
@@ -85,11 +102,8 @@ export function machineHealth(run: Run): Promise<RunnerMachineHealth> {
       }
       return null;
     },
-    processes: () => processCount(run),
-    cpu: () => ({ load1: os.loadavg()[0], cores: os.cpus().length }),
-    memoryUse: () => memoryInUse(run),
-    services: () => runningServices(run)
-  });
+    processes: () => processCount(run)
+  };
 }
 
 /** Memory in use, or null. macOS from `vm_stat` (`os.freemem()` counts the

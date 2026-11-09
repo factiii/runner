@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { AI_NO_CLI_SIGNED_IN } from '@shared/all/validators';
+
 import { type AiPromptEngines, answerAiPrompt, NO_AI_ON_RUNNER } from './aiPrompt';
 
 // Factiii's AI features on a runner (.specs/oakbox.md "Backend" → AI
@@ -51,6 +53,17 @@ describe('aiPrompt', () => {
     assert.equal(calls[0]?.engine, 'ollama:llama3.2:3b');
   });
 
+  it('refuses rather than falling to Ollama when only a CLI was asked for', async () => {
+    const calls: Call[] = [];
+    const none = engines({ signedIn: async () => false }, calls);
+    await assert.rejects(answerAiPrompt(none, { prompt: 'x', cliOnly: true }), {
+      message: AI_NO_CLI_SIGNED_IN
+    });
+    assert.deepEqual(calls, []);
+    const signed = engines({ signedIn: async (cli) => cli === 'codex' });
+    assert.equal((await answerAiPrompt(signed, { prompt: 'x', cliOnly: true })).engine, 'codex');
+  });
+
   it('uses the Ollama model asked for only if the runner holds it', async () => {
     const calls: Call[] = [];
     const e = engines({ ollamaModels: async () => ['a:1', 'b:2'] }, calls);
@@ -60,6 +73,16 @@ describe('aiPrompt', () => {
       calls.map((c) => c.engine),
       ['ollama:b:2', 'ollama:a:1']
     );
+  });
+
+  it('with no model asked for, uses the largest table model it holds', async () => {
+    const calls: Call[] = [];
+    const e = engines(
+      { ollamaModels: async () => ['llama3.2:3b', 'qwen2.5:14b', 'zzz:1'] },
+      calls
+    );
+    await answerAiPrompt(e, { prompt: 'x', engine: 'ollama' });
+    assert.equal(calls[0]?.engine, 'ollama:qwen2.5:14b');
   });
 
   it('says so when the runner has nothing to answer with', async () => {

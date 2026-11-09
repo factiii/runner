@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-09
+
+Needed by the web app released the same day: board Settings > General and the runner's Status > Git read and write the runner-root Git connections (`gitConnections`, `gitConnectionId` and the new-terminal default on `getConfig` / `setConfig`, plus `githubListRepos` / `githubListBranches` on a connection), and session rows show each terminal's Chat or Code kind and worktree, which only this version reports.
+
+### Added
+
+- **Git connections at the runner root.** GitHub accounts live once on the runner (Status > Git) and every board picks one with a repository; each board's old token moves into a connection of the same account, and a board moved to a verified connection drops its old token, name and email.
+- **What a new terminal starts.** A board picks Claude Code (the default), Codex, a command or a shell, and a new terminal opened on the Terminal starts it in its first tab.
+- **Codex in Chat.** A session's chat runs its own CLI, Codex headless as well as Claude. Codex reads CLAUDE.md, trusts each board's clone, takes Standard or Full access per board, and prunes its one-off allow rules once per home.
+- **Low disk and memory alerts.** The runner reports its disk and memory pressure; members see a banner on warn and the owner gets a push on critical.
+- **Routines.** A runner run ends with its session's answer, the runner watches the session and reports how it ended, and a routine's session gets its X tools.
+- **Skills on request.** Sessions learn the names of the skills kept outside the listed folder, and the runner migration carries them.
+- **Each terminal reports Chat or Code,** and a Code session its worktree; session start lists only the board panels this machine can serve; the board MCP relay names the session that is asking.
+
+### Fixed
+
+- **Ollama answers follow one rule:** the model asked for while held, else the largest table model held; a runner with no CLI signed in asks before answering with its Ollama model.
+- **The IDE says a session's folder is gone** instead of printing the shell, and no stray terminal query replies appear at the prompt on attach.
+- **Stored job params have their secrets redacted,** and job SQL is dropped after 30 days.
+
 ## [0.40.0] - 2026-11-08
 
 Needed by the web app released the same day: its Skills Run button, the Vault and Runner Storage picker and Routines call board-agent actions only this version answers (`skillRunStart`, the `store` field on vault actions, `runner:routine-due`).

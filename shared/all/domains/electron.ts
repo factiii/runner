@@ -10,7 +10,10 @@ import type {
 } from '../helpers/localAiModels';
 import type { RunnerChatCommand } from '../helpers/terminal-ai/chatCommands';
 import type { ChatConversations } from '../helpers/terminal-ai/chatHistory';
-import type { ChatTerminalState } from '../helpers/terminal-ai/chatRun';
+import type {
+  ChatHold,
+  ChatTerminalState
+} from '../helpers/terminal-ai/chatRun';
 import type { ChatTranscript } from '../helpers/terminal-ai/chatTranscript';
 import type {
   AiPromptPayload,
@@ -121,6 +124,11 @@ export type SkillSummary = {
    *  (librarySkill.ts libraryOriginOf). Absent when it was not added from the
    *  library, and from runners older than library versions. */
   origin?: { uuid: string; version: string };
+  /** A repo skill kept in `.agents/skills-on-request`: the CLIs never list it,
+   *  so an AI reads it only when told to (card 39b89977). Run from the Skills
+   *  tab, it is read from that folder instead of invoked by name. Absent on
+   *  every other skill, and from older runners. */
+  onRequest?: boolean;
 };
 
 export type CardAILogEntry = {
@@ -172,6 +180,17 @@ export type CardAISessionSummary = {
    *  hooks have reported and it has not ended). Absent from an older runner
    *  and for anything that is not a terminal. */
   agentLive?: boolean;
+  /** The chat's own headless Claude has the conversation (chatRun.ts): a turn
+   *  is running ('turn'), or Claude is being opened in a tab after it
+   *  ('opening'). '' once Claude is in a tab, or idle. The terminal shows a
+   *  plain shell meanwhile and says why. Absent from an older runner and for
+   *  anything that is not a terminal. */
+  chatHold?: ChatHold;
+  /** The CLI the chat runs for this terminal session: its own, Claude Code
+   *  or Codex (chatRun.ts, chatCli.ts). Absent from a runner whose chat ran
+   *  Claude only (there a Codex session's chat is the map and the commands),
+   *  and for anything that is not a terminal. */
+  chatCli?: AgentProvider;
   /** The public links this terminal opened (`factiii-expose`), so the sessions
    *  list can show each beside the terminal that made it. Absent from a runner
    *  too old to report them, and for anything that is not a terminal. */
@@ -183,6 +202,13 @@ export type CardAISessionSummary = {
   /** How far the work in this terminal's worktree has got. Absent until the
    *  first read, for a session with no worktree, and from an older runner. */
   git?: SessionGitSummary;
+  /** A terminal's kind: `code` works in its own worktree and branch, `chat`
+   *  in the board's workspace. Absent for card AI runs and from an older
+   *  runner. */
+  kind?: 'chat' | 'code';
+  /** A Code session's worktree folder, which names its branch
+   *  (`terminal/<name>`). Absent for Chat and from an older runner. */
+  worktree?: string;
   targetBranch: string;
   taskTitle: string;
   todos: CardAITodo[];
@@ -537,6 +563,23 @@ export type RunnerMachineHealth = {
    *  `criticalGb` refuses. */
   warnGb: number;
   criticalGb: number;
+};
+
+/** What a runner tells the server about its machine for alerts (card
+ *  b78a269a, .specs/runner-setup.md "Low disk and memory alerts"): the
+ *  overall level and what drives it. No path, no service list. Sent on
+ *  connect and whenever it changes; the server shows its owner a banner at
+ *  warn and pushes them at critical. */
+export type RunnerHealthAlert = {
+  /** The worst of the disk, memory and process levels. */
+  level: RunnerHealthLevel;
+  /** The disk with the least free, of those the runner writes to. Null
+   *  where none could be read. */
+  disk: { freeGb: number; level: RunnerHealthLevel } | null;
+  /** Memory pressure. Null where the runner cannot read it. */
+  memory: RunnerHealthLevel | null;
+  /** The per-user process limit, as a level. Null where it is not read. */
+  processes: RunnerHealthLevel | null;
 };
 
 /** One thing an always-on Mac needs. `ok` null: the runner cannot tell. */
@@ -1062,6 +1105,22 @@ export type ConfigResponse = {
   gitEmail: string;
   // The CLI agent this space runs. Older runners omit this (claude).
   provider: AgentProvider;
+  // How much Codex may do in this board's sessions. Older runners omit this
+  // (standard).
+  codexAccess?: CodexAccess;
+  // Which of the runner's Git connections (Status > Git) this board uses.
+  // '' is none; absent from a runner older than root connections, whose
+  // board holds its own token. See .specs/runner-setup.md "Git connections".
+  gitConnectionId?: string;
+  // The runner's Git connections a board may pick from, by name only (never
+  // a token). Sent to the runner's owner only; absent elsewhere and from an
+  // older runner.
+  gitConnections?: GitConnectionChoice[];
+  // What a new terminal on this board starts. Absent from an older runner,
+  // whose new terminals open a plain shell.
+  terminalDefault?: TerminalDefault;
+  // The command a new terminal runs when terminalDefault is 'command'.
+  terminalCommand?: string;
   // True when the runner's Claude CLI is signed in - the only Claude auth.
   // One sign-in per runner, in its own CLI home (agent-homes.ts), shared by
   // every board and by Oakbox. Older runners omit this.
@@ -1089,14 +1148,88 @@ export type ConfigResponse = {
   secureStore?: SecureStoreStatus;
 };
 
+/** How much Codex may do in a board's sessions (board-agent-core/
+ *  codex-permissions.ts). 'standard': its workspace sandbox with the network
+ *  and the runner's own folders, asking before anything else. 'full': no
+ *  sandbox and no approval prompts. */
+export type CodexAccess = 'standard' | 'full';
+
 export type SetConfigPayload = {
   repoUrl?: string;
   mainBranch?: string;
+  /** Older clients only: a board's identity is its Git connection's now. */
   gitName?: string;
   gitEmail?: string;
+  /** Older clients only: a token is saved as a runner Git connection and
+   *  the board pointed at it (.specs/runner-setup.md "Git connections"). */
   githubToken?: string;
   provider?: AgentProvider;
+  /** Owner only: the daemon drops it from anyone else. */
+  codexAccess?: CodexAccess;
+  /** Owner only (the daemon drops it from anyone else): which runner Git
+   *  connection this board uses; '' for none. */
+  gitConnectionId?: string;
+  terminalDefault?: TerminalDefault;
+  terminalCommand?: string;
 };
+
+/** What a new terminal on a board starts: a CLI the runner is signed in to,
+ *  the board's own command, or a plain shell. Only a default for NEW
+ *  terminals: a running one keeps what it started with. */
+export type TerminalDefault = 'claude' | 'codex' | 'command' | 'shell';
+
+/** A runner Git connection as a board's picker shows it. */
+export type GitConnectionChoice = {
+  id: string;
+  label: string;
+  /** The GitHub account, '' while unknown (offline at save). */
+  login: string;
+};
+
+/** One of the runner's Git connections, for its owner's Status > Git. The
+ *  token never leaves the runner; `tokenHint` is its last four characters. */
+export type GitConnectionView = GitConnectionChoice & {
+  gitName: string;
+  gitEmail: string;
+  tokenHint: string;
+  /** 'oauth': signed in with GitHub here (revoked on remove); 'token': a
+   *  pasted personal access token. */
+  source: 'oauth' | 'token';
+  /** Slugs of the boards that use it. */
+  boards: string[];
+  createdAt: number;
+};
+
+/** A GitHub sign-in started from Status > Git. Polled with gitConnections:
+ *  a runner-wide link gets no events. */
+export type GitConnectionSignin =
+  | { status: 'idle' }
+  | {
+      status: 'pending';
+      userCode: string;
+      verificationUri: string;
+      expiresAt: number;
+    }
+  | { status: 'complete'; connectionId: string; login: string }
+  | { status: 'expired' | 'declined' | 'error'; message?: string };
+
+export type GitConnectionsState = {
+  connections: GitConnectionView[];
+  signin: GitConnectionSignin;
+};
+
+export type GitConnectionActPayload =
+  | { op: 'signinStart'; clientId: string }
+  | { op: 'signinCancel' }
+  | { op: 'addToken'; token: string }
+  | {
+      op: 'update';
+      id: string;
+      label?: string;
+      gitName?: string;
+      gitEmail?: string;
+    }
+  | { op: 'remove'; id: string };
 
 /** One path in a bare workspace's git status, tagged with the porcelain letter
  *  that put it there: 'M' modified, 'A' added, 'D' deleted, 'R' renamed, 'U'
@@ -2360,9 +2493,11 @@ export type BoardAgentActionMap = {
     payload: void;
     result: { login: string; name: string; email: string } | null;
   };
-  /** Writable repos for the picker, most-recently-pushed first. */
+  /** Writable repos for the picker, most-recently-pushed first. With
+   *  `connectionId` (owner only), that runner Git connection's, for a board
+   *  choosing one before it saves. */
   githubListRepos: {
-    payload: void;
+    payload: { connectionId?: string } | void;
     result: {
       fullName: string;
       cloneUrl: string;
@@ -2371,7 +2506,7 @@ export type BoardAgentActionMap = {
     }[];
   };
   githubListBranches: {
-    payload: { fullName: string };
+    payload: { fullName: string; connectionId?: string };
     result: string[];
   };
   // One-click Claude sign-in: start drives `claude auth login` on the host
@@ -2396,6 +2531,16 @@ export type BoardAgentActionMap = {
   // gets no events, so this is read instead: whether each CLI is signed in,
   // and how its last sign-in from Oakbox went.
   cliSignins: { payload: void; result: RunnerCliSignins };
+  // The runner's Git connections (Status > Git, .specs/runner-setup.md
+  // "Git connections"): GitHub accounts held once at the runner root, which
+  // boards pick from. Runner-wide whether or not a board is named, and the
+  // owner's alone. A token never comes back; adding one never rides the
+  // relay.
+  gitConnections: { payload: void; result: GitConnectionsState };
+  gitConnectionAct: {
+    payload: GitConnectionActPayload;
+    result: GitConnectionsState;
+  };
   // The X on a Running jobs row. Only a sign-in or a failed Ask may be closed
   // (activityDismissable); closing a sign-in cancels its flow too.
   activityDismiss: { payload: { id: string }; result: { success: boolean } };
@@ -2971,7 +3116,10 @@ export type BoardAgentActionMap = {
   // runner's two stores it acts on. None is the Vault, except where said:
   // a list, a search, a status and a lookup by id with none read both.
 
-  vaultStatus: { payload: { store?: RunnerStoreName }; result: RunnerVaultStatus };
+  vaultStatus: {
+    payload: { store?: RunnerStoreName };
+    result: RunnerVaultStatus;
+  };
   /** Newest first. `query` (2+ characters) narrows to files whose path or
    *  text has the words, as the cloud vault's `files` does. `before` is the
    *  last row's id, for the next page.
@@ -3515,6 +3663,14 @@ export type TerminalClientMessage =
        * creation.
        */
       briefCard?: boolean;
+      /**
+       * A new session's first tab, opened on the Terminal: start the board's
+       * default for new terminals (Claude Code, Codex, its own command or a
+       * plain shell; the runner reads which from the board's settings).
+       * Ignored with a resume or a card brief, while the chat holds the
+       * conversation, and on a tab that already exists.
+       */
+      bootDefault?: boolean;
     }
   | { type: 'terminal'; op: 'stdin'; sessionId: string; data: string }
   | {

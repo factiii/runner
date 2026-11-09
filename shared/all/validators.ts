@@ -1,33 +1,38 @@
-import { z } from 'zod';
+import { z } from "zod";
 
-import { APP_SLUGS } from './domains/apps';
-import { MIN_THRESHOLD_TRONS } from './domains/autoTopUp';
-import { FactiiiRequirement } from './domains/factiiis';
+import { APP_SLUGS } from "./domains/apps";
+import { MIN_THRESHOLD_TRONS } from "./domains/autoTopUp";
+import { FactiiiRequirement } from "./domains/factiiis";
 import {
   MAX_TRANSCRIPT_CHARS,
   TITLE_TRANSCRIPT_CHARS,
-  TRANSCRIBE_MAX_SECONDS
-} from './domains/mediaTranscript';
-import { PASSWORD_CODE_LENGTH } from './domains/passwordCode';
+  TRANSCRIBE_MAX_SECONDS,
+} from "./domains/mediaTranscript";
+import { PASSWORD_CODE_LENGTH } from "./domains/passwordCode";
 import {
   isValidTimeZone,
   MAX_POSTS_PER_DAY,
-  MINUTES_PER_DAY
-} from './domains/scheduledPosts';
+  MINUTES_PER_DAY,
+} from "./domains/scheduledPosts";
 import {
   SKILL_DESCRIPTION_MAX,
   SKILL_DESCRIPTION_MIN,
   SKILL_TITLE_MAX,
-  SKILL_TITLE_MIN
-} from './domains/skills';
+  SKILL_TITLE_MIN,
+} from "./domains/skills";
 import {
   isReservedUsername,
-  RESERVED_USERNAME_MESSAGE
-} from './domains/reservedUsernames';
-import { LayoutType } from './domains/spaces';
-import { UserType } from './domains/user';
-import { WATCH_PROGRESS_MAX_SECONDS } from './domains/watchProgress';
-import { ALLOWED_CONTENT_TYPES_TUPLE } from './uploadTypes';
+  RESERVED_USERNAME_MESSAGE,
+} from "./domains/reservedUsernames";
+import { LayoutType } from "./domains/spaces";
+import {
+  SHOP_MAX_LINES,
+  SHOP_MAX_QUANTITY,
+  US_STATE_CODES,
+} from "./domains/shop";
+import { UserType } from "./domains/user";
+import { WATCH_PROGRESS_MAX_SECONDS } from "./domains/watchProgress";
+import { ALLOWED_CONTENT_TYPES_TUPLE } from "./uploadTypes";
 
 const usernameValidationRegex = /^[a-zA-Z0-9_]+$/;
 
@@ -38,18 +43,18 @@ export const signupSchema = z.object({
     .string()
     .min(1)
     .regex(usernameValidationRegex, {
-      message: 'Username can only contain letters, numbers, and underscores'
+      message: "Username can only contain letters, numbers, and underscores",
     })
     .refine((name) => !isReservedUsername(name), {
-      message: RESERVED_USERNAME_MESSAGE
+      message: RESERVED_USERNAME_MESSAGE,
     }),
   email: z.string().email(),
   password: z
     .string()
-    .min(8, { message: 'Password must contain at least 8 characters' }),
+    .min(8, { message: "Password must contain at least 8 characters" }),
   types: z.array(z.nativeEnum(UserType)),
   referrerUserId: z.number().optional(),
-  instanceId: z.number()
+  instanceId: z.number(),
 });
 
 // Profiles live at /<username>, so a name that is a route is refused
@@ -58,10 +63,10 @@ export const usernameSchema = z
   .string()
   .min(1)
   .regex(usernameValidationRegex, {
-    message: 'Username can only contain letters, numbers, and underscores'
+    message: "Username can only contain letters, numbers, and underscores",
   })
   .refine((name) => !isReservedUsername(name), {
-    message: RESERVED_USERNAME_MESSAGE
+    message: RESERVED_USERNAME_MESSAGE,
   });
 
 // Fields shared by every username-first signup path (passkey + password). Email
@@ -71,19 +76,19 @@ const baseRegisterSchema = z.object({
   types: z.array(z.nativeEnum(UserType)).default([]),
   referrerUserId: z.number().optional(),
   instanceId: z.number(),
-  platform: z.enum(['web', 'mobile']).optional(),
+  platform: z.enum(["web", "mobile"]).optional(),
   // Which app is registering. Names the session it creates, the same way the
   // package's own routes do (apps/server/src/auth/config.ts → `app`). Absent
   // means factiii.
-  app: z.enum(['oakbox-ios', 'oakbox-android', 'oakbox-web']).optional()
+  app: z.enum(["oakbox-ios", "oakbox-android", "oakbox-web"]).optional(),
 });
 
 // Password path: username + password, no email. reCAPTCHA still enforced server-side.
 export const passwordRegisterSchema = baseRegisterSchema.extend({
   password: z
     .string()
-    .min(8, { message: 'Password must contain at least 8 characters' }),
-  recaptchaToken: z.string().optional()
+    .min(8, { message: "Password must contain at least 8 characters" }),
+  recaptchaToken: z.string().optional(),
 });
 
 // The emailed code that proves the inbox before a password is set or changed
@@ -92,8 +97,8 @@ export const passwordRegisterSchema = baseRegisterSchema.extend({
 // so the password rules stay the package's.
 export const passwordCodeSchema = z.object({
   code: z.string().regex(new RegExp(`^\\d{${PASSWORD_CODE_LENGTH}}$`), {
-    message: 'Enter the 6-digit code from the email.'
-  })
+    message: "Enter the 6-digit code from the email.",
+  }),
 });
 
 export const createSourceSchema = z.object({
@@ -104,9 +109,9 @@ export const createSourceSchema = z.object({
       FactiiiRequirement.GOVERNMENT_SOURCE,
       FactiiiRequirement.ENTERPRISE_SOURCE,
       FactiiiRequirement.ANONYMOUS_SOURCE,
-      FactiiiRequirement.HUMAN_SOURCE
-    ])
-  )
+      FactiiiRequirement.HUMAN_SOURCE,
+    ]),
+  ),
 });
 
 export const contactFormSchema = z
@@ -115,15 +120,15 @@ export const contactFormSchema = z
     email: z.string().max(254).optional(),
     phone: z.string().max(20).optional(),
     message: z.string().min(1).max(2000),
-    age: z.string().optional()
+    age: z.string().optional(),
   })
   .refine((data) => !!data.email || !!data.phone, {
-    message: 'Either email or phone is required'
+    message: "Either email or phone is required",
   });
 
 export const donationSchema = z.object({
   amount: z.number().int().min(100).max(1000000), // Amount in cents (integer)
-  email: z.string().email()
+  email: z.string().email(),
 });
 
 // Step 1: get TWO presigned PUTs (raw + view) plus a created Upload row.
@@ -162,23 +167,23 @@ export const getUploadUrlsSchema = z
     cameraFactiiiId: z.number().int().positive().nullable(),
     rawSha256: z
       .string()
-      .regex(/^[a-f0-9]{64}$/i, 'rawSha256 must be 64 hex chars'),
+      .regex(/^[a-f0-9]{64}$/i, "rawSha256 must be 64 hex chars"),
     rawSize: z.number().int().positive(),
     // Images only — a non-image upload has no VIEW variant to presign.
     viewSha256: z
       .string()
-      .regex(/^[a-f0-9]{64}$/i, 'viewSha256 must be 64 hex chars')
+      .regex(/^[a-f0-9]{64}$/i, "viewSha256 must be 64 hex chars")
       .optional(),
-    viewSize: z.number().int().positive().optional()
+    viewSize: z.number().int().positive().optional(),
   })
   .refine((d) => (d.viewSha256 === undefined) === (d.viewSize === undefined), {
-    message: 'viewSha256 and viewSize must be provided together'
+    message: "viewSha256 and viewSize must be provided together",
   })
   .refine(
     (d) =>
       (d.width === undefined && d.height === undefined) ||
       (d.width !== undefined && d.height !== undefined),
-    { message: 'width and height must be provided together' }
+    { message: "width and height must be provided together" },
   );
 
 // Step 2: confirm both PUTs landed; server validates magic bytes + sha256 + variant insert
@@ -190,10 +195,10 @@ export const MIN_TRIM_SECONDS = 1;
 export const videoTrimSchema = z
   .object({
     startSec: z.number().finite().min(0),
-    endSec: z.number().finite().positive()
+    endSec: z.number().finite().positive(),
   })
   .refine((trim) => trim.endSec - trim.startSec >= MIN_TRIM_SECONDS, {
-    message: `A trim must keep at least ${MIN_TRIM_SECONDS} second.`
+    message: `A trim must keep at least ${MIN_TRIM_SECONDS} second.`,
   });
 
 // Plain text: no control characters but tab and newline. The client cleans a
@@ -213,7 +218,7 @@ export const mediaTranscriptSchema = z.object({
     .min(1)
     .max(MAX_TRANSCRIPT_CHARS)
     .refine((text) => !CONTROL_CHARACTERS.test(text), {
-      message: 'A transcript is plain text.'
+      message: "A transcript is plain text.",
     }),
   language: z
     .string()
@@ -227,7 +232,7 @@ export const mediaTranscriptSchema = z.object({
     .finite()
     .nonnegative()
     .max(TRANSCRIBE_MAX_SECONDS * 144),
-  partial: z.boolean()
+  partial: z.boolean(),
 });
 
 // A title for a screen recording from what was said in it
@@ -240,8 +245,8 @@ export const recordingTitleSchema = z.object({
     .min(1)
     .max(TITLE_TRANSCRIPT_CHARS)
     .refine((text) => !CONTROL_CHARACTERS.test(text), {
-      message: 'A transcript is plain text.'
-    })
+      message: "A transcript is plain text.",
+    }),
 });
 
 // A transcript that finished after its file was handed over
@@ -250,7 +255,7 @@ export const recordingTitleSchema = z.object({
 export const vaultDropTranscriptSchema = z.object({
   jobId: z.string().min(1).max(64),
   name: z.string().trim().min(1).max(255),
-  transcript: mediaTranscriptSchema
+  transcript: mediaTranscriptSchema,
 });
 
 export const finalizeUploadSchema = z.object({
@@ -264,7 +269,7 @@ export const finalizeUploadSchema = z.object({
     size: z.number().int().positive(),
     sha256: z.string().regex(/^[a-f0-9]{64}$/i),
     width: z.number().int().positive().optional(),
-    height: z.number().int().positive().optional()
+    height: z.number().int().positive().optional(),
   }),
   view: z
     .object({
@@ -272,7 +277,7 @@ export const finalizeUploadSchema = z.object({
       size: z.number().int().positive(),
       sha256: z.string().regex(/^[a-f0-9]{64}$/i),
       width: z.number().int().positive(),
-      height: z.number().int().positive()
+      height: z.number().int().positive(),
     })
     .nullable(), // null for non-image uploads
   // Cut a video to [startSec, endSec] on the server before it is used
@@ -282,7 +287,7 @@ export const finalizeUploadSchema = z.object({
   // A video's speech, transcribed on the device (.specs/screen-recording.md →
   // Transcript). A screen recording's is filed in the owner's vault when it is
   // posted; anything else ignores it.
-  transcript: mediaTranscriptSchema.optional()
+  transcript: mediaTranscriptSchema.optional(),
 });
 
 // One upload of the caller's, by id (uploads.trimStatus).
@@ -292,22 +297,22 @@ export const uploadIdSchema = z.object({ uploadId: z.string().guid() });
 // charged uploads of one post, and waiving or un-waiving one of them.
 // `postId` is the post's uuid, the id every post DTO carries.
 export const adminPostUploadStorageSchema = z.object({
-  postId: z.string().uuid()
+  postId: z.string().uuid(),
 });
 export const adminSetUploadStorageWaiverSchema = z.object({
   uploadId: z.string().guid(),
-  waived: z.boolean()
+  waived: z.boolean(),
 });
 
 // Purchase validation schemas
 export const checkPurchaseSchema = z.object({
   productId: z.string(),
-  type: z.enum(['STRIPE', 'GOOGLE', 'APPLE']),
+  type: z.enum(["STRIPE", "GOOGLE", "APPLE"]),
   receivedPrice: z
     .number()
     .int()
-    .min(0, 'Received price must be a positive integer in cents'),
-  currency: z.string().length(3).default('USD'),
+    .min(0, "Received price must be a positive integer in cents"),
+  currency: z.string().length(3).default("USD"),
   // Explicit consent to keep this card for auto top-up. Card-network rules
   // require the buyer to agree before a card may be charged while they are not
   // present, so this must come from a checkbox they ticked — never a default.
@@ -321,7 +326,7 @@ export const checkPurchaseSchema = z.object({
   // the catalogue lists a product only where it has a store listing for the
   // asking app, so the till has to refuse the same product on the same rule —
   // otherwise a client that names a product by id buys one it was never shown.
-  app: z.enum(APP_SLUGS)
+  app: z.enum(APP_SLUGS),
 });
 
 export const creditPurchaseSchema = z.object({
@@ -330,47 +335,50 @@ export const creditPurchaseSchema = z.object({
   receivedPrice: z
     .number()
     .int()
-    .min(0, 'Received price must be a positive integer in cents'),
-  type: z.enum(['STRIPE', 'GOOGLE', 'APPLE']),
+    .min(0, "Received price must be a positive integer in cents"),
+  type: z.enum(["STRIPE", "GOOGLE", "APPLE"]),
   secret: z.string(),
   // Required for APPLE/GOOGLE IAP — used for server-side receipt verification
   purchaseToken: z.string().optional(),
   // WHICH APP is crediting. A product carries a different SKU per app, so this
   // decides which SKU the store is asked about.
-  app: z.enum(APP_SLUGS)
+  app: z.enum(APP_SLUGS),
 });
 
 export const dsarFormSchema = z.object({
   name: z
     .string()
     .trim()
-    .min(1, 'Please enter your name.')
-    .max(100, 'Please keep your name under 100 characters.'),
+    .min(1, "Please enter your name.")
+    .max(100, "Please keep your name under 100 characters."),
   email: z
     .string()
     .trim()
-    .min(1, 'Please enter your email address.')
-    .email('Please enter a valid email address.'),
-  selectedAs: z.enum(['person', 'agent']),
-  requestUnder: z.enum(['GDPR', 'CCPA', 'OTHER']),
-  selectedTo: z.enum(['knowledge', 'delete', 'optOut', 'optIn', 'other']),
+    .min(1, "Please enter your email address.")
+    .email("Please enter a valid email address."),
+  selectedAs: z.enum(["person", "agent"]),
+  requestUnder: z.enum(["GDPR", "CCPA", "OTHER"]),
+  selectedTo: z.enum(["knowledge", "delete", "optOut", "optIn", "other"]),
   details: z
     .string()
     .trim()
-    .min(1, 'Please provide details about your request.')
-    .max(5000, 'Please keep details under 5000 characters.'),
+    .min(1, "Please provide details about your request.")
+    .max(5000, "Please keep details under 5000 characters."),
   confirmAccuracy: z
     .boolean()
-    .refine((value) => value, 'Please confirm your information is accurate.'),
+    .refine((value) => value, "Please confirm your information is accurate."),
   confirmConsequences: z
     .boolean()
     .refine(
       (value) => value,
-      'Please acknowledge the deletion/restriction consequences.'
+      "Please acknowledge the deletion/restriction consequences.",
     ),
   confirmVerification: z
     .boolean()
-    .refine((value) => value, 'Please acknowledge the email verification step.')
+    .refine(
+      (value) => value,
+      "Please acknowledge the email verification step.",
+    ),
 });
 
 export type DSARFormInput = z.infer<typeof dsarFormSchema>;
@@ -382,46 +390,46 @@ export const mapLinkSchema = z.object({
     latitude: z
       .number()
       .min(-90)
-      .max(90, { message: 'Latitude must be between -90 and 90' }),
+      .max(90, { message: "Latitude must be between -90 and 90" }),
     longitude: z
       .number()
       .min(-180)
-      .max(180, { message: 'Longitude must be between -180 and 180' })
+      .max(180, { message: "Longitude must be between -180 and 180" }),
   }),
   pins: z
     .array(
       z.object({
-        postId: z.string().uuid({ message: 'Pin ID must be a valid UUID' }),
+        postId: z.string().uuid({ message: "Pin ID must be a valid UUID" }),
         latitude: z
           .number()
           .min(-90)
-          .max(90, { message: 'Pin latitude must be between -90 and 90' }),
+          .max(90, { message: "Pin latitude must be between -90 and 90" }),
         longitude: z
           .number()
           .min(-180)
-          .max(180, { message: 'Pin longitude must be between -180 and 180' })
-      })
+          .max(180, { message: "Pin longitude must be between -180 and 180" }),
+      }),
     )
     .optional()
-    .default([])
+    .default([]),
 });
 
 export const mapLinkHref = mapLinkSchema.transform((data) => {
   const latParam = `latitude=${encodeURIComponent(data.startPosition.latitude)}`;
   const lonParam = `longitude=${encodeURIComponent(
-    data.startPosition.longitude
+    data.startPosition.longitude,
   )}`;
   const pinsParam =
     data.pins.length > 0
       ? `pins=${encodeURIComponent(JSON.stringify(data.pins))}`
-      : '';
+      : "";
   return {
     startPosition: {
       postId: data.startPosition.postId,
       latitude: data.startPosition.latitude,
-      longitude: data.startPosition.longitude
+      longitude: data.startPosition.longitude,
     },
-    href: `${data.startPosition.postId ? `postId=${data.startPosition.postId}&` : ''}${latParam}&${lonParam}${pinsParam ? `&${pinsParam}` : ''}`
+    href: `${data.startPosition.postId ? `postId=${data.startPosition.postId}&` : ""}${latParam}&${lonParam}${pinsParam ? `&${pinsParam}` : ""}`,
   };
 });
 
@@ -430,7 +438,7 @@ export const mapLinkHref = mapLinkSchema.transform((data) => {
 export const isUrl = (str: string) => {
   try {
     const { protocol } = new URL(str);
-    return protocol === 'http:' || protocol === 'https:';
+    return protocol === "http:" || protocol === "https:";
   } catch {
     return false;
   }
@@ -443,9 +451,9 @@ export const wikipediaUrlSchema = z.string().refine(
       const parsedUrl = new URL(url);
       // Check if it's a valid Wikipedia URL
       return (
-        parsedUrl.hostname.endsWith('.wikipedia.org') &&
-        parsedUrl.protocol === 'https:' &&
-        parsedUrl.pathname.startsWith('/wiki/') &&
+        parsedUrl.hostname.endsWith(".wikipedia.org") &&
+        parsedUrl.protocol === "https:" &&
+        parsedUrl.pathname.startsWith("/wiki/") &&
         parsedUrl.pathname.length > 6 // Must have content after /wiki/
       );
     } catch {
@@ -454,59 +462,59 @@ export const wikipediaUrlSchema = z.string().refine(
   },
   {
     message:
-      'Invalid Wikipedia URL. Must be a valid HTTPS URL from wikipedia.org with /wiki/ path and article title'
-  }
+      "Invalid Wikipedia URL. Must be a valid HTTPS URL from wikipedia.org with /wiki/ path and article title",
+  },
 );
 
 // Enhanced URL validation with better error messages
 export const validateWikipediaUrl = (
-  url: string
+  url: string,
 ): { isValid: boolean; error?: string } => {
   try {
     const parsedUrl = new URL(url);
 
-    if (parsedUrl.protocol !== 'https:') {
-      return { isValid: false, error: 'URL must use HTTPS protocol' };
+    if (parsedUrl.protocol !== "https:") {
+      return { isValid: false, error: "URL must use HTTPS protocol" };
     }
 
-    if (!parsedUrl.hostname.endsWith('.wikipedia.org')) {
+    if (!parsedUrl.hostname.endsWith(".wikipedia.org")) {
       return {
         isValid: false,
         error:
-          'URL must be from a wikipedia.org subdomain (e.g., en.wikipedia.org)'
+          "URL must be from a wikipedia.org subdomain (e.g., en.wikipedia.org)",
       };
     }
 
-    if (!parsedUrl.pathname.startsWith('/wiki/')) {
-      return { isValid: false, error: 'URL must have /wiki/ path structure' };
+    if (!parsedUrl.pathname.startsWith("/wiki/")) {
+      return { isValid: false, error: "URL must have /wiki/ path structure" };
     }
 
     if (parsedUrl.pathname.length <= 6) {
       return {
         isValid: false,
-        error: 'URL must have an article title after /wiki/'
+        error: "URL must have an article title after /wiki/",
       };
     }
 
     return { isValid: true };
   } catch {
-    return { isValid: false, error: 'Invalid URL format' };
+    return { isValid: false, error: "Invalid URL format" };
   }
 };
 
 // General URL validation for any root URL
 export const validateUrlForRoot = (
   url: string,
-  rootUrl: string
+  rootUrl: string,
 ): { isValid: boolean; error?: string } => {
   try {
     const parsedUrl = new URL(url);
     const parsedRootUrl = new URL(rootUrl);
 
-    if (parsedUrl.protocol !== 'https:') {
+    if (parsedUrl.protocol !== "https:") {
       return {
         isValid: false,
-        error: 'URL must use HTTPS protocol'
+        error: "URL must use HTTPS protocol",
       };
     }
 
@@ -514,7 +522,7 @@ export const validateUrlForRoot = (
     if (parsedUrl.hostname !== parsedRootUrl.hostname) {
       return {
         isValid: false,
-        error: `URL must be from the same domain as ${parsedRootUrl.hostname}`
+        error: `URL must be from the same domain as ${parsedRootUrl.hostname}`,
       };
     }
 
@@ -522,7 +530,7 @@ export const validateUrlForRoot = (
     if (!parsedUrl.pathname.startsWith(parsedRootUrl.pathname)) {
       return {
         isValid: false,
-        error: `URL path must start with ${parsedRootUrl.pathname}`
+        error: `URL path must start with ${parsedRootUrl.pathname}`,
       };
     }
 
@@ -531,47 +539,47 @@ export const validateUrlForRoot = (
     if (parsedUrl.pathname.length <= rootPathLength) {
       return {
         isValid: false,
-        error: 'URL must have content after the root path'
+        error: "URL must have content after the root path",
       };
     }
 
     return { isValid: true };
   } catch {
-    return { isValid: false, error: 'Invalid URL format' };
+    return { isValid: false, error: "Invalid URL format" };
   }
 };
 
 // Generic URL validation (basic format check)
 export const validateUrlFormat = (
-  url: string
+  url: string,
 ): { isValid: boolean; error?: string } => {
   try {
     const parsedUrl = new URL(url);
 
-    if (parsedUrl.protocol !== 'https:') {
+    if (parsedUrl.protocol !== "https:") {
       return {
         isValid: false,
-        error: 'URL must use HTTPS protocol'
+        error: "URL must use HTTPS protocol",
       };
     }
 
     if (!parsedUrl.hostname) {
       return {
         isValid: false,
-        error: 'URL must have a valid hostname'
+        error: "URL must have a valid hostname",
       };
     }
 
     if (!parsedUrl.pathname) {
       return {
         isValid: false,
-        error: 'URL must have a valid path'
+        error: "URL must have a valid path",
       };
     }
 
     return { isValid: true };
   } catch {
-    return { isValid: false, error: 'Invalid URL format' };
+    return { isValid: false, error: "Invalid URL format" };
   }
 };
 
@@ -589,7 +597,13 @@ export const productSchema = z.object({
     .transform((val) => (val === undefined ? null : val)),
   inventory: z.number(),
   discount: z.number(),
-  type: z.enum(['TRON', 'MONTHLY_SUBSCRIPTION', 'FOUNDERS_TOKEN', 'DONATION']),
+  type: z.enum([
+    "TRON",
+    "MONTHLY_SUBSCRIPTION",
+    "FOUNDERS_TOKEN",
+    "DONATION",
+    "MERCH",
+  ]),
   // Gigabytes an Oakbox storage plan grants while its subscription is paid
   // (helpers/seedOakbox.ts). Null on every other product, and the thing that
   // makes a subscription a storage plan at all: `storagePlans` lists on "not
@@ -609,12 +623,12 @@ export const productSchema = z.object({
   // for TRON and FOUNDERS_TOKEN; other product types ignore these. Optional so the
   // admin form can omit them when editing subscription/donation rows.
   tronQuantity: z.number().int().min(0).optional(),
-  tronPremiumDays: z.number().int().min(0).optional()
+  tronPremiumDays: z.number().int().min(0).optional(),
 });
 
 export const adminTransferSpaceOwnershipSchema = z.object({
   spaceId: z.number(),
-  newOwnerUserId: z.number()
+  newOwnerUserId: z.number(),
 });
 
 /** Cards a board column loads at a time on web (BoardList), and the most a
@@ -624,7 +638,7 @@ const BOARD_PAGE_SIZE_MAX = 100;
 
 const baseSchema = {
   cursor: z.union([z.string(), z.number()]).optional(),
-  type: z.enum(['new', 'trending', 'popular', 'board']).optional(),
+  type: z.enum(["new", "trending", "popular", "board"]).optional(),
   filterBots: z.boolean().optional(),
   // Omitted = show; hiding new accounts is opt-in via the quick filter.
   filterNewAccounts: z.boolean().optional(),
@@ -637,54 +651,54 @@ const baseSchema = {
   // A board column (type 'board') in pages of this many cards, with
   // nextCursor, nextPos and total in the answer. Omitted = the whole column,
   // which is what shipped apps and the board MCP still ask for.
-  boardPageSize: z.number().int().min(1).max(BOARD_PAGE_SIZE_MAX).optional()
+  boardPageSize: z.number().int().min(1).max(BOARD_PAGE_SIZE_MAX).optional(),
 };
 
-export const postFeedInputSchema = z.discriminatedUnion('source', [
+export const postFeedInputSchema = z.discriminatedUnion("source", [
   z.object({
-    source: z.literal('home'),
-    ...baseSchema
+    source: z.literal("home"),
+    ...baseSchema,
   }),
   z.object({
-    source: z.literal('explore'),
-    ...baseSchema
+    source: z.literal("explore"),
+    ...baseSchema,
   }),
   z.object({
-    source: z.literal('user'),
+    source: z.literal("user"),
     username: z.string(),
     // The author's "show archived" view: only their ARCHIVED posts. Ignored on
     // anyone else's profile.
     archived: z.boolean().optional(),
-    ...baseSchema
+    ...baseSchema,
   }),
   z.object({
-    source: z.literal('space'),
+    source: z.literal("space"),
     spaceSlug: z.string(),
-    spaceRenderType: z.enum(['USER_FACING', 'SPACE_FACING', 'BOTH']).optional(),
-    ...baseSchema
+    spaceRenderType: z.enum(["USER_FACING", "SPACE_FACING", "BOTH"]).optional(),
+    ...baseSchema,
   }),
   z.object({
-    source: z.literal('saved'),
-    ...baseSchema
+    source: z.literal("saved"),
+    ...baseSchema,
   }),
   z.object({
-    source: z.literal('factiiis'),
-    ...baseSchema
+    source: z.literal("factiiis"),
+    ...baseSchema,
   }),
   // Every anonymous post, author masked. Backs /Anonymous%20User, which is
   // where anonymous posts' author links point.
   z.object({
-    source: z.literal('anonymous'),
-    ...baseSchema
+    source: z.literal("anonymous"),
+    ...baseSchema,
   }),
   z.object({
-    source: z.literal('search'),
+    source: z.literal("search"),
     query: z.string().optional(),
-    spaceRenderType: z.enum(['USER_FACING', 'SPACE_FACING', 'BOTH']).optional(),
+    spaceRenderType: z.enum(["USER_FACING", "SPACE_FACING", "BOTH"]).optional(),
     userIds: z.number().array().optional(),
     spaceIds: z.number().array().optional(),
-    ...baseSchema
-  })
+    ...baseSchema,
+  }),
 ]);
 
 export type PostFeedInput = z.infer<typeof postFeedInputSchema>;
@@ -692,13 +706,13 @@ export type PostFeedInput = z.infer<typeof postFeedInputSchema>;
 // posts.setArchived: the author archives a PUBLISHED post or restores it.
 export const postSetArchivedInputSchema = z.object({
   postId: z.string(),
-  archived: z.boolean()
+  archived: z.boolean(),
 });
 
 // posts.restore and posts.restorable: the author taking back their own delete
 // inside the restore window. `postId` is the uuid or the slug.
 export const postRestoreInputSchema = z.object({
-  postId: z.string()
+  postId: z.string(),
 });
 
 // spaces.my: the spaces the caller is a member of, pinned first, then the
@@ -710,7 +724,7 @@ export const mySpacesInputSchema = z.object({
   cursor: z.number().optional(),
   search: z.string().optional(),
   defaultLayout: z.nativeEnum(LayoutType).optional(),
-  recent: z.boolean().optional()
+  recent: z.boolean().optional(),
 });
 
 // spaces.suggested: the spaces page's Suggested Spaces list. With no
@@ -721,14 +735,14 @@ export const mySpacesInputSchema = z.object({
 export const SPACE_SEARCH_MAX_LENGTH = 100;
 export const suggestedSpacesInputSchema = z.object({
   cursor: z.number().optional(),
-  search: z.string().trim().max(SPACE_SEARCH_MAX_LENGTH).optional()
+  search: z.string().trim().max(SPACE_SEARCH_MAX_LENGTH).optional(),
 });
 
 // board.moveTargets: the boards a card of `spaceSlug` can be moved to. With
 // `fromColumnId`, also how many cards of that list `moveAllCards` would move.
 export const boardMoveTargetsInputSchema = z.object({
   spaceSlug: z.string(),
-  fromColumnId: z.number().optional()
+  fromColumnId: z.number().optional(),
 });
 
 // The board team of a space and its team-only lists (.specs/spaces.md →
@@ -736,13 +750,28 @@ export const boardMoveTargetsInputSchema = z.object({
 export const boardSetTeamMemberInputSchema = z.object({
   spaceSlug: z.string(),
   userId: z.number().int().positive(),
-  onTeam: z.boolean()
+  onTeam: z.boolean(),
 });
 
 export const boardSetListTeamOnlyInputSchema = z.object({
   spaceSlug: z.string(),
   listId: z.number().int().positive(),
-  teamOnly: z.boolean()
+  teamOnly: z.boolean(),
+});
+
+// board.team: the board team, a page at a time (cursor: the last row's
+// spaceMemberId). The team reads it; the owner and moderators manage it.
+export const boardTeamInputSchema = z.object({
+  spaceSlug: z.string(),
+  cursor: z.number().int().positive().optional(),
+});
+
+// board.searchMembers: the space's members not on the team yet, by @username
+// or name, for the Board team modal's search. Owner and moderators only.
+export const boardSearchMembersInputSchema = z.object({
+  spaceSlug: z.string(),
+  query: z.string().trim().min(1).max(100),
+  cursor: z.number().int().positive().optional(),
 });
 
 // A card id as the board MCP tools take it (apps/server/src/mcp/board.ts): the
@@ -758,7 +787,7 @@ export const boardCardIdSchema = z
 export const boardMoveCardToBoardInputSchema = z.object({
   postId: z.string(),
   toSpaceSlug: z.string(),
-  toColumnId: z.number()
+  toColumnId: z.number(),
 });
 
 // board.moveAllCards: every card of the list `fromColumnId` of `spaceSlug`
@@ -767,24 +796,24 @@ export const boardMoveAllCardsInputSchema = z.object({
   spaceSlug: z.string(),
   fromColumnId: z.number(),
   toSpaceSlug: z.string(),
-  toColumnId: z.number()
+  toColumnId: z.number(),
 });
 
 // postWatch.status: whether the viewer watches one board card (post uuid).
 export const postWatchStatusInputSchema = z.object({
-  postId: z.string()
+  postId: z.string(),
 });
 
 // postWatch.set: Watch / Unwatch one board card. Unwatch keeps a muted row, so
 // nothing re-creates the watch (.specs/notifications.md → Card watch).
 export const postWatchSetInputSchema = z.object({
   postId: z.string(),
-  watching: z.boolean()
+  watching: z.boolean(),
 });
 
 // watchProgress.get: where the viewer stopped in one video (upload id).
 export const watchProgressGetInputSchema = z.object({
-  uploadId: z.string().uuid()
+  uploadId: z.string().uuid(),
 });
 
 // watchProgress.save: the viewer's position in one video, in whole seconds.
@@ -792,40 +821,40 @@ export const watchProgressGetInputSchema = z.object({
 // where you stopped"). The client decides which (domains/watchProgress.ts).
 export const watchProgressSaveInputSchema = z.object({
   uploadId: z.string().uuid(),
-  seconds: z.number().int().min(0).max(WATCH_PROGRESS_MAX_SECONDS)
+  seconds: z.number().int().min(0).max(WATCH_PROGRESS_MAX_SECONDS),
 });
 
 // messages.restoreMessage: the sender takes back a delete inside the window.
 export const messageRestoreInputSchema = z.object({
-  messageId: z.number()
+  messageId: z.number(),
 });
 
 // --- Trons community pool ---
 
 // Donate trons from the user's own balance into the shared community pool.
 export const donateTronsSchema = z.object({
-  amount: z.number().int().positive()
+  amount: z.number().int().positive(),
 });
 
-const communityPoolModeSchema = z.enum(['OFF', 'WHITELIST', 'OPEN']);
+const communityPoolModeSchema = z.enum(["OFF", "WHITELIST", "OPEN"]);
 
 // Admin config: access mode + the two 4h-window tron spend caps.
 export const communityPoolConfigSchema = z.object({
   mode: communityPoolModeSchema,
   userCapPer4h: z.number().int().min(0),
-  poolCapPer4h: z.number().int().min(0)
+  poolCapPer4h: z.number().int().min(0),
 });
 
 // --- Cross-posting ---
 
 export const crossPostPlatformEnum = z.enum([
-  'TIKTOK',
-  'YOUTUBE',
-  'INSTAGRAM',
-  'FACEBOOK',
-  'TWITTER',
-  'LINKEDIN',
-  'REDDIT'
+  "TIKTOK",
+  "YOUTUBE",
+  "INSTAGRAM",
+  "FACEBOOK",
+  "TWITTER",
+  "LINKEDIN",
+  "REDDIT",
 ]);
 export type CrossPostPlatform = z.infer<typeof crossPostPlatformEnum>;
 
@@ -834,13 +863,13 @@ export type CrossPostPlatform = z.infer<typeof crossPostPlatformEnum>;
 export const crossPostSubmitSchema = z.object({
   postId: z.string(),
   platforms: z.array(crossPostPlatformEnum).min(1).max(5),
-  scheduledFor: z.coerce.date().optional()
+  scheduledFor: z.coerce.date().optional(),
 });
 
 // crosspost.rescheduleCrossPost: a new time for a cross-post still waiting.
 export const crossPostRescheduleSchema = z.object({
   crossPostId: z.number().int().positive(),
-  scheduledFor: z.coerce.date()
+  scheduledFor: z.coerce.date(),
 });
 
 // Scheduled posts (.specs/scheduled-posts.md)
@@ -855,12 +884,12 @@ export const postScheduleRuleSchema = z
       .min(0)
       .max(MINUTES_PER_DAY - 1),
     windowEndMinute: z.number().int().min(1).max(MINUTES_PER_DAY),
-    timeZone: z.string().refine(isValidTimeZone, 'Unknown time zone')
+    timeZone: z.string().refine(isValidTimeZone, "Unknown time zone"),
   })
   // Each post needs at least a minute of the window to itself.
   .refine((r) => r.windowEndMinute - r.windowStartMinute >= r.postsPerDay, {
-    message: 'The window is too short for that many posts',
-    path: ['windowEndMinute']
+    message: "The window is too short for that many posts",
+    path: ["windowEndMinute"],
   });
 
 export const schedulePostSchema = z.object({
@@ -872,12 +901,12 @@ export const schedulePostSchema = z.object({
   // Left out, the post takes the next free slot of the auto schedule.
   scheduledFor: z.coerce.date().optional(),
   // The author's zone, so a first schedule lands at 9am their time.
-  timeZone: z.string().refine(isValidTimeZone, 'Unknown time zone').optional()
+  timeZone: z.string().refine(isValidTimeZone, "Unknown time zone").optional(),
 });
 
 export const scheduledPostTimeSchema = z.object({
   postId: z.string(),
-  scheduledFor: z.coerce.date()
+  scheduledFor: z.coerce.date(),
 });
 
 export const scheduledPostIdSchema = z.object({ postId: z.string() });
@@ -888,32 +917,32 @@ export const apiCostUpdateSchema = z.object({
   pushCostTrons: z.number().int().min(0),
   // Added to the push when the text sent contains a URL (X bills link posts higher).
   urlSurchargeTrons: z.number().int().min(0),
-  costSource: z.enum(['manual', 'api']),
-  notes: z.string().max(500).optional()
+  costSource: z.enum(["manual", "api"]),
+  notes: z.string().max(500).optional(),
 });
 // Fact or Fiction game
 export const startSessionSchema = z.object({
-  isDaily: z.boolean().default(false)
+  isDaily: z.boolean().default(false),
 });
 
 export const submitAnswerSchema = z.object({
   sessionId: z.number().int(),
   postId: z.number().int(),
   answeredFact: z.boolean(),
-  timeMs: z.number().int().min(0).max(15000)
+  timeMs: z.number().int().min(0).max(15000),
 });
 
 export const endSessionSchema = z.object({
-  sessionId: z.number().int()
+  sessionId: z.number().int(),
 });
 
 export const getLeaderboardSchema = z.object({
-  period: z.enum(['daily', 'weekly', 'allTime']),
-  limit: z.number().int().min(1).max(50).default(50)
+  period: z.enum(["daily", "weekly", "allTime"]),
+  limit: z.number().int().min(1).max(50).default(50),
 });
 
 export const getSessionResultSchema = z.object({
-  sessionId: z.number().int()
+  sessionId: z.number().int(),
 });
 
 /* ---------------------------------- Arcade --------------------------------- */
@@ -923,24 +952,24 @@ const forgeElementName = z.string().trim().min(1).max(24);
 
 export const forgeCombineSchema = z.object({
   a: forgeElementName,
-  b: forgeElementName
+  b: forgeElementName,
 });
 
 export const forgeLeaderboardSchema = z.object({
-  limit: z.number().int().min(1).max(50).default(25)
+  limit: z.number().int().min(1).max(50).default(25),
 });
 
 /** Registry slugs for the arcade games that keep a score. */
 export const arcadeGameSlug = z.enum([
-  'circle',
-  'password',
-  'forge',
-  'spend',
-  'dilemmas',
-  'clicker',
-  'deep',
-  'robot',
-  'space'
+  "circle",
+  "password",
+  "forge",
+  "spend",
+  "dilemmas",
+  "clicker",
+  "deep",
+  "robot",
+  "space",
 ]);
 
 export const recordGameStatSchema = z.object({
@@ -948,12 +977,12 @@ export const recordGameStatSchema = z.object({
   /** Canonical sortable score for that game; direction is decided client-side. */
   best: z.number().finite(),
   /** Per-game extras, kept small — this lands in a JSON column. */
-  detail: z.record(z.string(), z.union([z.string(), z.number()])).optional()
+  detail: z.record(z.string(), z.union([z.string(), z.number()])).optional(),
 });
 
 export const dilemmaVoteSchema = z.object({
   dilemmaId: z.number().int().min(1).max(200),
-  pulled: z.boolean()
+  pulled: z.boolean(),
 });
 
 // ── Agent skills (SKILL.md) ──
@@ -993,7 +1022,7 @@ const skillNameSchema = z
   .min(1)
   .max(SKILL_MD_NAME_MAX)
   .regex(SKILL_DIR_NAME_REGEX, {
-    message: 'Use only lowercase letters, numbers and dashes'
+    message: "Use only lowercase letters, numbers and dashes",
   });
 
 // Strict on purpose: Codex hard-fails a skill whose frontmatter carries an
@@ -1004,13 +1033,13 @@ export const skillFrontmatterSchema = z
     name: skillNameSchema,
     description: z
       .string()
-      .min(1, { message: 'Description is required' })
+      .min(1, { message: "Description is required" })
       .max(SKILL_MD_DESCRIPTION_MAX, {
-        message: `Keep the description to ${SKILL_MD_DESCRIPTION_MAX} characters`
+        message: `Keep the description to ${SKILL_MD_DESCRIPTION_MAX} characters`,
       }),
     // Both CLIs accept a comma-separated string or a YAML list; normalised to
     // a list on parse and written back as a list.
-    'allowed-tools': z.array(z.string()).optional(),
+    "allowed-tools": z.array(z.string()).optional(),
     model: z.string().optional(),
     license: z.string().optional(),
     // What the skill needs from its environment (a product, system packages,
@@ -1018,7 +1047,7 @@ export const skillFrontmatterSchema = z
     // installed from skills.sh may carry it.
     compatibility: z.string().min(1).max(SKILL_MD_COMPATIBILITY_MAX).optional(),
     metadata: z.record(z.string(), z.string()).optional(),
-    'disable-model-invocation': z.literal(false).optional()
+    "disable-model-invocation": z.literal(false).optional(),
   })
   .strict();
 
@@ -1037,7 +1066,7 @@ export const autoTopUpSchema = z.object({
   // only safety net there is.
   alertOnTopUp: z.boolean(),
   alertBalanceTrons: z.number().int().min(MIN_THRESHOLD_TRONS).nullable(),
-  alertNearCap: z.boolean()
+  alertNearCap: z.boolean(),
 });
 
 // A space read as a blog (apps/server/src/routers/blog.ts). Oakbox reads the
@@ -1045,12 +1074,12 @@ export const autoTopUpSchema = z.object({
 export const blogPostsInputSchema = z.object({
   spaceSlug: z.string().min(1),
   // The uuid of the last post on the previous page.
-  cursor: z.string().uuid().optional()
+  cursor: z.string().uuid().optional(),
 });
 
 export const blogPostInputSchema = z.object({
   spaceSlug: z.string().min(1),
-  postId: z.string().uuid()
+  postId: z.string().uuid(),
 });
 
 // A research skill as its author submits it (skills.submit, .specs/skills.md).
@@ -1063,28 +1092,28 @@ export const submitSkillSchema = z.object({
     .string()
     .trim()
     .min(SKILL_DESCRIPTION_MIN)
-    .max(SKILL_DESCRIPTION_MAX)
+    .max(SKILL_DESCRIPTION_MAX),
 });
 
 // The same skill, rewritten by its author (skills.edit).
 export const editSkillSchema = submitSkillSchema.extend({
-  uuid: z.string().uuid()
+  uuid: z.string().uuid(),
 });
 // Shared runner jobs + secrets relay (.specs/runner-secrets-gate.md).
-export * from './validators/runnerJobs';
+export * from "./validators/runnerJobs";
 // Body of an embed request to the runner Vault's embedder.
-export * from './validators/embed';
+export * from "./validators/embed";
 // The runner's installable parts (factiii-runner parts, Runner > Parts).
-export * from './validators/runnerParts';
-export * from './validators/runnerVault';
+export * from "./validators/runnerParts";
+export * from "./validators/runnerVault";
 // Oakbox > Account > Backend: Factiii, a runner, or both.
-export * from './validators/oakboxBackend';
+export * from "./validators/oakboxBackend";
 // The IDE git panel's writes (bareGitAct, .specs/ide-git-panel.md).
-export * from './validators/runnerGit';
+export * from "./validators/runnerGit";
 // Routines: scheduled prompts on a runner or on Trons (.todos/routines.md).
-export * from './validators/routines';
+export * from "./validators/routines";
 
-export * from './validators/mcpConnections';
+export * from "./validators/mcpConnections";
 
 // One board-agent GitHub token, sent by a runner to be revoked at GitHub
 // (github.revokeToken). Charset and length are GitHub's token formats with
@@ -1095,5 +1124,46 @@ export const githubRevokeTokenSchema = z.object({
     .string()
     .min(1)
     .max(GITHUB_TOKEN_MAX_LENGTH)
-    .regex(/^[A-Za-z0-9_]+$/, { message: 'Invalid token' })
+    .regex(/^[A-Za-z0-9_]+$/, { message: "Invalid token" }),
 });
+
+// ── Merch shop (.specs/shop.md) ─────────────────────────────────────────────
+// Ship-to address. US only: `country` is fixed, and `state` must be a US code.
+export const shippingAddressSchema = z.object({
+  // Messages a person reads under the field, not zod's defaults.
+  firstName: z.string().trim().min(1, "Enter your first name").max(60),
+  lastName: z.string().trim().min(1, "Enter your last name").max(60),
+  email: z.string().trim().email("Enter a valid email").max(200),
+  phone: z.string().trim().max(30).optional(),
+  line1: z.string().trim().min(1, "Enter your street address").max(120),
+  line2: z.string().trim().max(120).optional(),
+  city: z.string().trim().min(1, "Enter your city").max(80),
+  state: z.enum(US_STATE_CODES as [string, ...string[]], {
+    message: "Pick your state",
+  }),
+  postalCode: z
+    .string()
+    .trim()
+    .regex(/^\d{5}(-\d{4})?$/, "Enter a 5-digit ZIP code"),
+  country: z.literal("US"),
+});
+export type ShippingAddressInput = z.infer<typeof shippingAddressSchema>;
+
+export const shopCartSchema = z
+  .array(
+    z.object({
+      variantId: z.number().int().positive(),
+      quantity: z.number().int().min(1).max(SHOP_MAX_QUANTITY),
+    }),
+  )
+  .min(1)
+  .max(SHOP_MAX_LINES);
+export type ShopCartInput = z.infer<typeof shopCartSchema>;
+
+export const shopCheckoutSchema = z.object({
+  cart: shopCartSchema,
+  address: shippingAddressSchema,
+});
+export * from "./validators/aiConfirmations";
+export * from "./validators/audioRooms";
+export * from "./validators/e2ee";

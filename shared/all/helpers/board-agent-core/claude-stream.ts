@@ -36,6 +36,10 @@ export interface ClaudeStreamCallbacks {
     content: string;
     isError: boolean;
   }) => void;
+  /** The conversation's id as soon as the CLI names it (Codex's
+   *  thread.started), before the run ends: the chat reads a new
+   *  conversation's file while its first turn runs (chatRun.ts). */
+  onSessionId?: (id: string) => void;
 }
 
 // ── Formatting helpers ──

@@ -4,6 +4,7 @@
 // runs it — one file holding both would be an import cycle.
 
 import type { AgentProvider } from '../../domains/electron';
+import { shellQuote } from '../board-agent-core/codex-permissions';
 
 // Colored prompt. `--norc -i` keeps a system/user .bashrc from clobbering our
 // PS1. Runs once per session; later attaches reuse the same bash.
@@ -44,31 +45,54 @@ export const CLAUDE_PERMISSION_MODE = `--permission-mode auto`;
 const RESUME_SEED =
   'You are now in an interactive terminal, not the board UI. Respond in plain text and use your normal tools; do not use openui-lang or component schemas anymore.';
 
+/** A NEW Claude or Codex with nothing to resume and no card: what a board
+ *  whose default is that CLI starts in a new terminal. */
+export function newAgentCommand(
+  provider: AgentProvider,
+  codexFlags: string[] = []
+): string {
+  return provider === 'codex'
+    ? ['codex', ...codexFlags.map(shellQuote)].join(' ')
+    : `claude ${CLAUDE_PERMISSION_MODE}`;
+}
+
 /** What tmux runs when it CREATES the session. A resume id boots into the
- *  agent; when it exits we fall through to a shell rather than kill the pane. */
+ *  agent; when it exits we fall through to a shell rather than kill the pane.
+ *  So does `bootCommand`, the board's default for a new terminal. */
 export function terminalInitScript(
   cwd: string,
   binDir: string,
   resumeAgentSessionId?: string,
   provider?: AgentProvider,
-  cardPostId?: string
+  cardPostId?: string,
+  codexFlags: string[] = [],
+  bootCommand?: string
 ): string {
   const prelude = terminalPrelude(cwd, binDir);
+  // The board's Codex access (codex-permissions.ts), as shell words. Read from
+  // the board's config at every launch, so a reopened or restarted tab gets
+  // the same access as the one before it.
+  const codex = ['codex', ...codexFlags.map(shellQuote)].join(' ');
   const shell = `exec bash --norc -i`;
   if (!resumeAgentSessionId || !SAFE_SESSION_ID.test(resumeAgentSessionId)) {
     // No thread to resume. With a card to work from, open a NEW agent pointed
-    // at it; otherwise fall through to a plain shell.
-    if (!cardPostId) return `${prelude}; ${shell}`;
+    // at it; else the board's default for a new terminal when the tab was
+    // asked to start it (terminalBootCommand); otherwise a plain shell.
+    if (!cardPostId) {
+      return bootCommand
+        ? `${prelude}; ${bootCommand}; ${shell}`
+        : `${prelude}; ${shell}`;
+    }
     const prompt = cardBriefPrompt(cardPostId);
     const start =
       provider === 'codex'
-        ? `codex '${prompt}'`
+        ? `${codex} '${prompt}'`
         : `claude ${CLAUDE_PERMISSION_MODE} '${prompt}'`;
     return `${prelude}; ${start}; ${shell}`;
   }
   const resume =
     provider === 'codex'
-      ? `codex resume ${resumeAgentSessionId} '${RESUME_SEED}'`
+      ? `${codex} resume ${resumeAgentSessionId} '${RESUME_SEED}'`
       : `claude ${CLAUDE_PERMISSION_MODE} --resume ${resumeAgentSessionId} '${RESUME_SEED}'`;
   return `${prelude}; ${resume}; ${shell}`;
 }

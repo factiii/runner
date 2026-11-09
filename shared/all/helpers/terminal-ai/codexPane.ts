@@ -5,9 +5,10 @@
 // (chatPane.ts), and its tab reports `node` (the npm launcher) as its
 // command. So it is found the way `ps` would: a process whose argv is the
 // codex launcher or binary, on the tty of one of the card's tabs. The chat
-// cannot read Codex's transcript yet, so its commands are typed into that
-// tab, as the person would type them there.
+// closes it there before a turn of its own (chatRun.ts, through chatCli.ts),
+// and types /new or /compact into it while it is open.
 
+import { shellQuote } from '../board-agent-core/codex-permissions';
 import type { ExecTarget } from '../board-agent-core/exec';
 import { tmuxCli } from '../board-agent-core/tmux';
 import { SESSION_ID_RE } from './chatPane';
@@ -96,17 +97,29 @@ export async function stopCodexAgent(
   );
 }
 
-/** Resume a Codex conversation in the session's first tab idle at its
- *  prompt. False when no tab is free. */
+/** Open Codex in the session's first tab idle at its prompt, resuming
+ *  `conversation` when there is one (a new conversation without). With
+ *  `pane`, only in that tab (the one the chat closed Codex in). False when
+ *  no tab is free. */
 export async function startCodexAgent(
   target: ExecTarget,
   postId: string,
-  conversation: string
+  conversation: string | undefined,
+  // The board's access as Codex flags (codex-permissions.ts), so the tab
+  // opens as a terminal launch would.
+  flags: string[] = [],
+  pane?: string
 ): Promise<boolean> {
-  if (!SESSION_ID_RE.test(conversation)) return false;
-  const shell = await idleShellPane(target, postId);
+  // Validated rather than quoted: an id is a uuid, anything else is refused.
+  if (conversation && !SESSION_ID_RE.test(conversation)) return false;
+  const shell = await idleShellPane(target, postId, pane);
   if (!shell) return false;
-  await typeInPane(target, shell, `codex resume ${conversation}`);
+  const codex = ['codex', ...flags.map(shellQuote)].join(' ');
+  await typeInPane(
+    target,
+    shell,
+    conversation ? `${codex} resume ${conversation}` : codex
+  );
   return true;
 }
 

@@ -5,6 +5,12 @@ import {
   skillFrontmatterSchema
 } from '../../validators';
 
+/** Repo skills no CLI lists at start, so they cost no context in a session
+ *  (card 39b89977): an AI reads one only when told to, and the Skills tab runs
+ *  one by pointing the agent at its SKILL.md (host-run.ts). Never linked into a
+ *  CLI root. */
+export const ON_REQUEST_ROOT = '.agents/skills-on-request';
+
 // SKILL.md format handling. Deliberately free of node builtins as well as of
 // filesystem and git: the Skills modal parses and re-serialises in the browser,
 // and host-skills.ts owns everything that touches a disk.

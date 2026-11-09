@@ -53,6 +53,11 @@ export type SecretsKeyInfo = {
   /** 'file' for a sops blob, asked for with `--file`. Absent = an env key
    *  (and every row from an older runner). */
   kind?: 'env' | 'file';
+  /** On a declared key the store lacks: the undeclared key it holds under a
+   *  similar name (similarSecretKey.ts), likely the same credential stored
+   *  under the wrong name. Absent when nothing is close, and from an older
+   *  runner. */
+  storedAs?: string;
 };
 
 /** A key name a shell can carry. Anything else is a confused caller, and

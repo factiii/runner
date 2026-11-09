@@ -48,7 +48,11 @@ export type MediaTranscript = {
   segments?: TranscriptSegment[];
 };
 
-export type TranscriptSegment = { startSec: number; endSec: number; text: string };
+export type TranscriptSegment = {
+  startSec: number;
+  endSec: number;
+  text: string;
+};
 
 /** Hands a file to the platform's engine. Null when it cannot run here, or
  *  heard nothing; never throws, so an upload never waits on a failure. */
@@ -56,6 +60,27 @@ export type MediaTranscriber<F> = (
   file: F,
   options?: { onProgress?: (share: number) => void; signal?: AbortSignal }
 ) => Promise<MediaTranscript | null>;
+
+/** Why a take was not heard, when it was not for want of speech: the
+ *  recognizer needs a permission, cannot run here at all, or failed this time
+ *  (worth a retry). */
+export type TranscribeFailure = 'permission' | 'unavailable' | 'failed';
+
+/**
+ * Thrown by the engines' throwing variants (`hearMediaUri`, `hearMediaFile`)
+ * that the Record preview uses, so it can say why there are no words
+ * (.specs/screen-recording.md → Transcript). `message` is a short reason that
+ * reads after "Couldn't transcribe: ", lower-case first.
+ */
+export class TranscribeError extends Error {
+  readonly kind: TranscribeFailure;
+
+  constructor(kind: TranscribeFailure, message: string) {
+    super(message);
+    this.name = 'TranscribeError';
+    this.kind = kind;
+  }
+}
 
 // Video and audio a device can read the sound of: what the browser's
 // decodeAudioData and the OS recognizers open. mkv and avi are not here: no
@@ -158,7 +183,8 @@ export const recognizerSegments = (
     return [
       {
         startSec: piece.startTimeMillis / MS_PER_SECOND,
-        endSec: Math.max(piece.startTimeMillis, piece.endTimeMillis) / MS_PER_SECOND,
+        endSec:
+          Math.max(piece.startTimeMillis, piece.endTimeMillis) / MS_PER_SECOND,
         text
       }
     ];

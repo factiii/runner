@@ -1,4 +1,9 @@
-import { aiPromptPayloadSchema, type CliAskSettings } from '@shared/all/validators';
+import {
+  AI_NO_CLI_SIGNED_IN,
+  aiPromptPayloadSchema,
+  type CliAskSettings
+} from '@shared/all/validators';
+import { ollamaModelInUse } from '@shared/all/helpers/oakboxBackend';
 
 import type { AskEngines } from './ask';
 
@@ -28,16 +33,18 @@ export const NO_AI_ON_RUNNER =
   'This runner has no AI to use: sign Claude or Codex in, or add a model, under Account > Backend.';
 
 /** The engine that answers: the one asked for, else a signed-in Claude, then
- *  Codex, then the Ollama model asked for or the first on the machine. */
+ *  Codex, then the Ollama model asked for or the first on the machine. With
+ *  `cliOnly` there is no Ollama step: the client asks the person first. */
 async function pickEngine(
   engines: AiPromptEngines,
   asked: Engine | undefined,
-  model: string | null | undefined
+  model: string | null | undefined,
+  cliOnly = false
 ): Promise<{ engine: Engine; model: string | null }> {
-  const ollamaModel = async () => {
-    const held = await engines.ollamaModels();
-    return model && held.includes(model) ? model : (held[0] ?? null);
-  };
+  // The model asked for while held, else the table's largest held (the rule
+  // the client's model list highlights: ollamaModelInUse).
+  const ollamaModel = async () =>
+    ollamaModelInUse(model ?? null, await engines.ollamaModels());
   if (asked === 'ollama') {
     const tag = await ollamaModel();
     if (!tag) throw new Error(NO_AI_ON_RUNNER);
@@ -49,6 +56,7 @@ async function pickEngine(
       return { engine: cli, model: null };
     }
   }
+  if (cliOnly) throw new Error(AI_NO_CLI_SIGNED_IN);
   const tag = await ollamaModel();
   if (!tag) throw new Error(NO_AI_ON_RUNNER);
   return { engine: 'ollama', model: tag };
@@ -63,8 +71,8 @@ export async function answerAiPrompt(
 ): Promise<{ text: string; engine: Engine }> {
   const parsed = aiPromptPayloadSchema.safeParse(payload ?? {});
   if (!parsed.success) throw new Error('An AI request needs a prompt.');
-  const { prompt, engine: asked, model, claude, codex } = parsed.data;
-  const { engine, model: tag } = await pickEngine(engines, asked, model);
+  const { prompt, engine: asked, model, claude, codex, cliOnly } = parsed.data;
+  const { engine, model: tag } = await pickEngine(engines, asked, model, cliOnly);
   if (engine === 'ollama') {
     const text = await engines.ollama(
       tag ?? '',

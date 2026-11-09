@@ -58,7 +58,10 @@ function processEvent(
   state.sawValid = true;
 
   if (e.type === 'thread.started') {
-    if (e.thread_id) state.sessionId = e.thread_id;
+    if (e.thread_id) {
+      state.sessionId = e.thread_id;
+      cb.onSessionId?.(e.thread_id);
+    }
     return;
   }
 

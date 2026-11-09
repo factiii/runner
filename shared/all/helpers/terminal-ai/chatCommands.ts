@@ -15,6 +15,18 @@ export type RunnerChatCommand = Extract<ChatCommand, 'clear' | 'model' | 'compac
 
 type CommandSupport = { ok: true } | { ok: false; reason: string };
 
+/** What the chat calls the session's agent: "Ask Codex…", "Message Claude…". */
+export const CHAT_AGENT_NAME: Record<AgentProvider, string> = {
+  claude: 'Claude',
+  codex: 'Codex'
+};
+
+/** Whether a failed turn's error means the CLI is signed out on the runner
+ *  (Claude says "Not logged in · Please run /login"; Codex points at
+ *  `codex login`). Sign-in is the runner's, not the chat's to do. */
+export const isSignedOutError = (error: string): boolean =>
+  /not logged in|\/login|codex login/i.test(error);
+
 /** In the order the chat box draws them. */
 export const CHAT_COMMANDS: { command: ChatCommand; label: string; hint: string }[] = [
   { command: 'resume', label: '/resume', hint: 'Pick up a past conversation' },

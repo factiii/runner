@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'child_process';
+import fs from 'fs/promises';
 import path from 'path';
 
 import type { CardAITodo } from '../../domains/electron';
@@ -15,6 +16,7 @@ import {
 import prompts from './prompts.json';
 import { type AgentProvider, SECRETS_TOKEN_ENV } from './providers';
 import { DEPLOY_ORIGIN, type SecretsGate } from './secrets-gate';
+import { ON_REQUEST_ROOT } from './skill-format';
 
 // The skill run executor (see .specs/deploy.md "Run" and
 // .specs/skills-tab.md). The skill is the program; the harness owns the
@@ -82,6 +84,24 @@ export type DeployRunHooks = {
    *  the whole process group via killTree, which needs the real pid. */
   registerProc: (proc: ChildProcess | null) => void;
 };
+
+/** The repo-relative SKILL.md of a repo skill kept on request, or '' when the
+ *  skill is listed (a listed copy wins, as in the Skills tab) or is not a
+ *  repo skill. Read from the reset checkout, which is what the agent sees. */
+async function onRequestSkillFile(
+  workspace: string,
+  skill: RunSkill
+): Promise<string> {
+  if (skill.scope !== 'repo') return '';
+  const exists = (rel: string) =>
+    fs.access(path.join(workspace, rel)).then(
+      () => true,
+      () => false
+    );
+  if (await exists(`.agents/skills/${skill.name}/SKILL.md`)) return '';
+  const file = `${ON_REQUEST_ROOT}/${skill.name}/SKILL.md`;
+  return (await exists(file)) ? file : '';
+}
 
 export async function startSkillRun(opts: {
   /** The skill to follow. Omitted: deploy, as before skill runs. */
@@ -173,10 +193,16 @@ export async function startSkillRun(opts: {
   const reminder = deploy
     ? 'Reminder: every declared deploy variable is intentionally unset in your shell. Never check for them or abort over them - prefix any command that needs one with `factiii-secrets run --` and the runner injects the values.'
     : 'Reminder: secrets are intentionally unset in your shell. Prefix any command that needs one with `factiii-secrets run --key NAME --` and the runner injects the value.';
-  const executeOpening =
+  // A skill on request is in no CLI's listing, so neither a slash command nor
+  // a name finds it: the agent is pointed at the file instead.
+  const onRequestFile = await onRequestSkillFile(workspace, skill);
+  const byName =
     opts.provider === 'codex'
       ? `Use the "${skill.name}" skill: load it and execute it step by step.`
       : `/${skill.name}`;
+  const executeOpening = onRequestFile
+    ? `Read \`${onRequestFile}\` (the "${skill.name}" skill) and execute it step by step.`
+    : byName;
   const opening = task?.opening ?? executeOpening;
   let prompt = [opening, releaseNote, reminder].filter(Boolean).join('\n\n');
   let sessionId = '';

@@ -335,6 +335,11 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     // Whether the runner's Claude and Codex are signed in, for Oakbox's
     // sign-ins with no board (RUNNER_SIGNIN_ACTIONS). Only ever runner-wide.
     'cliSignins',
+    // The runner's Git connections (Status > Git): its owner's GitHub
+    // accounts, which every board picks from. Runner-wide. A list carries no
+    // token; a pasted one is refused on the relay (relaySecretsRefusal).
+    'gitConnections',
+    'gitConnectionAct',
     // Categorize on the runner (VAULT_ACTIONS): its run spends the owner's
     // machine and, with Claude or Codex, their sign-in. The Vault refuses a
     // member too (vault/access.ts).
@@ -628,6 +633,9 @@ export function relaySecretsRefusal(
     return RELAY_SECRETS_REFUSAL;
   }
   if (action === 'setConfig' && nonEmptyString(p['githubToken'])) {
+    return RELAY_SECRETS_REFUSAL;
+  }
+  if (action === 'gitConnectionAct' && p['op'] === 'addToken') {
     return RELAY_SECRETS_REFUSAL;
   }
   if (action === 'machineCleanup' && p['confirm'] === true) {

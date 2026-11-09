@@ -6,6 +6,7 @@ import type {
   RunnerMachineHealth,
   RunnerStoreName
 } from '../domains/electron';
+import type { AiCli, AiSource } from '../validators/aiSource';
 import type {
   CLAUDE_ASK_EFFORTS,
   CLAUDE_ASK_MODELS,
@@ -37,8 +38,12 @@ export type OakboxBackend = {
   codexModel: (typeof CODEX_ASK_MODELS)[number] | null;
   codexEffort: (typeof CODEX_ASK_EFFORTS)[number] | null;
   /** Factiii's AI features run on `runnerId` by default, not on Trons
-   *  ("AI features"). */
+   *  ("AI features"). Kept in step with `aiSource` for older apps. */
   aiOnRunner: boolean;
+  /** Where Factiii's AI features run by default (.specs/ai-source.md). */
+  aiSource: AiSource;
+  /** On RUNNER, the CLI it uses; null lets the runner pick. */
+  aiCli: AiCli | null;
 };
 
 /** An account that never chose. */
@@ -50,7 +55,9 @@ export const DEFAULT_OAKBOX_BACKEND: OakboxBackend = {
   claudeEffort: null,
   codexModel: null,
   codexEffort: null,
-  aiOnRunner: false
+  aiOnRunner: false,
+  aiSource: 'TRONS',
+  aiCli: null
 };
 
 /** A runner as Oakbox's lists carry it (`runners.vaultOnline`). */
@@ -317,6 +324,25 @@ export function defaultAskModel(installed: string[]): string | null {
   );
 }
 
+/**
+ * The Ollama model Factiii's AI features answer with on a runner holding
+ * `installed` (.specs/ai-source.md "Which Ollama model"): Backend's `model`
+ * while the runner holds it, else `defaultAskModel`. The one rule for the
+ * runner (vault/aiPrompt.ts), the AI picker's "Ollama · <model>" and the
+ * model list on Settings > AI and the runner's Status > AI.
+ */
+export function ollamaModelInUse(
+  model: string | null,
+  installed: string[]
+): string | null {
+  if (model) {
+    const key = ollamaTagKey(model);
+    const held = installed.find((tag) => ollamaTagKey(tag) === key);
+    if (held) return held;
+  }
+  return defaultAskModel(installed);
+}
+
 /** One tag as Backend lists it: under its family, or the family's quick
  *  actions. */
 export type BackendModelRow = {
@@ -515,6 +541,44 @@ export function modelJobLine(job: RunnerLocalAiJob): string {
   return `${verb} ${title} did not finish.`;
 }
 
+const SIZE_UNITS: Record<string, number> = {
+  B: 1e-9,
+  KB: 1e-6,
+  MB: 1e-3,
+  GB: 1
+};
+
+/** One layer's line of `ollama pull`: "pulling 74701a8c35f6:  45% ▕██  ▏
+ *  590 MB/1.3 GB  30 MB/s  22s", or "… 100% ▕████▏ 1.3 GB" once it is in. */
+const PULL_LAYER_LINE =
+  /^pulling ([0-9a-f]+):\s*(\d{1,3})%[^\d]*(?:[\d.]+\s*[KMG]?B\s*\/\s*)?([\d.]+)\s*([KMG]?B)?/;
+
+/**
+ * How far a running pull is, 0 to 100, from its output lines; null until
+ * Ollama prints a layer's percent. Each layer counts by its size (the model's
+ * weights are nearly all of it), at its newest line.
+ */
+export function modelJobPercent(job: RunnerLocalAiJob): number | null {
+  const layers = new Map<string, { percent: number; gb: number }>();
+  for (const line of job.lines) {
+    const m = PULL_LAYER_LINE.exec(line);
+    if (!m) continue;
+    const unit = SIZE_UNITS[m[4] ?? ''] ?? 0;
+    layers.set(m[1]!, {
+      percent: Math.min(100, Number(m[2])),
+      gb: Number(m[3]) * unit
+    });
+  }
+  if (layers.size === 0) return null;
+  const all = [...layers.values()];
+  const total = all.reduce((sum, l) => sum + l.gb, 0);
+  const share =
+    total > 0
+      ? all.reduce((sum, l) => sum + l.percent * l.gb, 0) / total
+      : all[all.length - 1]!.percent;
+  return Math.round(share);
+}
+
 // ── Claude and Codex ──
 
 type CliEngine = 'claude' | 'codex';
@@ -571,29 +635,8 @@ export function cliModelLabel(
 }
 
 // ── AI features: Trons or the person's runner ──
-// (.specs/oakbox.md "Backend" → AI features). The words the switch says, for
-// the web and the phone app.
-
-type AiTargetChoice = 'TRONS' | 'RUNNER';
-
-/** One side of the switch: "Trons", or the runner by name. */
-export const aiTargetLabel = (
-  target: AiTargetChoice,
-  runnerName: string
-): string => (target === 'RUNNER' ? runnerName : 'Trons');
-
-/** Under the switch, while this use is not the default. */
-export const aiTargetMakeDefault = (
-  target: AiTargetChoice,
-  runnerName: string
-): string =>
-  target === 'RUNNER' ? `Use ${runnerName} for all AI` : 'Use Trons for all AI';
-
-/** Under the switch on the runner side: what it costs, and why it can fail. */
-export const aiOnRunnerLine = (runnerName: string, online: boolean): string =>
-  online
-    ? `Runs on ${runnerName}'s own Claude, Codex or Ollama. No Trons.`
-    : `${runnerName} is offline, so Trons will answer instead.`;
+// (.specs/ai-source.md). The picker's words are in helpers/aiSource.ts; this
+// is the one a recording's title says when its runner fell back.
 
 /** A runner that could not answer, so Trons did. */
 export const aiRunnerFellBack = (message: string): string =>

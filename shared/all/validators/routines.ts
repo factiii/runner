@@ -16,6 +16,11 @@ export const ROUTINES_PER_USER_MAX = 25;
 export const routineEngineSchema = z.enum(['RUNNER', 'TRONS']);
 export type RoutineEngine = z.infer<typeof routineEngineSchema>;
 
+/** When a finished run notifies its owner. A failure always does; ALWAYS adds
+ *  every answer, IMPORTANT only the ones its AI marked important. */
+export const routineNotifySchema = z.enum(['ALWAYS', 'IMPORTANT']);
+export type RoutineNotify = z.infer<typeof routineNotifySchema>;
+
 const tronCapSchema = z
   .number()
   .int()
@@ -41,7 +46,13 @@ const routineFields = {
   daysOfWeek: z.array(z.number().int().min(0).max(6)).max(7),
   enabled: z.boolean(),
   maxTronsPerRun: tronCapSchema,
-  maxTronsPerDay: tronCapSchema
+  maxTronsPerDay: tronCapSchema,
+  /** Absent from a client older than it: IMPORTANT. */
+  notify: routineNotifySchema.default('IMPORTANT'),
+  /** May its tools read X (search, posts, mentions) / post to X as the
+   *  owner. Each is paid in Trons. Absent from an older client: off. */
+  xRead: z.boolean().default(false),
+  xWrite: z.boolean().default(false)
 };
 
 const runnerNeedsBoard = (v: {
@@ -80,7 +91,9 @@ export const routineDueFrameSchema = z.object({
   routineId: z.number().int().positive(),
   spaceSlug: z.string().min(1).max(128),
   title: z.string().min(1).max(ROUTINE_TITLE_MAX),
-  prompt: z.string().min(1).max(ROUTINE_PROMPT_MAX),
+  /** The routine's prompt, plus the line on marking an answer important
+   *  (ROUTINE_IMPORTANT_HINT) when it notifies only then. */
+  prompt: z.string().min(1).max(ROUTINE_PROMPT_MAX + 1_000),
   /** The routine owner's user id: the session acts for them. */
   userId: z.number().int().positive()
 });
@@ -92,3 +105,19 @@ export const routineDueAckSchema = z.union([
   z.object({ ok: z.literal(false), error: z.string().max(500) })
 ]);
 export type RoutineDueAck = z.infer<typeof routineDueAckSchema>;
+
+/** The most of a session's answer a run keeps. */
+export const ROUTINE_OUTPUT_MAX = 20_000;
+
+/** Runner → server, `runner:routine-result`: the session a routine started
+ *  has finished. `output` is what the session said last (its summary); a
+ *  FAILED result says why in `error`. The server takes it only from the run
+ *  owner's runner, for a run still RUNNING with this session. */
+export const routineResultFrameSchema = z.object({
+  runId: z.number().int().positive(),
+  sessionId: z.string().min(1).max(128),
+  status: z.enum(['DONE', 'FAILED']),
+  output: z.string().max(ROUTINE_OUTPUT_MAX).optional(),
+  error: z.string().max(500).optional()
+});
+export type RoutineResultFrame = z.infer<typeof routineResultFrameSchema>;

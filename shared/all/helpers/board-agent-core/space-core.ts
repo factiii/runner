@@ -2,25 +2,28 @@ import { chmod, copyFile, mkdir, readFile } from 'fs/promises';
 import path from 'path';
 
 import {
+  type GitConnectionChoice,
   type PendingSecretsAuth,
   type RunnerJobInfo,
   type RunnerJobState,
   type SecureStoreStatus,
-  SETUP_LOG_PREFIX
+  SETUP_LOG_PREFIX,
+  type TerminalDefault
 } from '../../domains/electron';
+import { likelyStoredAs } from '../similarSecretKey';
 import { TERMINAL_FP_OPTION, terminalDigest } from '../terminal-ai/digest';
 import { terminalInitScript } from '../terminal-ai/initScript';
 import { markOnboardingComplete } from './agent';
 import { cliHomes } from './agent-homes';
 import { AuditLog } from './audit';
-import { removeDefaultHomeLeftovers } from './default-home-cleanup';
 import { type BoardMcpChannel, openBoardMcpRelay } from './board-mcp-relay';
-import { sessionPortBlocks } from './port-blocks';
+import { writeCodexConfig } from './codex-config';
+import { type CodexAccess, resolveCodexAccess } from './codex-permissions';
+import { removeDefaultHomeLeftovers } from './default-home-cleanup';
 import {
-  type SessionLinks,
-  withSessionCardTools
-} from './session-card-tools';
-import type { HypervisorHost } from './session-hypervisor';
+  cleanTerminalCommand,
+  resolveTerminalDefault
+} from './git-connections';
 import {
   allocateSpacePorts,
   type ExecTarget,
@@ -57,6 +60,7 @@ import {
   renderPlugin,
   SECRETS_BIN
 } from './plugin';
+import { sessionPortBlocks } from './port-blocks';
 import {
   type AgentProvider,
   codexMcpName,
@@ -83,6 +87,8 @@ import { authorizeAndRun, containedCwd } from './secrets-run';
 import { UnlockWindow } from './secrets-window';
 import type { AgentEventSink, CardAIConfig, ConfigProvider } from './session';
 import { ActivityTracker } from './session';
+import { type SessionLinks, withSessionCardTools } from './session-card-tools';
+import type { HypervisorHost } from './session-hypervisor';
 import { ensureRedis, ensureStateStore } from './state';
 import {
   ensureTmuxResurrect,
@@ -438,7 +444,10 @@ export class SpaceCore {
             openBoardMcpRelay({
               upstream,
               accessToken: () => this.accessToken(),
-              channel: ch
+              channel: ch,
+              // A claimed but unproven session is not named: the server
+              // would let it spend its routine's Trons on X.
+              session: verified ? session : undefined
             });
           // The session tools, where the engine has sessions to link, and
           // the hypervisor's where the runner lends its boards.
@@ -533,7 +542,16 @@ export class SpaceCore {
           ...describeSecret(meta[key], declaredFiles.get(key))
         })
       );
-    return [...keys, ...files];
+    // A declared key the store lacks, beside an undeclared one it holds under
+    // a similar name, is likely one credential under the wrong name. Env keys
+    // pair with env keys, files with files.
+    const withStoredAs = (rows: SecretsKeyInfo[]) => {
+      const storedAs = likelyStoredAs(rows);
+      return rows.map((r) =>
+        storedAs[r.key] ? { ...r, storedAs: storedAs[r.key] } : r
+      );
+    };
+    return [...withStoredAs(keys), ...withStoredAs(files)];
   }
 
   private spaceSecretsToken = '';
@@ -580,30 +598,34 @@ export class SpaceCore {
     // every call: a spawn freezes what it is handed, and a tmux session keeps
     // it for as long as the tab lives, so a var that is merely LATE is one that
     // terminal never gets.
-    this.execTarget ??= hostTarget(this.spaceDir(), () => {
-      const env: Record<string, string> = {};
-      // The one check that answers "am I inside a runner, and for which
-      // board": the plugin's SessionStart hook (bin/session-context.sh)
-      // prints the workspace facts only when this is set, and names it.
-      env.FACTIII_SPACE = this.spaceSlug;
-      // The board's id, which a rename does not change. A terminal keeps the
-      // env it started with, so after a rename FACTIII_SPACE is the old slug;
-      // the CLI and the plugin's programs look this id up in the runner's
-      // spaces.json for the slug and the name the board has now
-      // (apps/runner/src/boardRegistry.ts). Absent on a host that never
-      // learned the id.
-      if (this.spaceId) env.FACTIII_SPACE_ID = String(this.spaceId);
-      // The session's one credential, for both things it reaches over the
-      // secrets socket: `factiii-secrets` and the board MCP
-      // (`factiii-board-mcp`). Never the runner's access token.
-      env[SECRETS_TOKEN_ENV] = this.secretsToken();
-      // Where that socket is. Both programs can also find it from inside the
-      // space tree, but an agent started somewhere else could not.
-      env.FACTIII_SECRETS_SOCK = secretsSocketPath(this.spaceDir());
-      return env;
-      // The token for the runner's own git calls to origin, read per call so
-      // a reconnect is used at once. Not in the env above: no session gets it.
-    }, () => this.readConfig().githubToken || '');
+    this.execTarget ??= hostTarget(
+      this.spaceDir(),
+      () => {
+        const env: Record<string, string> = {};
+        // The one check that answers "am I inside a runner, and for which
+        // board": the plugin's SessionStart hook (bin/session-context.sh)
+        // prints the workspace facts only when this is set, and names it.
+        env.FACTIII_SPACE = this.spaceSlug;
+        // The board's id, which a rename does not change. A terminal keeps the
+        // env it started with, so after a rename FACTIII_SPACE is the old slug;
+        // the CLI and the plugin's programs look this id up in the runner's
+        // spaces.json for the slug and the name the board has now
+        // (apps/runner/src/boardRegistry.ts). Absent on a host that never
+        // learned the id.
+        if (this.spaceId) env.FACTIII_SPACE_ID = String(this.spaceId);
+        // The session's one credential, for both things it reaches over the
+        // secrets socket: `factiii-secrets` and the board MCP
+        // (`factiii-board-mcp`). Never the runner's access token.
+        env[SECRETS_TOKEN_ENV] = this.secretsToken();
+        // Where that socket is. Both programs can also find it from inside the
+        // space tree, but an agent started somewhere else could not.
+        env.FACTIII_SECRETS_SOCK = secretsSocketPath(this.spaceDir());
+        return env;
+        // The token for the runner's own git calls to origin, read per call so
+        // a reconnect is used at once. Not in the env above: no session gets it.
+      },
+      () => this.readConfig().githubToken || ''
+    );
     return this.execTarget;
   }
 
@@ -626,6 +648,14 @@ export class SpaceCore {
     );
   }
 
+  /** How much Codex may do in this space's sessions (codex-permissions.ts;
+   *  per-space config, default standard). */
+  codexAccess(): CodexAccess {
+    return resolveCodexAccess(
+      this.configProvider.readConfig(this.spaceSlug).codexAccess
+    );
+  }
+
   /** The space's persisted creds for one provider, read from its state dir. */
   private async probeLoggedIn(provider: AgentProvider): Promise<boolean> {
     if (this.loggedIn[provider]) return true;
@@ -642,20 +672,32 @@ export class SpaceCore {
     gitName: string;
     gitEmail: string;
     provider: AgentProvider;
+    codexAccess: CodexAccess;
     claudeLoggedIn: boolean;
     codexLoggedIn: boolean;
     hasGithubToken: boolean;
     githubTokenHint: string;
     tokensEncrypted: boolean;
     secureStore?: SecureStoreStatus;
+    gitConnectionId?: string;
+    gitConnections?: GitConnectionChoice[];
+    terminalDefault: TerminalDefault;
+    terminalCommand: string;
   }> {
     const config = this.configProvider.readConfig(this.spaceSlug);
     return {
+      // Which runner Git connection (absent on a board not moved yet), the
+      // ones it may pick from, and what its new terminals start.
+      gitConnectionId: config.gitConnectionId,
+      gitConnections: this.configProvider.gitConnectionChoices?.(),
+      terminalDefault: resolveTerminalDefault(config.terminalDefault),
+      terminalCommand: config.terminalCommand ?? '',
       repoUrl: config.repoUrl,
       mainBranch: config.mainBranch,
       gitName: config.gitName,
       gitEmail: config.gitEmail,
       provider: resolveProvider(config.provider),
+      codexAccess: resolveCodexAccess(config.codexAccess),
       claudeLoggedIn: await this.probeLoggedIn('claude'),
       codexLoggedIn: await this.probeLoggedIn('codex'),
       hasGithubToken: Boolean(config.githubToken),
@@ -678,8 +720,18 @@ export class SpaceCore {
     gitEmail?: string;
     githubToken?: string;
     provider?: AgentProvider;
+    codexAccess?: CodexAccess;
+    gitConnectionId?: string;
+    terminalDefault?: TerminalDefault;
+    terminalCommand?: string;
   }): { success: boolean } {
     const existing = this.configProvider.readConfig(this.spaceSlug);
+    if (
+      partial.gitConnectionId &&
+      this.configProvider.gitConnectionToken?.(partial.gitConnectionId) == null
+    ) {
+      throw new Error('That Git connection is not on this runner.');
+    }
     const updated: CardAIConfig = {
       repoUrl: partial.repoUrl ?? existing.repoUrl,
       mainBranch: partial.mainBranch ?? existing.mainBranch,
@@ -687,7 +739,22 @@ export class SpaceCore {
       gitEmail: partial.gitEmail ?? existing.gitEmail,
       githubToken:
         partial.githubToken?.replace(/\s/g, '') || existing.githubToken,
-      provider: partial.provider ?? existing.provider
+      provider: partial.provider ?? existing.provider,
+      codexAccess:
+        partial.codexAccess !== undefined
+          ? resolveCodexAccess(partial.codexAccess)
+          : existing.codexAccess,
+      // A pick replaces the board's identity with the connection's: the
+      // provider's readConfig fills both from it.
+      gitConnectionId: partial.gitConnectionId ?? existing.gitConnectionId,
+      terminalDefault:
+        partial.terminalDefault !== undefined
+          ? resolveTerminalDefault(partial.terminalDefault)
+          : existing.terminalDefault,
+      terminalCommand:
+        partial.terminalCommand !== undefined
+          ? cleanTerminalCommand(partial.terminalCommand)
+          : existing.terminalCommand
     };
     this.configProvider.writeConfig(this.spaceSlug, updated);
     // A different repo invalidates the clone and every worktree under it, and
@@ -707,9 +774,19 @@ export class SpaceCore {
     return this.configProvider.spaceDir(this.spaceSlug);
   }
 
+  /** A runner Git connection's token, for its repo picker; null when the
+   *  host has no such connection (or no root connections at all). */
+  gitConnectionToken(id: string): string | null {
+    return this.configProvider.gitConnectionToken?.(id) ?? null;
+  }
+
+  /** Disconnect this board from GitHub. A board on a runner Git connection
+   *  lets go of it ('' is none) and the connection stays for the others;
+   *  its token is the runner's to remove (Status > Git). */
   clearToken(key: 'githubToken'): { success: boolean } {
     const existing = this.configProvider.readConfig(this.spaceSlug);
     existing[key] = '';
+    if (existing.gitConnectionId !== undefined) existing.gitConnectionId = '';
     this.configProvider.writeConfig(this.spaceSlug, existing);
     return { success: true };
   }
@@ -1061,8 +1138,9 @@ export class SpaceCore {
 
   /** Let `factiii-secrets` past both CLIs' own gates (secrets-permission.ts):
    *  an allow rule merged into claude's user settings, and codex's own rules
-   *  file. In the homes the CLIs use here (`cliHomes`: the runner's own), so
-   *  the person's own sessions get no rule. Only for a CLI whose config
+   *  file, plus the rest of Codex's home the runner sets (codex-config.ts).
+   *  In the homes the CLIs use here (`cliHomes`: the runner's own), so the
+   *  person's own sessions get no rule. Only for a CLI whose config
    *  directory exists, so a machine without one gets nothing written for it.
    *  Best-effort, like the plugin lane: without it the CLI asks first, or
    *  claude's classifier refuses. */
@@ -1070,9 +1148,14 @@ export class SpaceCore {
     const target = this.target();
     try {
       const { claude: claudeDir, codex: codexDir } = cliHomes();
+      const { repo, workspace } = target.paths;
       await Promise.all([
         writeClaudeSecretsRules(target, claudeDir),
-        writeCodexSecretsRules(target, codexDir)
+        writeCodexSecretsRules(target, codexDir),
+        // CLAUDE.md as Codex's project doc, this board's clone (and so each
+        // of its worktrees) and workspace trusted, and the one-off "always
+        // allow" answers pruned once per Codex home (codex-config.ts).
+        writeCodexConfig(target, codexDir, [repo, workspace])
       ]);
     } catch {
       // Nothing to undo: each file is replaced whole by a rename, or not at all.

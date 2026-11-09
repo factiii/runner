@@ -88,6 +88,10 @@ import {
 import path from 'path';
 import { io, type Socket } from 'socket.io-client';
 
+import {
+  CODEX_ACCESS_DEFAULT,
+  type CodexAccess
+} from '@shared/all/helpers/board-agent-core/codex-permissions';
 import { type ExecTarget, hostTarget } from '@shared/all/helpers/board-agent-core/exec';
 import { revokeGithubTokenViaServer } from '@shared/all/helpers/board-agent-core/github-auth';
 import { runnerDir } from '@shared/all/helpers/board-agent-core/runner-dir';
@@ -96,6 +100,7 @@ import { TerminalManager } from '@shared/all/helpers/terminal-ai/terminal';
 import {
   credentialStoreStatus,
   getConfiguredConnections,
+  boardFiles,
   listConfiguredSlugs,
   localConfigProvider
 } from './agent-adapter';
@@ -115,6 +120,7 @@ import { createDaemonNuke, type DaemonNuke } from './daemonNuke';
 import { keepLogLimited } from './logLimit';
 import { machineNukeHost, stopTmuxSessionsIn, unpairOverSocket } from './nukeHost';
 import { watchProcessCount } from './processWatch';
+import { watchMachineHealth } from './healthWatch';
 import { KeepAwake } from './keepAwake';
 import { LidHold, readThermal } from './lidHold';
 import { run } from './machine';
@@ -124,6 +130,7 @@ import { CONFIG_DIR, safeSlug } from './paths';
 import { serverReadiness } from './serverReadinessIo';
 import { startStatusHeartbeat } from './statusPage';
 import { promptPassword } from './promptPassword';
+import { watchRoutineSession } from './routineWatch';
 import {
   createTokenKeeper,
   heartbeatIntervalMs,
@@ -139,6 +146,11 @@ import {
 import type { LocalAiTags } from './localAiTags';
 import type { PartsManager } from './partsManager';
 import { type CliSignins, machineCliSignins } from './cliSignins';
+import {
+  createGitConnectionsHost,
+  type GitConnectionsHost,
+  reconcileGitConnections
+} from './gitConnections';
 import { createLocalAiTags, createPartsManager } from './runnerParts';
 import { type AiPromptEngines, answerAiPrompt } from './vault/aiPrompt';
 import { machineAskEngines } from './vault/askEngines';
@@ -749,6 +761,45 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     return null;
   };
 
+  // The Codex access of the board a card's tab belongs to, scoped like the
+  // two above. Standard when no board in scope has the card.
+  const findCodexAccessInScope = (
+    scope: ChannelScope,
+    postId: string
+  ): CodexAccess => {
+    for (const [spaceSlug, engine] of engines) {
+      if (!rawUseAllowed(levelOn(scope, spaceSlug), 'terminal')) continue;
+      if (engine.getCardTarget(postId)) return engine.codexAccess();
+    }
+    return CODEX_ACCESS_DEFAULT;
+  };
+
+  // The default for a new terminal of the board a session belongs to,
+  // scoped like the lookups above. None when no board in scope has it.
+  const findTerminalDefaultInScope = (
+    scope: ChannelScope,
+    postId: string
+  ): ReturnType<BoardAgentEngine['terminalDefault']> | null => {
+    for (const [spaceSlug, engine] of engines) {
+      if (!rawUseAllowed(levelOn(scope, spaceSlug), 'terminal')) continue;
+      if (engine.getCardTarget(postId)) return engine.terminalDefault();
+    }
+    return null;
+  };
+
+  // Whether the session's chat holds its Claude conversation, so a tab
+  // created now boots to its shell (chatRun.ts claimTab).
+  const chatClaimsTabInScope = (
+    scope: ChannelScope,
+    postId: string
+  ): boolean => {
+    for (const [spaceSlug, engine] of engines) {
+      if (!rawUseAllowed(levelOn(scope, spaceSlug), 'terminal')) continue;
+      if (engine.getCardTarget(postId)) return engine.chatClaimsTab(postId);
+    }
+    return false;
+  };
+
   // Runner-wide messages (e.g. self-update status) — every channel that has a
   // level somewhere, no board.
   const broadcastToAll = (msg: string) => {
@@ -1140,6 +1191,42 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         // re-reports
       });
   };
+
+  // The runner's Git connections (gitConnections.ts): Status > Git, and the
+  // move of every board's own GitHub token into them, at every start (it
+  // does nothing once done). The boards' engines read the result at once:
+  // readConfig resolves a board's token from the root on every call.
+  const gitConnections = createGitConnectionsHost({
+    boards: boardFiles,
+    revokeToken: (token) =>
+      revokeGithubTokenViaServer(config.serverUrl, config.authToken, token),
+    onChanged: reportConnections
+  });
+  void reconcileGitConnections(boardFiles)
+    .then(({ moved, merged, cleaned }) => {
+      if (moved || merged) {
+        console.log(
+          `[git] ${moved} board${moved === 1 ? '' : 's'} moved to the runner's Git connections${
+            merged ? `, ${merged} merged` : ''
+          }`
+        );
+        reportConnections();
+      }
+      if (cleaned) {
+        console.log(
+          `[git] old GitHub token deleted from ${cleaned} board${cleaned === 1 ? '' : 's'} on a verified Git connection`
+        );
+      }
+    })
+    .catch((err: unknown) => {
+      // Locked or offline: every board still reads its own token, and the
+      // next start tries again.
+      console.error(
+        `[git] Could not move boards to the runner's Git connections: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    });
 
   // Push the credential-store state to every open panel: unlocking from one
   // device must light up the others rather than leave them on a stale padlock.
@@ -1556,10 +1643,34 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           detail: `Chat session ${sessionId} "${data.title}" for routine ${data.routineId} (run ${data.runId})`
         });
         ack({ ok: true, sessionId });
+        // The run stays RUNNING on the server until the session finishes;
+        // then its answer goes back as the run's output. A runner that
+        // restarts mid-session never reports it, and the server's sweep
+        // fails the run instead.
+        void watchRoutineSession({
+          state: () => board.sessions().find((s) => s.id === sessionId)?.state ?? null,
+          transcript: () => board.transcript(sessionId),
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          now: () => Date.now()
+        })
+          .then((result) => {
+            socket.emit('runner:routine-result', { runId: data.runId, sessionId, ...result });
+          })
+          .catch((err: unknown) => {
+            console.error(
+              `Routine ${data.routineId} (run ${data.runId}): could not report its session: ${err instanceof Error ? err.message : String(err)}`
+            );
+          });
       } catch (err) {
         ack({ ok: false, error: err instanceof Error ? err.message : String(err) });
       }
     })();
+  });
+
+  // Disk and memory, for the owner's low-space banner and push
+  // (healthWatch.ts). A change while offline is said on the next connect.
+  const healthWatch = watchMachineHealth((alert) => {
+    if (socket.connected) socket.emit('runner:health', alert);
   });
 
   socket.on('connect', () => {
@@ -1569,6 +1680,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     // The server keeps the last report per connection, so every (re)connect
     // says it again; until it does, the server treats every member as None.
     socket.emit('runner:access-state', { grants, vault: vault.members() });
+    // The server keeps the last reading per connection, as with the grants.
+    const health = healthWatch.current();
+    if (health) socket.emit('runner:health', health);
     sendHeartbeat();
     void refreshToken(false);
     void askBoardNames();
@@ -1707,7 +1821,14 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       new TerminalManager(
         sendRawToChannel,
         (postId) => findCardTargetInScope(scope, postId),
-        (postId) => findCardWorkdirInScope(scope, postId)
+        (postId) => findCardWorkdirInScope(scope, postId),
+        // The board's Codex access (codex-permissions.ts), for a Codex the
+        // tab launches: read at each launch, so it holds across restarts.
+        (postId) => findCodexAccessInScope(scope, postId),
+        (postId) => chatClaimsTabInScope(scope, postId),
+        // What the board starts in a new terminal, for a session's first
+        // tab opened on the Terminal.
+        (postId) => findTerminalDefaultInScope(scope, postId)
       )
     );
 
@@ -1865,6 +1986,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         cliSignins,
         keepAwake,
         nuke,
+        gitConnections,
         {
           connections: () => runnerConnections.connections(linkId),
           logs: (payload) => runnerConnections.logs(payload)
@@ -2402,6 +2524,7 @@ async function handleDataChannelMessage(
   cliSignins: CliSignins,
   keepAwake: KeepAwake,
   nuke: DaemonNuke,
+  gitConnections: GitConnectionsHost,
   /** The owner's Remote connections, bound to this link (its `you`). */
   connections: {
     connections: () => ReturnType<RunnerConnectionsHost['connections']>;
@@ -2561,6 +2684,31 @@ async function handleDataChannelMessage(
         action === 'runnerLogs'
           ? await connections.logs(payload)
           : await connections.connections();
+      sendResult({ type: 'result', requestId, result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${ts()}] ✗ ${action} FAILED: ${message}`);
+      sendResult({ type: 'result', requestId, error: message });
+    }
+    return;
+  }
+
+  // The runner's Git connections (gitConnections.ts): Status > Git. Runner-
+  // wide whether or not a board is named, and the owner's alone
+  // (OWNER_ONLY_ACTIONS). A pasted token was refused on the relay above.
+  if (action === 'gitConnections' || action === 'gitConnectionAct') {
+    try {
+      if (scope.role !== 'owner') {
+        throw new Error(
+          'Only the owner of this runner can manage its Git connections.'
+        );
+      }
+      const result =
+        action === 'gitConnectionAct'
+          ? await gitConnections.act(
+              payload as BoardAgentActionMap['gitConnectionAct']['payload']
+            )
+          : gitConnections.state();
       sendResult({ type: 'result', requestId, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

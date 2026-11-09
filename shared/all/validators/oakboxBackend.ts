@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { aiCliSchema, aiSourceSchema } from './aiSource';
 import { ollamaTagSchema } from './runnerParts';
 
 // How Oakbox works for an account (.specs/oakbox.md "Backend"): on Factiii's
@@ -55,6 +56,11 @@ export type CliAskSettings =
   | z.infer<typeof claudeAskSettingsSchema>
   | z.infer<typeof codexAskSettingsSchema>;
 
+/** A runner's refusal of a `cliOnly` prompt: no Claude or Codex signed in.
+ *  The client asks before using the runner's Ollama model instead. */
+export const AI_NO_CLI_SIGNED_IN =
+  'No Claude or Codex is signed in on this runner.';
+
 /** The longest prompt a Factiii AI feature sends a runner (`aiPrompt`). */
 export const AI_PROMPT_MAX_CHARS = 40_000;
 
@@ -66,6 +72,11 @@ export const aiPromptPayloadSchema = z
   .object({
     prompt: z.string().trim().min(1).max(AI_PROMPT_MAX_CHARS),
     engine: z.enum(['claude', 'codex', 'ollama']).optional(),
+    /** With no `engine`: a signed-in Claude or Codex only. With neither
+     *  signed in the runner refuses with `AI_NO_CLI_SIGNED_IN` instead of
+     *  answering with its Ollama model, so the client can ask the person
+     *  first (Jon 2026-11-09, card c37 q2). */
+    cliOnly: z.boolean().optional(),
     /** The Ollama model to use; none is Account > Backend's, else the
      *  first on the runner. */
     model: ollamaTagSchema.nullable().optional(),
@@ -89,7 +100,13 @@ export const oakboxBackendSetSchema = z.object({
   codexEffort: z.enum(CODEX_ASK_EFFORTS).nullable().optional(),
   /** Factiii's AI features run on the runner by default, not on Trons.
    *  Absent from an app from before it: the saved one is kept. */
-  aiOnRunner: z.boolean().optional()
+  aiOnRunner: z.boolean().optional(),
+  /** Where Factiii's AI features run by default (.specs/ai-source.md).
+   *  Absent from an app from before it: `aiOnRunner` sets it. */
+  aiSource: aiSourceSchema.optional(),
+  /** On RUNNER, the CLI it uses ("Runner · Codex"); null lets the runner
+   *  pick. Absent from an app from before it: the saved one is kept. */
+  aiCli: aiCliSchema.nullable().optional()
 });
 
 export type OakboxBackendMode = z.infer<typeof oakboxBackendModeSchema>;

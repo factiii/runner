@@ -58,11 +58,17 @@ export type Migration = {
   boards: MigrationBoard[];
   /** Relative path under ~/.agents/skills → base64 contents. */
   skills: Record<string, string>;
+  /** The same for ~/.agents/skills-on-request, the skills no CLI lists and
+   *  agents read only when named. Absent from older migration files. */
+  skillsOnRequest?: Record<string, string>;
   services: MigrationService[];
 };
 
 export const skillsRoot = (home = os.homedir()) =>
   path.join(home, ".agents", "skills");
+
+export const skillsOnRequestRoot = (home = os.homedir()) =>
+  path.join(home, ".agents", "skills-on-request");
 
 /** Every skill file worth moving, by its path under `root`. Links are
  *  followed for files only; a linked folder is a second name for one that is
@@ -196,7 +202,7 @@ export function registerMigrateCommands(program: Command) {
   migrate
     .command("export")
     .description(
-      "Write a migration file: every board's secrets, ~/.agents/skills and the running servers",
+      "Write a migration file: every board's secrets, ~/.agents/skills (and skills-on-request) and the running servers",
     )
     .option(
       "-o, --out <file>",
@@ -240,6 +246,7 @@ export function registerMigrateCommands(program: Command) {
           from: os.hostname(),
           boards,
           skills: await collectSkills(skillsRoot()),
+          skillsOnRequest: await collectSkills(skillsOnRequestRoot()),
           services: await serviceRows(),
         };
         const file = path.resolve(
@@ -303,27 +310,32 @@ export function registerMigrateCommands(program: Command) {
             `  ${label}: ${res.secrets.length} keys and ${res.files.length} files restored.`,
           );
         }
-        const root = skillsRoot();
-        let written = 0;
-        const kept: string[] = [];
-        for (const [rel, data] of Object.entries(m.skills)) {
-          const target = safeSkillPath(root, rel);
-          if (!target) continue;
-          try {
-            await fs.mkdir(path.dirname(target), { recursive: true });
-            await fs.writeFile(target, Buffer.from(data, "base64"), {
-              flag: "wx",
-            });
-            written++;
-          } catch {
-            kept.push(rel);
+        for (const [root, files] of [
+          [skillsRoot(), m.skills],
+          [skillsOnRequestRoot(), m.skillsOnRequest ?? {}],
+        ] as const) {
+          let written = 0;
+          const kept: string[] = [];
+          for (const [rel, data] of Object.entries(files)) {
+            const target = safeSkillPath(root, rel);
+            if (!target) continue;
+            try {
+              await fs.mkdir(path.dirname(target), { recursive: true });
+              await fs.writeFile(target, Buffer.from(data, "base64"), {
+                flag: "wx",
+              });
+              written++;
+            } catch {
+              kept.push(rel);
+            }
           }
+          if (!written && !kept.length) continue;
+          console.log(`\nSkills: ${written} files written to ${root}.`);
+          if (kept.length)
+            console.log(
+              `  Already here, left alone: ${kept.slice(0, 10).join(", ")}${kept.length > 10 ? ` and ${kept.length - 10} more` : ""}`,
+            );
         }
-        console.log(`\nSkills: ${written} files written to ${root}.`);
-        if (kept.length)
-          console.log(
-            `  Already here, left alone: ${kept.slice(0, 10).join(", ")}${kept.length > 10 ? ` and ${kept.length - 10} more` : ""}`,
-          );
         printCheck(m, await serviceRows());
       }),
     );

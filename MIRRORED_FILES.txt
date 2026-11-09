@@ -50,6 +50,10 @@ apps/runner/src/diskCaches.test.ts
 apps/runner/src/diskCaches.ts
 apps/runner/src/doctor.test.ts
 apps/runner/src/doctor.ts
+apps/runner/src/gitConnections.test.ts
+apps/runner/src/gitConnections.ts
+apps/runner/src/healthWatch.test.ts
+apps/runner/src/healthWatch.ts
 apps/runner/src/keepAwake.test.ts
 apps/runner/src/keepAwake.ts
 apps/runner/src/keychain.ts
@@ -98,6 +102,8 @@ apps/runner/src/remote/login.ts
 apps/runner/src/remote/secret.test.ts
 apps/runner/src/remote/secret.ts
 apps/runner/src/remote/tokenStore.ts
+apps/runner/src/routineWatch.test.ts
+apps/runner/src/routineWatch.ts
 apps/runner/src/runner-dir.test.ts
 apps/runner/src/runner-token.test.ts
 apps/runner/src/runnerConnections.test.ts
@@ -118,6 +124,7 @@ apps/runner/src/statusPage.test.ts
 apps/runner/src/statusPage.ts
 apps/runner/src/supervisor.ts
 apps/runner/src/test-fixtures/connection-storage-probe.ts
+apps/runner/src/test-fixtures/git-connections-probe.ts
 apps/runner/src/test-fixtures/ollama-search-embed.html
 apps/runner/src/test-fixtures/ollama-search-qwen.html
 apps/runner/src/test-fixtures/ollama-tags-cloud.html
@@ -196,6 +203,7 @@ services/embedder/requirements.txt
 services/embedder/text_tokenizer.py
 shared/all/domains/apps.ts
 shared/all/domains/autoTopUp.ts
+shared/all/domains/e2ee.ts
 shared/all/domains/electron.ts
 shared/all/domains/factiiis.ts
 shared/all/domains/mediaTranscript.ts
@@ -205,6 +213,7 @@ shared/all/domains/products.ts
 shared/all/domains/reservedUsernames.ts
 shared/all/domains/scheduledPosts.ts
 shared/all/domains/secretsBackup.ts
+shared/all/domains/shop.ts
 shared/all/domains/skills.ts
 shared/all/domains/socket.ts
 shared/all/domains/spaces.ts
@@ -221,11 +230,14 @@ shared/all/helpers/board-agent-core/boardTerminal.ts
 shared/all/helpers/board-agent-core/claude-login.ts
 shared/all/helpers/board-agent-core/claude-stream-types.ts
 shared/all/helpers/board-agent-core/claude-stream.ts
+shared/all/helpers/board-agent-core/codex-config.ts
 shared/all/helpers/board-agent-core/codex-login.ts
+shared/all/helpers/board-agent-core/codex-permissions.ts
 shared/all/helpers/board-agent-core/codex-stream.ts
 shared/all/helpers/board-agent-core/default-home-cleanup.ts
 shared/all/helpers/board-agent-core/engine.ts
 shared/all/helpers/board-agent-core/exec.ts
+shared/all/helpers/board-agent-core/git-connections.ts
 shared/all/helpers/board-agent-core/git-panel-write.ts
 shared/all/helpers/board-agent-core/git.ts
 shared/all/helpers/board-agent-core/github-auth.ts
@@ -290,6 +302,7 @@ shared/all/helpers/postContent.ts
 shared/all/helpers/researchTools.ts
 shared/all/helpers/routineSchedule.ts
 shared/all/helpers/runnerDocument.ts
+shared/all/helpers/runnerHealthAlert.ts
 shared/all/helpers/runnerHealthCopy.ts
 shared/all/helpers/runnerNuke.ts
 shared/all/helpers/runnerPartsCopy.ts
@@ -297,9 +310,11 @@ shared/all/helpers/runnerVaultBackup.ts
 shared/all/helpers/runningJobs.ts
 shared/all/helpers/scratchpad.ts
 shared/all/helpers/serverReadiness.ts
+shared/all/helpers/similarSecretKey.ts
 shared/all/helpers/skillConnections.ts
 shared/all/helpers/terminal-ai/agentActivity.ts
 shared/all/helpers/terminal-ai/agentState.ts
+shared/all/helpers/terminal-ai/chatCli.ts
 shared/all/helpers/terminal-ai/chatCommands.ts
 shared/all/helpers/terminal-ai/chatHistory.ts
 shared/all/helpers/terminal-ai/chatPane.ts
@@ -307,6 +322,7 @@ shared/all/helpers/terminal-ai/chatRun.ts
 shared/all/helpers/terminal-ai/chatTerminal.ts
 shared/all/helpers/terminal-ai/chatTranscript.ts
 shared/all/helpers/terminal-ai/codexPane.ts
+shared/all/helpers/terminal-ai/codexTranscript.ts
 shared/all/helpers/terminal-ai/digest.ts
 shared/all/helpers/terminal-ai/gitRefWatcher.ts
 shared/all/helpers/terminal-ai/initScript.ts
@@ -320,6 +336,10 @@ shared/all/helpers/wireChunk.ts
 shared/all/tsconfig.json
 shared/all/uploadTypes.ts
 shared/all/validators.ts
+shared/all/validators/aiConfirmations.ts
+shared/all/validators/aiSource.ts
+shared/all/validators/audioRooms.ts
+shared/all/validators/e2ee.ts
 shared/all/validators/embed.ts
 shared/all/validators/mcpConnections.ts
 shared/all/validators/oakboxBackend.ts
