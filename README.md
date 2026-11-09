@@ -1,4 +1,4 @@
-# @factiii/runner 0.39.0: source
+# @factiii/runner 0.40.0: source
 
 The source of [`@factiii/runner`](https://www.npmjs.com/package/@factiii/runner),
 the program that lets you drive AI coding agents on a computer you own from the

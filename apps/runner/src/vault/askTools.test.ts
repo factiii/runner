@@ -272,9 +272,14 @@ describe('Ask research tools on a runner', () => {
     ]);
   });
 
+  it('never serves the Vault over MCP: Claude and Codex read Runner Storage only', async () => {
+    const { tools } = await turn(OWNER, { categories: undefined });
+    await assert.rejects(startVaultMcp(tools, 'vault'), /read by Local AI on this runner only/);
+  });
+
   it('serves the same tools over MCP, behind the turn’s token', async () => {
     const { tools } = await turn(OWNER, { categories: undefined });
-    const mcp = await startVaultMcp(tools);
+    const mcp = await startVaultMcp(tools, 'runner');
     const rpc = async (method: string, params: unknown, token = mcp.token) => {
       const res = await fetch(mcp.url, {
         method: 'POST',

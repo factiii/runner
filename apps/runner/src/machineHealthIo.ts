@@ -35,7 +35,7 @@ import {
 } from './machineHealth';
 import { CONFIG_DIR } from './paths';
 import { embedderPaths } from './vault/embedderInstall';
-import { vaultPaths } from './vault/engine';
+import { storePaths, vaultPaths } from './vault/engine';
 
 // The real machine behind machineHealth.ts and cleanup.ts: statfs on the
 // runner's folders, the OS's own memory pressure, `du` for sizes, and for
@@ -62,6 +62,10 @@ export function machineHealth(run: Run): Promise<RunnerMachineHealth> {
     folders: [
       { use: 'Runner folder', dir: CONFIG_DIR },
       { use: 'Vault', dir: vaultPaths(CONFIG_DIR).objects },
+      // Once it has a file (vault/daemonVault.ts makes it on the first).
+      ...(fs.existsSync(storePaths(CONFIG_DIR, 'runner').objects)
+        ? [{ use: 'Runner Storage', dir: storePaths(CONFIG_DIR, 'runner').objects }]
+        : []),
       { use: 'Ollama models', dir: ollamaModelsDir() }
     ],
     disk(dir) {
@@ -234,6 +238,9 @@ export function cleanupIo(run: Run, model: LocalAiModelIo): CleanupIo {
       vaultPaths(CONFIG_DIR).db,
       vaultPaths(CONFIG_DIR).objects,
       vaultPaths(CONFIG_DIR).engine,
+      // Runner Storage, the runner's second store (vault/engine.ts).
+      storePaths(CONFIG_DIR, 'runner').db,
+      storePaths(CONFIG_DIR, 'runner').objects,
       embedderPaths(CONFIG_DIR).root,
       ollamaModelsDir(),
       // The keychain's file store on Linux, and macOS's own keychains.

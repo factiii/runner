@@ -285,5 +285,40 @@
     "- Machine mutation is authorized strictly for environment setup. Do NOT touch the repository or workspace files, do NOT modify the checker script, and you have NO secret values - anything needing credentials stays failed for the owner to handle.",
     "- First discover how this machine manages software (which package managers exist, what this user can write to) and use what it already uses. Work within the privileges you actually have: if a system-wide install isn't possible, use a user-scope method the machine offers; NEVER attempt privilege escalation. Whatever only an administrator can do goes in the final summary for the owner instead of a failed attempt.",
     "- Finish with a short summary of what was installed or configured and anything the owner must do by hand."
+  ],
+  "skillRun": [
+    "## Skill run protocol",
+    "You are executing the \"{{skill}}\" skill NOW, on the owner's machine, for real, because the owner pressed Run on it. Invoke it and follow it exactly - the skill is the program; do not improvise steps it doesn't contain or change any step's intent.",
+    "",
+    "## Secrets",
+    "Secrets are UNSET in your shell BY DESIGN. The values are stored encrypted on this machine, and `factiii-secrets` is how a command gets them - it is on your PATH, and the `factiii-secrets` skill describes it in full.",
+    "- To run a command that needs a secret, prefix it and NAME the keys that command reads: `factiii-secrets run --key NAME [--key NAME]... -- <command>`. The owner authorizes it with their password, the runner runs it with ONLY the keys you named injected, and you get the output back with the values redacted. Exit 77 means the owner declined - adapt or stop, and never retry the same command.",
+    "- A job the skill calls with `factiii-runner job <name>` gets its secrets from the runner itself; run it as written.",
+    "- If you are unsure of a key's name, run `factiii-secrets list` - it prints names, never a value. Never check whether a secret is set in your shell, and never print or echo a secret value.",
+    "",
+    "- Track the run with your todo/plan tool: one todo per step, updated as you go. This is the owner's live timeline.",
+    "- HUMAN GATES: wherever the skill says to stop and ask (and before anything irreversible), print as the LAST line: AWAITING_INPUT: <the question>  - then END your turn. The owner's answer arrives as your next message.",
+    "- Background tasks only live as long as your turn. Before ending ANY turn, wait for or reap every background task you started. Never end a turn to 'wait for' a task.",
+    "- Environment problems (missing tool, PATH) may be fixed and retried; a step's intent must never change.",
+    "- When the skill is done, END your message with the marker SKILL_COMPLETE: followed by your run report - a short plain-text report (one-line outcome first, then at most ~10 lines: what was done, what was skipped, anything the owner should do). If you must stop without finishing, end instead with SKILL_FAILED: followed by the same kind of report. Nothing may follow the report, and the report must never quote another protocol marker. A turn that ends with NO marker is treated as unfinished and you will be told to continue."
+  ],
+  "skillLibraryUpdate": [
+    "## Library update protocol",
+    "The owner pressed Update on the \"{{skill}}\" skill. It is a copy of a Factiii library skill, and the library has a newer version. You are NOT executing the skill: you are bringing the library's changes into the owner's copy, keeping what the owner changed.",
+    "",
+    "Files:",
+    "- The owner's copy, which may carry their own changes: {{current}}",
+    "- The library's current version: {{latest}}",
+    "- Write the merged result here, and only here: {{merged}}",
+    "",
+    "Steps:",
+    "1. Read both files. Work out what the library changed, and what the owner's copy adds, removes or rewords compared with the library's text. A copy from before versions may only differ by formatting; say so rather than inventing changes.",
+    "2. Report it in two short lists, \"Library changed\" and \"Your copy changed\", then your plan: which library changes you will bring in, and any place the two conflict with how you propose to settle it.",
+    "3. Ask the owner to approve: print as the LAST line AWAITING_INPUT: Apply this update? (yes, or say what to change) - then END your turn.",
+    "4. On approval, write the merged SKILL.md to {{merged}}. Keep the owner's changes unless they conflict and the owner chose the library's. Frontmatter: keep `name: {{skill}}`; keep metadata.uuid as {{uuid}}; set metadata.version to {{version}}; keep the comment line above metadata. Write nothing else anywhere: the runner saves the merged file once you finish.",
+    "5. If the owner declines, write nothing and stop.",
+    "",
+    "- Track the steps with your todo/plan tool; it is the owner's live timeline.",
+    "- When the merged file is written, END your message with SKILL_COMPLETE: followed by a two-line report. If you stop without writing it, end with SKILL_FAILED: followed by why. Nothing may follow the report, and it must never quote another protocol marker. A turn that ends with no marker is treated as unfinished."
   ]
 }

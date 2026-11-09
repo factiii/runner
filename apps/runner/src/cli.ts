@@ -23,6 +23,7 @@ import {
   serviceIo,
   serviceSpec
 } from './machine';
+import { registerMigrateCommands } from './migrate';
 import { registerNukeCommand } from './nukeCli';
 import { registerPartsCommands } from './partsCli';
 import { CONFIG_DIR, safeSlug, spaceDirPath } from './paths';
@@ -225,7 +226,7 @@ function requireServiceSpec(): ServiceSpec {
   const spec = serviceSpec();
   if (spec) return spec;
   console.error(
-    'The service needs the installed package (npm install -g @factiii/runner) on macOS, Linux or Windows.'
+    'The service needs the installed package (curl -fsSL https://factiii.com/runner.sh | sh) on macOS, Linux or Windows.'
   );
   process.exit(1);
 }
@@ -452,6 +453,9 @@ backup
       fail(err);
     }
   });
+
+// Moving this runner to a new machine (migrate.ts).
+registerMigrateCommands(program);
 
 // Laptop CLI for a shared runner: login/logout, job, secret set, audit.
 registerRemoteCommands(program);

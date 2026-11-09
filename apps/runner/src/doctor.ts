@@ -149,8 +149,9 @@ export function buildChecks(host: DoctorHost): {
               detail,
               fix: {
                 kind: 'command',
-                note: ['Install a newer Node, then install the runner again:'],
-                commands: ['nvm install 24.11.1', 'npm install -g @factiii/runner']
+                // The installer brings its own Node 24 when this one is too old.
+                note: ['Install the runner again; this brings a newer Node:'],
+                commands: ['curl -fsSL https://factiii.com/runner.sh | sh']
               }
             };
       }

@@ -2,12 +2,16 @@ import { type ChildProcess, execFile, spawn } from 'child_process';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import fs from 'fs/promises';
-import net from 'net';
 import path from 'path';
 import { promisify } from 'util';
 
 import { agentHomeEnv } from './agent-homes';
 import { execLogin, hostEnv } from './host-env';
+import {
+  allocateBoardPorts,
+  claimBoardPorts,
+  PORTS_PER_BLOCK
+} from './port-blocks';
 import { hostSpacePaths, type SpacePaths } from './spacePaths';
 
 const execFileAsync = promisify(execFile);
@@ -31,9 +35,9 @@ export type StepOpts = ExecOpts & {
 export type ExecTarget = {
   /** Where this target's per-space directories live. */
   readonly paths: SpacePaths;
-  /** Space env (ports, the directories an agent may write to, MCP token, the
-   *  runner's CLI homes). No PATH, for callers that must keep the one they
-   *  already have (a tmux session's login shell). */
+  /** Space env (the board's ports, the directories an agent may write to,
+   *  MCP token, the runner's CLI homes). No PATH, for callers that must keep
+   *  the one they already have (a tmux session's login shell). */
   stateEnv(): Record<string, string>;
   /** stateEnv plus the staged-helper bin dir on PATH, for spawning a CLI. */
   agentEnv(): Record<string, string>;
@@ -58,41 +62,30 @@ export type ExecTarget = {
 
 const MAX_BUFFER = 10 * 1024 * 1024;
 
-// Ports a space's agent may bind. Allocated once at provision time and
-// recorded beside the space dir, since they must be free on a shared host.
+// Ports a board-level shell may bind (board jobs, setup: anything with no
+// session). Allocated at provision time and recorded beside the space dir.
+// Each session has a block of its own (port-blocks.ts), laid over this one
+// in its env; the shared registry keeps the two from overlapping.
 const PORTS_FILE = '.ports';
-const NUM_PORTS = 6;
 
 function portsFilePath(spaceDir: string): string {
   return path.join(spaceDir, PORTS_FILE);
 }
 
-/** Reserve NUM_PORTS free TCP ports for this space and record them. */
+/** Reserve PORTS_PER_BLOCK free TCP ports for this board's own shells and
+ *  record them. A recorded block is kept unless it overlaps another board's
+ *  or a session's (two boards allocated before the registry existed could get
+ *  the same ports): then it is replaced. */
 export async function allocateSpacePorts(spaceDir: string): Promise<number[]> {
   const existing = readSpacePorts(spaceDir);
-  if (existing.length === NUM_PORTS) return existing;
-  const ports: number[] = [];
-  const seen = new Set<number>();
-  while (ports.length < NUM_PORTS) {
-    const port = await new Promise<number>((resolve, reject) => {
-      const srv = net.createServer();
-      srv.unref();
-      srv.on('error', reject);
-      srv.listen(0, '127.0.0.1', () => {
-        const addr = srv.address();
-        if (typeof addr === 'object' && addr) {
-          const p = addr.port;
-          srv.close(() => resolve(p));
-        } else {
-          srv.close(() => reject(new Error('Failed to get a free port')));
-        }
-      });
-    });
-    if (seen.has(port)) continue;
-    seen.add(port);
-    ports.push(port);
-  }
   await fs.mkdir(spaceDir, { recursive: true });
+  if (
+    existing.length === PORTS_PER_BLOCK &&
+    claimBoardPorts(spaceDir, existing)
+  ) {
+    return existing;
+  }
+  const ports = await allocateBoardPorts(spaceDir);
   await fs.writeFile(portsFilePath(spaceDir), ports.join(','), 'utf-8');
   return ports;
 }
@@ -163,7 +156,8 @@ export function isSessionToken(
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-/** Ports recorded for this space, or [] when none were allocated yet. Sync
+/** The board-level block recorded for this space, or [] when none was
+ *  allocated yet. A session's own is readSessionPorts (port-blocks.ts). Sync
  *  because agentEnv() is, and the file is a few bytes. */
 export function readSpacePorts(spaceDir: string): number[] {
   try {
@@ -205,6 +199,8 @@ export function hostTarget(
 
     stateEnv() {
       const env: Record<string, string> = {};
+      // The board's block. A session's env lays its own over this
+      // (terminal.ts sessionEnv, port-blocks.ts sessionPortsEnv).
       const ports = readSpacePorts(spaceDir);
       if (ports.length) env.FACTIII_PORTS = ports.join(',');
       // Where an agent draws for the user (.specs/scratchpad.md). Set on the

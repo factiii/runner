@@ -1,4 +1,8 @@
-import type { BoardAgentAction, RunnerAskEngine } from '@shared/all/domains/electron';
+import type {
+  BoardAgentAction,
+  RunnerAskEngine,
+  RunnerStoreName
+} from '@shared/all/domains/electron';
 import type { VouchedScope } from '@shared/all/helpers/board-agent-core/runner-access';
 
 // Who may do what in the runner's Vault (.specs/runner-vault.md "Sharing").
@@ -17,6 +21,11 @@ import type { VouchedScope } from '@shared/all/helpers/board-agent-core/runner-a
 // model"): anyone in may ask with its Ollama models. Claude and Codex run on
 // the owner's own sign-in, and what they read leaves the machine, so only the
 // owner asks with them; a member is refused here, whatever the app shows.
+//
+// Which store an AI may read (.specs/runner-vault.md "Two stores", decided
+// 2026-11-08): the Vault is read by Local AI (Ollama) only, whoever asks;
+// Claude and Codex read Runner Storage, never the Vault. Ask, Categorize and
+// the turn's MCP server all check `storeEngineAllowed` on the runner.
 
 export type VaultRole = 'owner' | 'member';
 
@@ -69,6 +78,17 @@ const READING_OWNER_ONLY =
  *  the owner. */
 export const askEngineAllowed = (role: VaultRole, engine: RunnerAskEngine): boolean =>
   engine === 'ollama' || role === 'owner';
+
+/** May `engine` read `store`? Ollama reads either; Claude and Codex only
+ *  Runner Storage. */
+export const storeEngineAllowed = (store: RunnerStoreName, engine: RunnerAskEngine): boolean =>
+  engine === 'ollama' || store === 'runner';
+
+export const VAULT_OLLAMA_ONLY =
+  'Your Vault is read by Local AI on this runner only, never by Claude or Codex. They read Runner Storage. Pick a Local AI model to ask about your Vault.';
+
+export const NO_RUNNER_STORAGE =
+  'This runner has no Runner Storage yet, so Claude and Codex have nothing to read. Add files to Runner Storage first.';
 
 export const ASK_CLI_OWNER_ONLY =
   'Claude and Codex on this runner run on its owner’s sign-in, so only the owner asks with them. Pick one of its Local AI models.';

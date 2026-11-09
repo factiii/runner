@@ -18,7 +18,12 @@ import {
   vaultAskSchema
 } from '@shared/all/validators';
 
-import { ASK_CLI_OWNER_ONLY, askEngineAllowed } from './access';
+import {
+  ASK_CLI_OWNER_ONLY,
+  askEngineAllowed,
+  storeEngineAllowed,
+  VAULT_OLLAMA_ONLY
+} from './access';
 import { modelTitle } from './askChats';
 import { startVaultMcp, type VaultMcp } from './askMcp';
 import { askResearchTools } from './askTools';
@@ -61,6 +66,12 @@ import type { RunnerVault, VaultCaller } from './service';
 // kills the Claude or Codex process tree, or aborts the Ollama request and
 // its tool rounds. As on the cloud (research.stop), nothing of the answer is
 // kept: the question stays, and the chat says its last turn was stopped.
+//
+// One VaultAsk per store (.specs/runner-vault-ask.md "Which store Ask reads"):
+// the daemon makes one on the Vault and one on Runner Storage. On the Vault
+// only Ollama answers: Claude and Codex are refused here before anything is
+// read (`storeEngineAllowed`), a follow-up on an old Claude chat kept in the
+// Vault included, and again where their turn would start its MCP server.
 
 type CliEngine = Exclude<RunnerAskEngine, 'ollama'>;
 export type AskMessage = { role: 'system' | 'user' | 'assistant'; content: string };
@@ -187,6 +198,12 @@ export class VaultAsk {
     private readonly attachedWaitMs = ATTACHED_WAIT_MS
   ) {}
 
+  /** This store holds the turn `askId`: the daemon asks before it hands a
+   *  poll or a stop to one store. */
+  has(askId: string): boolean {
+    return this.turns.has(askId);
+  }
+
   async handle(action: BoardAgentAction, payload: unknown, scope: VouchedScope): Promise<unknown> {
     const entered = await this.vault.enter(scope);
     this.sweep();
@@ -246,6 +263,8 @@ export class VaultAsk {
       cli: thread.engine === payload.engine ? payload.cli : undefined
     };
     if (!askEngineAllowed(entered.role, input.engine)) throw new Error(ASK_CLI_OWNER_ONLY);
+    // The Vault is Local AI's alone, whoever asks and whatever the app sent.
+    if (!storeEngineAllowed(this.vault.storeName, input.engine)) throw new Error(VAULT_OLLAMA_ONLY);
     if (input.engine === 'ollama') {
       const installed = await this.engines.ollamaModels();
       if (!input.model || !installed.includes(input.model)) {
@@ -376,7 +395,11 @@ export class VaultAsk {
   ): Promise<string> {
     const model = input.model ?? '';
     const added = await this.attached(input.fileIds, entered, feed, signal);
-    feed.step('Searching your vault on this runner');
+    feed.step(
+      this.vault.storeName === 'vault'
+        ? 'Searching your vault on this runner'
+        : 'Searching Runner Storage on this runner'
+    );
     const found = await this.vault.askPassages(input.question, entered);
     const passages = [
       ...added,
@@ -477,11 +500,17 @@ export class VaultAsk {
     feed: TurnFeed,
     signal: AbortSignal
   ): Promise<string> {
+    // The second gate (the first is `start`): no CLI turn, and no MCP
+    // server, ever runs over the Vault.
+    if (!storeEngineAllowed(this.vault.storeName, engine)) throw new Error(VAULT_OLLAMA_ONLY);
     const added = await this.attached(input.fileIds, entered, feed, signal);
     signal.throwIfAborted();
     feed.step(`Asking ${modelTitle(engine, null)}`);
     // Claude and Codex are the owner's alone (askEngineAllowed).
-    const mcp = await startVaultMcp(this.tools(input, entered, feed, new Map()));
+    const mcp = await startVaultMcp(
+      this.tools(input, entered, feed, new Map()),
+      this.vault.storeName
+    );
     try {
       const thread = (input.history ?? [])
         .map((m) => `${m.role === 'you' ? 'User' : 'You'}: ${m.text}`)

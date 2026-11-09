@@ -22,7 +22,10 @@ import {
   BoardAgentEngine,
   createEventSink,
 } from '@shared/all/helpers/board-agent-core';
-import type { HypervisorHost } from '@shared/all/helpers/board-agent-core/session-hypervisor';
+import {
+  type HypervisorHost,
+  MCP_SESSION_CAP
+} from '@shared/all/helpers/board-agent-core/session-hypervisor';
 import {
   actionAllowed,
   type ChannelLevel,
@@ -60,6 +63,7 @@ import {
 } from '@shared/all/helpers/wireChunk';
 import {
   keepAwakeSetSchema,
+  routineDueFrameSchema,
   RUNNER_NO_SUCH_JOB_CALL,
   RUNNER_SLEEP_MAX_SESSIONS,
   type RunnerSleepSnapshot
@@ -1018,6 +1022,13 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         // has no message to take it from, so it comes from spaces.json.
         spaceId: spaceId ?? boards.find((b) => b.slug === spaceSlug)?.id,
         emitter: createEventSink(send, spaceSlug),
+        // One CLI home for every board: a sign-in or sign-out on this board
+        // is the other boards' too.
+        onSigninChanged: (cli, signedIn) => {
+          for (const [slug, other] of engines) {
+            if (slug !== spaceSlug) other.signinChanged(cli, signedIn);
+          }
+        },
         onSimulatorFrame: sendSimulatorFrame,
         // One encoder for the machine. Every peer has a single video track, so
         // a second space attaching would put two H.264 streams on it —
@@ -1506,6 +1517,47 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         ack(await knownEngine(data.spaceSlug, data.spaceId).auditRead(data.query ?? {}));
       } catch (err) {
         ack(ackError(err));
+      }
+    })();
+  });
+
+  // A Routine is due (.todos/routines.md): open a Chat session on its board
+  // with the prompt, acting for the owner, the way start_session does
+  // (session-hypervisor.ts). The server sends it only to the routine owner's
+  // own runner; a frame for anyone else is refused here too. The session
+  // counts toward the board's agent-started cap (MCP_SESSION_CAP).
+  socket.on('runner:routine-due', (raw, ack) => {
+    void (async () => {
+      try {
+        const data = routineDueFrameSchema.parse(raw);
+        const owner = hypervisor.owner();
+        if (owner.userId && String(data.userId) !== owner.userId) {
+          throw new Error('A routine runs only on its owner’s runner.');
+        }
+        const board = knownEngine(data.spaceSlug).hypervisorBoard();
+        const started = board.sessions().filter((s) => s.startedVia).length;
+        if (started >= MCP_SESSION_CAP) {
+          throw new Error(
+            `${data.spaceSlug} already has ${started} sessions started by agents or routines (the limit is ${MCP_SESSION_CAP}).`
+          );
+        }
+        const sessionId = await board.start({
+          title: data.title,
+          code: false,
+          baseBranch: '',
+          cardId: null,
+          message: data.prompt,
+          startedBy: owner,
+          startedVia: `routine:${data.routineId}`
+        });
+        await board.audit({
+          actor: owner,
+          action: 'session-start',
+          detail: `Chat session ${sessionId} "${data.title}" for routine ${data.routineId} (run ${data.runId})`
+        });
+        ack({ ok: true, sessionId });
+      } catch (err) {
+        ack({ ok: false, error: err instanceof Error ? err.message : String(err) });
       }
     })();
   });

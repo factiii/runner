@@ -31,7 +31,7 @@ import {
 import { createPartsManager } from './runnerParts';
 
 // `factiii-runner parts list | add | remove | start | stop | clean`: the same
-// actions as Runner Settings > Setup > Environment, run in this terminal.
+// actions as the runner's Status > Features, run in this terminal.
 // `add` and `remove` take a module (every sub-part, in order) or one part.
 // `add local-ai` picks the model that fits this machine and pulls it;
 // `--model` picks another from the table. `clean` lists what Free up space

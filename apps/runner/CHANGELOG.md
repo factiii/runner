@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-11-08
+
+Needed by the web app released the same day: its Skills Run button, the Vault and Runner Storage picker and Routines call board-agent actions only this version answers (`skillRunStart`, the `store` field on vault actions, `runner:routine-due`).
+
+### Added
+
+- **Routines.** A routine the server finds due opens a Chat session on its board with the routine's prompt, acting for its owner. Only the owner's own runner takes it, and it counts toward the board's limit on agent-started sessions.
+- **Run a skill from the Skills tab,** and update a library skill to its newest version.
+- **Runner Storage.** Files can be kept on the runner without any AI reading them. The Vault is now for Ollama only.
+- **`factiii-runner migrate export | import | check`.** Move a runner to a new machine: every board's secrets (sealed under one migration passphrase), the machine-wide skills in `~/.agents/skills`, and a check of which servers that ran on the old machine do not run on the new one. Never moves the runner token; import never overwrites.
+
+### Fixed
+
+- **A board message no longer leaves a session's terminal Claude closed.** A chat turn that closes the terminal's Claude to take its conversation opens it again in the same tab when the turn ends, whether it finished, was stopped or failed. `/resume` goes through the same guard, so two Claudes never hold one conversation.
+- **A chat turn shows as Working on the session rail.** It runs in no tab, so the rail used to show Idle while the agent worked.
+- **Each session gets its own block of ports** (`FACTIII_PORTS`), so two sessions on one board no longer get the same ones.
+- **Signing Claude or Codex in or out on one board updates every board on the runner.**
+
 ## [0.39.0] - 2026-11-07
 
 <!-- npm deleted 0.33.0 to 0.37.0, and its automated review blocked 0.38.0 (staged 2026-11-07, still bundling frpc), so neither number can be used. 0.39.0 is the first release without the frpc binaries. It carries the unreleased changes plus the ones below. -->

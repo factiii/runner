@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-import { MAX_VAULT_FILE_BYTES, VAULT_SEARCH_MIN_CHARS } from '../domains/oakbox';
+import {
+  MAX_VAULT_FILE_BYTES,
+  VAULT_SEARCH_MIN_CHARS
+} from '../domains/oakbox';
 import {
   claudeAskSettingsSchema,
   codexAskSettingsSchema
@@ -15,12 +18,33 @@ import {
 export const RUNNER_VAULT_WRITE_CHUNK_BYTES = 384 * 1024;
 export const RUNNER_VAULT_READ_CHUNK_BYTES = 512 * 1024;
 /** The most base64 one write may carry: twice the chunk, as the backup. */
-const WRITE_MAX_CHARS = Math.ceil((RUNNER_VAULT_WRITE_CHUNK_BYTES * 2 * 4) / 3) + 4;
+const WRITE_MAX_CHARS =
+  Math.ceil((RUNNER_VAULT_WRITE_CHUNK_BYTES * 2 * 4) / 3) + 4;
 const MAX_PAGE = 200;
 /** A path a person typed or a folder gave: folders and all. */
 const MAX_NAME_CHARS = 1024;
 
 const uploadId = z.string().uuid();
+
+/** Which of a runner's two stores an action acts on (.specs/runner-vault.md
+ *  "Two stores"): the Vault (Local AI only) or Runner Storage (outside AI
+ *  allowed). Every action's payload may carry it; none is the Vault, so an
+ *  app from before Runner Storage keeps working. */
+export const RUNNER_STORES = ['vault', 'runner'] as const;
+export const runnerStoreSchema = z.enum(RUNNER_STORES);
+
+/** The `store` a payload names, or null for none. A payload whose `store` is
+ *  not one of the two is refused, never read as the Vault. */
+export function payloadStore(
+  payload: unknown
+): (typeof RUNNER_STORES)[number] | null {
+  if (!payload || typeof payload !== 'object' || !('store' in payload)) {
+    return null;
+  }
+  const { store } = payload as { store: unknown };
+  if (store === undefined) return null;
+  return runnerStoreSchema.parse(store);
+}
 const ticket = z.string().min(1).max(4096);
 
 /** A factiii's id: a category Categorize tags a file with. */
@@ -87,7 +111,12 @@ export const vaultDeleteSchema = z.object({
 /** The shared vault router's procedures a runner answers so far
  *  (.specs/vault-router.md → What is in the router). The rest of the Vault is
  *  still its own actions. */
-const VAULT_RPC_PATHS = ['files', 'search', 'downloadUrl', 'deleteFiles'] as const;
+const VAULT_RPC_PATHS = [
+  'files',
+  'search',
+  'downloadUrl',
+  'deleteFiles'
+] as const;
 export type VaultRpcPath = (typeof VAULT_RPC_PATHS)[number];
 
 /** One call of the shared vault router on a runner. `input` is the
@@ -95,6 +124,12 @@ export type VaultRpcPath = (typeof VAULT_RPC_PATHS)[number];
 export const vaultRpcSchema = z.object({
   path: z.enum(VAULT_RPC_PATHS),
   input: z.unknown().optional()
+});
+
+/** Move to… between a runner's two stores (vaultMove). */
+export const vaultMoveSchema = z.object({
+  uploadIds: z.array(uploadId).min(1).max(100),
+  to: runnerStoreSchema
 });
 
 export const vaultShareSetSchema = z.object({

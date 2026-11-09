@@ -14,6 +14,10 @@ import {
 } from '../board-agent-core/agent';
 import { readSpacePorts } from '../board-agent-core/exec';
 import {
+  readSessionPorts,
+  sessionPortsEnv
+} from '../board-agent-core/port-blocks';
+import {
   addWorktree,
   extractDiff,
   setGitIdentity
@@ -374,6 +378,8 @@ export class ClaudeModeEngine implements ModeEngine {
       effort: session.effort,
       model: 'opus',
       resumeSessionId,
+      // The session's own ports over the board's (port-blocks.ts).
+      env: sessionPortsEnv(this.core.spaceDir(), session.postId),
       callbacks: {
         // Tasks persist across the resumed phases; seed each phase's parser
         // with the session's list so later TaskUpdates land.
@@ -569,8 +575,13 @@ export class ClaudeModeEngine implements ModeEngine {
     this.emitter.emitSessionUpdate(session);
 
     // Read the reservation directly: FACTIII_PORTS is injected into agent
-    // spawns via agentEnv(), so a plain shell would not see it.
-    const portsEnv = readSpacePorts(this.core.spaceDir()).join(',');
+    // spawns via agentEnv() and runAgentPhase, so a plain shell would not see
+    // it. The session's own block; the board's for a session from before
+    // blocks were per session (port-blocks.ts).
+    const sessionPorts = readSessionPorts(this.core.spaceDir(), session.postId);
+    const portsEnv = (
+      sessionPorts.length ? sessionPorts : readSpacePorts(this.core.spaceDir())
+    ).join(',');
 
     let publicPreviewEnabled = this.core.canExpose;
     if (publicPreviewEnabled) {

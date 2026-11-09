@@ -12,7 +12,7 @@ import type {
 import { bytesLabel } from './runnerPartsCopy';
 
 // How machine health and Free up space read, in one place for the runner's
-// CLI and doctor and Setup > Environment on web and mobile
+// CLI and doctor and the runner's Status (Storage, Features) on web and mobile
 // (.specs/runner-setup.md "Machine health and Free up space").
 
 const gb = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(1)} GB`;

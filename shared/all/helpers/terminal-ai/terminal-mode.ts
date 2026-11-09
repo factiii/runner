@@ -226,6 +226,8 @@ const REMOTE_OPS: ReadonlySet<string> = new Set(['fetch', 'pull', 'push']);
 
 export class TerminalModeEngine implements ModeEngine {
   private sessions = new Map<string, TerminalSession>();
+  /** Sessions with a chat turn running (setChatRunning). */
+  private chatRunning = new Set<string>();
   /** One working-tree watcher per live bare session, keyed by postId. */
   private watchers = new Map<string, WorkspaceWatcher>();
   /** HEAD and refs of the checkout each session's git panel reads, keyed by
@@ -461,12 +463,19 @@ export class TerminalModeEngine implements ModeEngine {
       const name = this.paneSessions.get(paneId);
       agent.tab = name ? tabIds.indexOf(name.slice(prefix.length)) + 1 : 0;
     }
-    const { state, line } = panes.size
+    const rolled = panes.size
       ? rollUpAgents([...panes.values()])
       : {
           state: session.agentState && ('idle' as const),
           line: session.agentActivity
         };
+    const { line } = rolled;
+    // A chat turn is work too, unless a tab is waiting on a prompt (which
+    // still needs you). Its end rolls up again, back to what the tabs say.
+    const state =
+      this.chatRunning.has(session.postId) && rolled.state !== 'blocked'
+        ? ('working' as const)
+        : rolled.state;
     // A tab with an agent in it: the git panel's Switch says the agent moves
     // with the branch, and asks first.
     const live = panes.size > 0;
@@ -793,6 +802,16 @@ export class TerminalModeEngine implements ModeEngine {
       this.emitter.emitSessionUpdate(session);
     }
     return true;
+  }
+
+  /** A chat turn (chatRun.ts) started or ended for this session. The turn
+   *  runs headless in no tab, so no hook reports it; the roll-up counts it
+   *  as working, or the rail showed Idle (or nothing) while the agent ran. */
+  setChatRunning(postId: string, running: boolean): void {
+    if (running) this.chatRunning.add(postId);
+    else this.chatRunning.delete(postId);
+    const session = this.sessions.get(postId);
+    if (session) this.rollUp(session);
   }
 
   /** The conversation the session's chat runs (chatRun.ts). Kept with the

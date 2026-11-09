@@ -82,7 +82,7 @@ export async function setup(serverUrl: string): Promise<void> {
   console.log('\n=== Setup complete ===\n');
   if (!started) console.log('Start the runner with: factiii-runner start');
   console.log(
-    'Add parts from the app (Runner > Setup > Environment) or with: factiii-runner parts add <part>'
+    'Add parts from the app (the runner’s Status > Features) or with: factiii-runner parts add <part>'
   );
   console.log(`${SECRETS_AFTER_RESTART}\n`);
 }

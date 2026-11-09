@@ -103,8 +103,16 @@ export class ClaudeLoginFlow {
     if (!this.session || this.settled) {
       throw new Error('No Claude sign-in in progress.');
     }
+    // One line only: a CR or LF in a paste would type a second line into
+    // the CLI's prompt. Checked here so every caller (a board's Connect, the
+    // runner-wide cliSignins.ts) gets it.
+    const line = code.trim();
+    // eslint-disable-next-line no-control-regex
+    if (!line || /[\x00-\x1f\x7f]/.test(line)) {
+      throw new Error('That does not look like the code.');
+    }
     this.submitMark = this.output.length;
-    this.session.write(`${code.trim()}\r`);
+    this.session.write(`${line}\r`);
     return { success: true };
   }
 

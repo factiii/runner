@@ -346,7 +346,10 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     // refuses a member too (vault/access.ts).
     'vaultFilePost',
     'vaultNotes',
-    'vaultNoteDelete'
+    'vaultNoteDelete',
+    // Move to…: files from one of the runner's stores to the other
+    // (VAULT_ACTIONS), which decides what AI may read them.
+    'vaultMove'
   ]);
 
 /** The runner's Vault (.specs/runner-vault.md "Actions"). The daemon answers
@@ -386,7 +389,10 @@ export const VAULT_ACTIONS: ReadonlySet<BoardAgentAction> =
     // never on the relay. The owner's alone (OWNER_ONLY_ACTIONS).
     'vaultFilePost',
     'vaultNotes',
-    'vaultNoteDelete'
+    'vaultNoteDelete',
+    // Move to… between the Vault and Runner Storage: a copy, then the
+    // original deleted. Never on the relay. The owner's alone.
+    'vaultMove'
   ]);
 
 /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's

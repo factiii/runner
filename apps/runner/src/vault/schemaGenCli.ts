@@ -70,6 +70,13 @@ function main(): void {
   }
   const sql = diff(VAULT_MIGRATIONS.length > 0 ? last : null, next);
   if (EMPTY.test(sql)) {
+    // No SQL to run, but the text moved (a comment, the column alignment):
+    // vault.prisma still follows it, or the drift check never passes.
+    if (last !== next) {
+      fs.writeFileSync(VAULT_SCHEMA, next);
+      console.log('No migration; vault.prisma updated.');
+      return;
+    }
     console.log('No change.');
     return;
   }

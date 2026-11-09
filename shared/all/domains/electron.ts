@@ -114,6 +114,13 @@ export type SkillSummary = {
   pendingBranch: string;
   /** Frontmatter problems. The skill still opens so it can be fixed. */
   errors: string[];
+  /** The jobs it calls and the names it may hand off to (skillMentions,
+   *  helpers/skillConnections.ts). Older runners omit it. */
+  uses?: { jobs: string[]; skills: string[] };
+  /** The library skill it was added from and the version it records
+   *  (librarySkill.ts libraryOriginOf). Absent when it was not added from the
+   *  library, and from runners older than library versions. */
+  origin?: { uuid: string; version: string };
 };
 
 export type CardAILogEntry = {
@@ -423,7 +430,7 @@ export type RunnerPartJob = {
 };
 
 /** One installable part of the runner (`factiii-runner parts`), as
- *  Runner Settings > Setup > Environment shows it. Names, numbers and command lines; no
+ *  the runner's Status > Features shows it. Names, numbers and command lines; no
  *  path, port or key. */
 export type RunnerPart = {
   id: RunnerPartId;
@@ -1229,6 +1236,13 @@ export type RunnerVaultBackupItem = {
   modifiedAt: number;
 };
 
+/** The two stores on a runner (.specs/runner-vault.md "Two stores"), each its
+ *  own database and files folder behind the same actions. `vault`: private,
+ *  read by Local AI (Ollama) only. `runner`: Runner Storage, which Claude and
+ *  Codex may read too. A payload with no `store` means the Vault, so an app
+ *  from before Runner Storage keeps working. */
+export type RunnerStoreName = 'vault' | 'runner';
+
 /** One file in a runner's Vault (.specs/runner-vault.md "Database"): its
  *  Upload row, with the type and size its object has. */
 export type RunnerVaultFile = {
@@ -1252,6 +1266,9 @@ export type RunnerVaultFile = {
    *  runner"), not a file: `id` is its Post.uuid and `name` its title. It
    *  opens with `vaultNotes`, never as a download. */
   note?: true;
+  /** Which of the runner's stores holds it. Absent from a runner from before
+   *  Runner Storage: its Vault. */
+  store?: RunnerStoreName;
 };
 
 /** One file a runner's Vault found for a search (.specs/runner-vault.md
@@ -1282,6 +1299,11 @@ export type RunnerAskModels = {
   /** Of `cli`, the ones not signed in, so Ask's menu says so. Absent from an
    *  older runner: every CLI it lists reads as signed in. */
   signedOut?: Exclude<RunnerAskEngine, 'ollama'>[];
+  /** The runner has Runner Storage, the only store Claude and Codex read
+   *  (the Vault is Local AI only). False: they have nothing to read yet.
+   *  Absent from a runner from before Runner Storage, where they read its
+   *  Vault. */
+  runnerStorage?: boolean;
 };
 
 /** One turn of a runner Ask, as the app last read it. `text` grows while the
@@ -1317,6 +1339,9 @@ export type RunnerAskChat = {
   /** The last turn was stopped before it answered; false once one answers.
    *  Absent from a runner from before the stop. */
   stopped?: boolean;
+  /** The store the chat is kept in and asks about. Absent from a runner
+   *  from before Runner Storage: its Vault. */
+  store?: RunnerStoreName;
 };
 
 /** One message of a runner chat: a question, or an answer with what it did
@@ -1352,6 +1377,10 @@ export type RunnerVaultStatus = {
   members: string[];
   /** Absent from a runner from before the embedder. */
   ingest?: RunnerVaultIngest;
+  /** Runner Storage beside the Vault, on a status read with no `store`:
+   *  null while the runner has none yet. Absent from a runner from before
+   *  it. */
+  runnerStorage?: { files: number; bytes: number } | null;
 };
 
 /** A runner's Categorize run (.specs/runner-vault-ask.md "Categorize on the
@@ -1414,6 +1443,9 @@ export type RunnerVaultNote = {
   body: string;
   /** ISO time it was kept. */
   at: string;
+  /** The store it is kept in. Absent from a runner from before Runner
+   *  Storage: its Vault. */
+  store?: RunnerStoreName;
 };
 
 /** Categorize on a runner: what waits, how many files each category tagged,
@@ -1943,9 +1975,30 @@ export type BoardAgentActionMap = {
     };
     result: { started: boolean };
   };
+  /** Run any skill the way deploy runs: same console, gates and
+   *  authorization (.specs/skills-tab.md). One run per space at a time,
+   *  deploy included, read back through deployRunState. A runner older than
+   *  skill runs refuses the action, so a client can never start a deploy by
+   *  mistake when it asked for another skill. */
+  skillRunStart: {
+    payload: {
+      scope: SkillScope;
+      name: string;
+      provider?: AgentProvider;
+      /** Update this copy of a library skill instead of running it: the
+       *  library's current SKILL.md under the copy's name, and its version
+       *  (host-skill-update.ts). A runner older than library versions
+       *  ignores it and would run the skill, so the tab offers Update only
+       *  when the runner reports origins. */
+      libraryUpdate?: { latest: string; version: string };
+    };
+    result: { started: boolean };
+  };
   deployRunState: {
     payload: void;
     result: {
+      /** The skill this run follows. Older runners omit it: deploy. */
+      skill?: { scope: SkillScope; name: string };
       /** The CLI this run is actually using. Reported rather than inferred:
        *  a reopened modal would otherwise show the space default while the
        *  run is on the other one. Older runners omit it. */
@@ -2914,14 +2967,23 @@ export type BoardAgentActionMap = {
   // Never carried by the server's relay: vault files only travel on a direct
   // link.
 
-  vaultStatus: { payload: Record<string, never>; result: RunnerVaultStatus };
+  // Every one of these takes `store` (RunnerStoreName): which of the
+  // runner's two stores it acts on. None is the Vault, except where said:
+  // a list, a search, a status and a lookup by id with none read both.
+
+  vaultStatus: { payload: { store?: RunnerStoreName }; result: RunnerVaultStatus };
   /** Newest first. `query` (2+ characters) narrows to files whose path or
    *  text has the words, as the cloud vault's `files` does. `before` is the
    *  last row's id, for the next page.
    *  @deprecated Kept for one runner release: `vaultRpc` `files`
    *  (.specs/vault-router.md → Compatibility). */
   vaultFiles: {
-    payload: { query?: string; limit?: number; before?: string };
+    payload: {
+      query?: string;
+      limit?: number;
+      before?: string;
+      store?: RunnerStoreName;
+    };
     result: { files: RunnerVaultFile[]; more: boolean };
   };
   /** Oakbox's search, run on the runner (.specs/runner-vault.md "Search
@@ -2931,12 +2993,18 @@ export type BoardAgentActionMap = {
    *  @deprecated Kept for one runner release: `vaultRpc` `search`, or
    *  `files` with `meaning`. */
   vaultSearch: {
-    payload: { query: string; limit?: number };
+    payload: { query: string; limit?: number; store?: RunnerStoreName };
     result: { hits: RunnerVaultHit[]; mode: RunnerVaultSearchMode };
   };
   /** A signed write for one file (an R2-style presigned PUT). */
   vaultUploadStart: {
-    payload: { name: string; size: number; contentType: string };
+    payload: {
+      name: string;
+      size: number;
+      contentType: string;
+      /** Where the file goes; none is the Vault. */
+      store?: RunnerStoreName;
+    };
     result: { ticket: string };
   };
   /** One base64 range of a signed write. The last one stores the file and
@@ -2954,7 +3022,7 @@ export type BoardAgentActionMap = {
    *  @deprecated Kept for one runner release: `vaultRpc` `downloadUrl`,
    *  whose ticket `vaultRead` redeems as before. */
   vaultDownload: {
-    payload: { uploadId: string };
+    payload: { uploadId: string; store?: RunnerStoreName };
     result: { ticket: string; size: number; name: string; contentType: string };
   };
   vaultRead: {
@@ -2964,7 +3032,7 @@ export type BoardAgentActionMap = {
   /** The caller's own files only; another account's are kept and counted.
    *  @deprecated Kept for one runner release: `vaultRpc` `deleteFiles`. */
   vaultDelete: {
-    payload: { uploadIds: string[] };
+    payload: { uploadIds: string[]; store?: RunnerStoreName };
     result: { deleted: number; kept: number };
   };
   /** One procedure of the shared vault router (@shared/vault-router,
@@ -2977,6 +3045,8 @@ export type BoardAgentActionMap = {
     payload: {
       path: 'files' | 'search' | 'downloadUrl' | 'deleteFiles';
       input?: unknown;
+      /** The store the procedure runs on; none is the Vault. */
+      store?: RunnerStoreName;
     };
     result: { json: unknown; meta?: unknown };
   };
@@ -3017,6 +3087,9 @@ export type BoardAgentActionMap = {
       /** Factiii's category tree, for the tag and category tools; none
        *  leaves them out. */
       categories?: RunnerCategoryTree;
+      /** The store the turn reads. None is the Vault, where only Ollama
+       *  may ask; a follow-up (`chatId`) runs in its chat's store. */
+      store?: RunnerStoreName;
     };
     /** `chatId`: the chat the turn is saved in, new or continued. */
     result: { askId: string; chatId: string };
@@ -3042,49 +3115,60 @@ export type BoardAgentActionMap = {
   };
   /** One of the caller's chats, with its messages. */
   vaultChat: {
-    payload: { chatId: string };
+    payload: { chatId: string; store?: RunnerStoreName };
     result: { chat: RunnerAskChat; messages: RunnerAskChatMessage[] };
   };
   /** Delete one of the caller's chats, for good. */
   vaultChatDelete: {
-    payload: { chatId: string };
+    payload: { chatId: string; store?: RunnerStoreName };
     result: { deleted: boolean };
   };
   /** Categorize on the runner (.specs/runner-vault-ask.md "Categorize on the
    *  runner"), owner only: the category tree comes with the start, the tags
    *  stay on the runner. */
   vaultCategorizeStatus: {
-    payload: Record<string, never>;
+    payload: { store?: RunnerStoreName };
     result: RunnerCategorizeStatus;
   };
   /** Start one run over every file waiting. Answers at once; one at a time. */
   vaultCategorizeStart: {
-    payload: RunnerCategorizePayload;
+    payload: RunnerCategorizePayload & { store?: RunnerStoreName };
     result: RunnerCategorizeStatus;
   };
   /** Stop the run: the model call in flight is aborted, and its file stays
    *  waiting. */
   vaultCategorizeCancel: {
-    payload: Record<string, never>;
+    payload: { store?: RunnerStoreName };
     result: RunnerCategorizeStatus;
   };
   /** One file's page, owner only: what was read off it and its categories
    *  (.specs/runner-vault-ask.md "A runner file's page"). */
   vaultFilePost: {
-    payload: { uploadId: string };
+    payload: { uploadId: string; store?: RunnerStoreName };
     result: RunnerVaultFilePost;
   };
   /** The notes kept from runner Ask answers, newest first, owner only.
    *  With `noteId`, that one note alone (a search hit opening it). Ask's
    *  model keeps them with its save tool (vault/ask.ts). */
   vaultNotes: {
-    payload: { noteId?: string };
+    payload: { noteId?: string; store?: RunnerStoreName };
     result: { notes: RunnerVaultNote[] };
   };
   /** Delete one note for good. */
   vaultNoteDelete: {
-    payload: { noteId: string };
+    payload: { noteId: string; store?: RunnerStoreName };
     result: { deleted: boolean };
+  };
+  /** Move to… (.specs/runner-vault.md "Two stores"), owner only: copy the
+   *  owner's files into the other store, then delete them where they were.
+   *  The copy is read and embedded again there; its tags stay behind. Each
+   *  file's new row, and why any did not move. */
+  vaultMove: {
+    payload: { uploadIds: string[]; to: RunnerStoreName };
+    result: {
+      moved: { from: string; file: RunnerVaultFile }[];
+      failed: { uploadId: string; error: string }[];
+    };
   };
   /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
    *  backend: setup, sign-ins, models"): what Ollama holds, the table with its fit, machine health

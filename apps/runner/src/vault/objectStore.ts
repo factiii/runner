@@ -16,7 +16,8 @@ import type {
 // holding the key, type, size and hash. So a key is only ever data: no key
 // names a path, whatever the client put in a file name.
 //
-// A "signed URL" is a ticket: `runner-vault:put?…` or `runner-vault:get?…`,
+// A "signed URL" is a ticket: `runner-vault:put?…` or `runner-vault:get?…`
+// (Runner Storage's start `runner-storage:` instead),
 // with the key, size and expiry signed with HMAC-SHA256 under a key made when
 // the process starts and never written down. A device redeems it over its
 // direct link (`vaultWrite`, `vaultRead`); nothing listens on a port. A
@@ -26,6 +27,14 @@ const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 const DEFAULT_EXPIRES_S = 900;
 const TICKET_SCHEME = 'runner-vault:';
+/** Runner Storage's tickets (.specs/runner-vault.md "Two stores"): another
+ *  scheme, so the daemon hands a ticket to the store that signed it, and a
+ *  ticket of one store never redeems in the other. */
+export const RUNNER_STORAGE_TICKET_SCHEME = 'runner-storage:';
+
+/** The store that signed a ticket, by its scheme. */
+export const ticketStore = (ticket: string): 'vault' | 'runner' =>
+  ticket.startsWith(RUNNER_STORAGE_TICKET_SCHEME) ? 'runner' : 'vault';
 
 type Meta = {
   key: string;
@@ -47,7 +56,9 @@ export class FsObjectStore implements VaultObjectStore {
 
   constructor(
     private readonly root: string,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** The tickets' scheme: the Vault's, or Runner Storage's. */
+    private readonly scheme: string = TICKET_SCHEME
   ) {}
 
   private file(key: string): string {
@@ -171,15 +182,15 @@ export class FsObjectStore implements VaultObjectStore {
 
   private ticket(op: 'put' | 'get', fields: Record<string, string>): string {
     const body = `${op}?${new URLSearchParams(fields).toString()}`;
-    return `${TICKET_SCHEME}${body}&s=${this.sign(body)}`;
+    return `${this.scheme}${body}&s=${this.sign(body)}`;
   }
 
   /** The ticket's fields, or a refusal. Expiry is the caller's to check: a
    *  write is held to it only when it starts, as a PUT that began in time. */
   private redeem(url: string): Ticket {
     const refused = new Error('This file link is not valid on this runner.');
-    if (!url.startsWith(TICKET_SCHEME)) throw refused;
-    const body = url.slice(TICKET_SCHEME.length);
+    if (!url.startsWith(this.scheme)) throw refused;
+    const body = url.slice(this.scheme.length);
     const at = body.lastIndexOf('&s=');
     if (at < 0) throw refused;
     const signed = body.slice(0, at);

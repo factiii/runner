@@ -2,6 +2,9 @@ import { randomBytes } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+import type { RunnerStoreName } from '@shared/all/domains/electron';
+
+import { VAULT_OLLAMA_ONLY } from './access';
 import type { AskTools } from './ask';
 
 // The Vault as MCP tools, for Claude and Codex answering an Ask turn
@@ -13,6 +16,9 @@ import type { AskTools } from './ask';
 // the turn. The CLIs reach it as a streamable-HTTP MCP server: each request
 // is one JSON-RPC message, answered with one JSON body; there is no SSE
 // stream, so GET is refused (the spec's way of saying so).
+//
+// Only Claude and Codex use this server, and they read Runner Storage only
+// (access.ts `storeEngineAllowed`): a server over the Vault is never started.
 
 export const VAULT_MCP_NAME = 'factiii-vault';
 
@@ -67,7 +73,12 @@ async function answer(tools: AskTools, msg: RpcRequest): Promise<unknown> {
 }
 
 /** Serve `tools` on loopback until `close`. */
-export async function startVaultMcp(tools: AskTools): Promise<VaultMcp> {
+export async function startVaultMcp(
+  tools: AskTools,
+  /** The store the tools read: never the Vault. */
+  store: RunnerStoreName
+): Promise<VaultMcp> {
+  if (store !== 'runner') throw new Error(VAULT_OLLAMA_ONLY);
   const token = randomBytes(24).toString('hex');
   const server = http.createServer((req, res) => {
     const reply = (status: number, body?: unknown) => {

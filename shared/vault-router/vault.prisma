@@ -16,47 +16,47 @@ generator client {
 }
 
 model Upload {
-  id             String          @id @default(uuid())
-  key            String
-  name           String? // original file name
-  status         UploadStatus    @default(PUBLISHED)
-  createdAt      DateTime        @default(now())
-  userId         Int
-  type           UploadType
+  id                String            @id @default(uuid())
+  key               String
+  name              String? // original file name
+  status            UploadStatus      @default(PUBLISHED)
+  createdAt         DateTime          @default(now())
+  userId            Int
+  type              UploadType
   // File vault (see .specs/file-vault.md). ONEDRIVE-sourced uploads reference the
   // file in the user's OneDrive (externalId = "driveId!itemId") — no S3 copy; bytes
   // are fetched via Graph at ingest/download time. ingestStatus null = not a document.
-  uploadSource   UploadSource    @default(S3)
-  externalId     String?
+  uploadSource      UploadSource      @default(S3)
+  externalId        String?
   // OneDrive re-embed detection: the source file's cTag captured at embed time.
   // cTag changes only when the file *content* changes, so on re-import we skip
   // files whose cTag still matches and re-embed only those that actually changed.
-  sourceCTag     String?
+  sourceCTag        String?
   // How this file's text was obtained. One value per file, not per page: every
   // branch of vaultExtract tags a whole file the same way — a PDF either has a
   // text layer or is OCR'd wholesale, and an image is always described. A
   // video or audio file the device transcribed is SPEECH.
-  transcriptSource TranscriptSource?
-  ingestStatus   IngestStatus?
-  ingestError    String?
+  transcriptSource  TranscriptSource?
+  ingestStatus      IngestStatus?
+  ingestError       String?
   // Hex SHA-256 of an uploaded vault file's bytes, hashed by the drop drain
   // before it reads anything. A second upload with the same hash is held back as
   // a duplicate until the user picks which copy to keep (.specs/file-vault.md →
   // Duplicates). A synced OneDrive file carries one too, from Graph or from the
   // bytes ingest read, so a sync can follow a re-uploaded file to its new item
   // id; it never takes part in the drop duplicate check. Null on anything else.
-  sha256         String?
+  sha256            String?
   // Set when the URLs for a post upload are issued and cleared when a post
   // takes the upload (.specs/uploads.md → Post uploads land private). An upload
   // that still carries it a day later was never attached, and the sweep
   // deletes it. Null on everything that is not a post upload.
-  pendingPostAt  DateTime?
+  pendingPostAt     DateTime?
   // A premium file whose bytes count against the owner's storage quota
   // (helpers/vaultStorage.ts): a screen recording, or a post upload over the
   // free RAW_UPLOAD_MAX_BYTES. Set when its URLs are issued, never cleared.
   // False on everything else, which stays outside the quota as it always was
   // (.specs/uploads.md → "Premium uploads count against storage").
-  chargesStorage Boolean         @default(false)
+  chargesStorage    Boolean           @default(false)
   // An admin's waiver of a charged upload (admin.setUploadStorageWaiver): its
   // bytes stop counting against the owner's storage while a post that uses it
   // is public, because the file is then in public use rather than the owner's
@@ -70,28 +70,28 @@ model Upload {
   // cleared when the trimmed file has replaced the RAW variant. A post refuses
   // the upload while it is set, so the untrimmed take is never published
   // (.specs/screen-recording.md → Trim).
-  trimPendingAt  DateTime?
+  trimPendingAt     DateTime?
   // A screen recording's transcript is its post's SPEECH rows (PostContent
   // with this upload's id, .specs/screen-recording.md → Transcript), the same
   // rows and vectors a vault video's words get. Partial: only the first
   // TRANSCRIBE_MAX_SECONDS were heard.
-  transcriptPartial Boolean         @default(false)
+  transcriptPartial Boolean           @default(false)
   speechRows        PostContent[]
   // When the ontology last ran over this file (.specs/oakbox.md → Ontology is
   // manual). Ingest only reads and embeds; tagging is a run the owner starts
   // and pays for, so null on an EMBEDDED file is what "not categorized yet"
   // means.
-  ontologyAt     DateTime?
+  ontologyAt        DateTime?
   // Folder this document was synced from (file vault). Un-syncing deletes the
   // VaultFolder row, which cascades its uploads; each upload's post (and that
   // post's SearchVector chunks) is deleted alongside it by the unsync path.
-  vaultFolder    VaultFolder?    @relation(fields: [vaultFolderId], references: [id], onDelete: Cascade)
-  vaultFolderId  Int?
-  productId      Int?
-  sourceFactiiiId Int?
-  posts          Post[]          @relation("postUploads") //posts that use this upload
-  postFactiiis   PostFactiii[]   @relation("factiiiUploads") //factiiis that use this upload
-  mediaVector    MediaVector?
+  vaultFolder       VaultFolder?      @relation(fields: [vaultFolderId], references: [id], onDelete: Cascade)
+  vaultFolderId     Int?
+  productId         Int?
+  sourceFactiiiId   Int?
+  posts             Post[]            @relation("postUploads") //posts that use this upload
+  postFactiiis      PostFactiii[]     @relation("factiiiUploads") //factiiis that use this upload
+  mediaVector       MediaVector?
 
   @@index([productId])
   // User media galleries (upload.findMany by userId) + cascade delete in the
@@ -202,14 +202,14 @@ model Post {
 }
 
 model PostContent {
-  id     Int    @id @default(autoincrement())
-  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
-  postId Int
+  id           Int           @id @default(autoincrement())
+  post         Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId       Int
   // 1-based position in the body.
-  seq    Int
-  text   String
+  seq          Int
+  text         String
   // 1-based source page for a row cut from a document; null for prose.
-  page   Int?
+  page         Int?
   // This row's search vector, deleted with it.
   searchVector SearchVector?
   // Set on a row of a screen recording's transcript (SPEECH, numbered from
@@ -223,22 +223,22 @@ model PostContent {
 }
 
 model SearchVector {
-  id     Int                        @id @default(autoincrement())
+  id            Int                         @id @default(autoincrement())
   // halfvec = float16, half the bytes of vector(768) with the same operators;
   // bge is an fp16 graph, so nothing is lost. Raw SQL casts to ::halfvec here
   // (MediaVector and repVector stay ::vector).
-  vector Unsupported("halfvec(768)")
+  vector        Unsupported("halfvec(768)")
   // A post is reached only through its content rows — there is no vector for
   // the post itself. The row carries its own position, so there is no seq here,
   // and a rewritten body takes its vectors with it (onDelete: Cascade), so a
   // vector cannot outlive the text it encodes.
-  postContentId Int?                @unique
-  postContent   PostContent?        @relation(fields: [postContentId], references: [id], onDelete: Cascade)
-  userId    Int?                       @unique
-  spaceId   Int?                       @unique
-  factiiiId Int?                       @unique
-  productId Int?                       @unique
-  updatedAt DateTime                   @default(now()) @updatedAt
+  postContentId Int?                        @unique
+  postContent   PostContent?                @relation(fields: [postContentId], references: [id], onDelete: Cascade)
+  userId        Int?                        @unique
+  spaceId       Int?                        @unique
+  factiiiId     Int?                        @unique
+  productId     Int?                        @unique
+  updatedAt     DateTime                    @default(now()) @updatedAt
 }
 
 model MediaVector {
@@ -333,20 +333,20 @@ model PostFactiii {
 }
 
 model SpaceTime {
-  id            Int         @id @default(autoincrement())
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @default(now()) @updatedAt
-  timestamp     DateTime?
-  latitude      Float?
-  longitude     Float?
-  display       String?
-  altitude      Int?
+  id               Int         @id @default(autoincrement())
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @default(now()) @updatedAt
+  timestamp        DateTime?
+  latitude         Float?
+  longitude        Float?
+  display          String?
+  altitude         Int?
   // Set only when the tagger sent a receipt from verification.attestLocation
   // for exactly this latitude, longitude and time: the app on an attested
   // device read it from the OS. Null for a typed or edited location.
   deviceVerifiedAt DateTime?
-  postFactiii   PostFactiii @relation(fields: [postFactiiiId], references: [id], onDelete: Cascade)
-  postFactiiiId Int
+  postFactiii      PostFactiii @relation(fields: [postFactiiiId], references: [id], onDelete: Cascade)
+  postFactiiiId    Int
 
   @@index([postFactiiiId])
 }

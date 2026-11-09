@@ -6,8 +6,9 @@
 //
 // The terminal is the backup (chatTerminal.ts): opening it resumes the same
 // conversation in Claude's full screen, once any turn here has finished, and
-// the next message here closes that Claude and carries on from it. Only one
-// of the two holds the conversation at a time.
+// the next message here closes that Claude, carries on from it, and opens it
+// again in its tab when the turn ends. Only one of the two holds the
+// conversation at a time.
 
 import { randomUUID } from 'crypto';
 import type { ChildProcess } from 'child_process';
@@ -16,6 +17,7 @@ import type { AgentProvider } from '../../domains/electron';
 import { spawnAgent } from '../board-agent-core/agent';
 import { type ExecTarget, sessionToken } from '../board-agent-core/exec';
 import { killTree } from '../board-agent-core/host-env';
+import { sessionPortsEnv } from '../board-agent-core/port-blocks';
 import {
   commandSupport,
   MODEL_RE,
@@ -70,6 +72,9 @@ type Run = {
   stopped: boolean;
   /** Open the terminal on the conversation once the run is over. */
   toTerminal: boolean;
+  /** The tab whose Claude the run closed to take the conversation: it opens
+   *  again there once the run is over, however it ended. */
+  reopenPane: string | null;
 };
 
 type Deps = {
@@ -82,6 +87,10 @@ type Deps = {
    *  forget it). */
   stored: (postId: string) => string | undefined;
   store: (postId: string, conversation: string) => void;
+  /** A turn started (true) or the last queued one ended (false). The rail
+   *  reads its Working/Idle dot from the terminal's hooks, which a chat turn
+   *  (headless, in no tab) never fires, so this tells it instead. */
+  onRunning?: (postId: string, running: boolean) => void;
 };
 
 export class ChatRuns {
@@ -99,6 +108,10 @@ export class ChatRuns {
   /** The model picked with the chat's /model, per session, for as long as
    *  the runner runs. None: the CLI's own default. */
   private models = new Map<string, string>();
+  /** Claude being opened in the terminal, per session: a second open waits on
+   *  it, and a turn waits so it finds (and closes) that Claude, so two CLIs
+   *  never hold one transcript. */
+  private opening = new Map<string, Promise<ChatTerminalState>>();
 
   constructor(private deps: Deps) {}
 
@@ -145,10 +158,12 @@ export class ChatRuns {
       proc: null,
       queue: [body],
       stopped: false,
-      toTerminal: false
+      toTerminal: false,
+      reopenPane: null
     };
     this.runs.set(postId, run);
     this.errors.delete(postId);
+    this.deps.onRunning?.(postId, true);
     void this.drive(postId, run);
   }
 
@@ -170,15 +185,34 @@ export class ChatRuns {
       run.toTerminal = true;
       return 'after-turn';
     }
-    const target = this.deps.target(postId);
-    if (!target) return 'no-tab';
-    if (await findAgentPane(target, postId)) return 'open';
-    const opened = await startTerminalAgent(
-      target,
-      postId,
-      this.conversation(postId)
-    );
-    return opened ? 'open' : 'no-tab';
+    return this.openTerminal(postId);
+  }
+
+  /** Open Claude in the terminal on the chat's conversation, in `pane` only
+   *  when given. One open at a time per session (see `opening`). */
+  private openTerminal(
+    postId: string,
+    pane?: string
+  ): Promise<ChatTerminalState> {
+    const pending = this.opening.get(postId);
+    if (pending) return pending;
+    const opening = (async (): Promise<ChatTerminalState> => {
+      const target = this.deps.target(postId);
+      if (!target) return 'no-tab';
+      // Already open (the user opened it again): never a second CLI.
+      if (await findAgentPane(target, postId)) return 'open';
+      const opened = await startTerminalAgent(
+        target,
+        postId,
+        this.conversation(postId),
+        pane
+      );
+      return opened ? 'open' : 'no-tab';
+    })().finally(() => {
+      if (this.opening.get(postId) === opening) this.opening.delete(postId);
+    });
+    this.opening.set(postId, opening);
+    return opening;
   }
 
   /** The chat's /resume: carry on `conversation` with the CLI that recorded
@@ -201,6 +235,9 @@ export class ChatRuns {
     }
     const target = this.deps.target(postId);
     if (!target) throw new ChatSendError('No active session for this card.');
+    // A Claude still opening (a reopen after a turn) is closed with the rest,
+    // not raced: the two would be two CLIs on one transcript.
+    await this.opening.get(postId)?.catch(() => 'no-tab');
     const [claude, codex] = await Promise.all([
       findAgentPane(target, postId),
       findCodexPane(target, postId)
@@ -213,9 +250,9 @@ export class ChatRuns {
         : 'no-tab';
     }
     this.remember(postId, conversation);
-    return (await startTerminalAgent(target, postId, conversation))
-      ? 'open'
-      : 'no-tab';
+    // Through the one-open-at-a-time guard, on the conversation just
+    // remembered.
+    return this.openTerminal(postId);
   }
 
   /** One of the chat's shared commands, mapped to what `provider`'s CLI
@@ -243,7 +280,11 @@ export class ChatRuns {
           'Codex is not open in the terminal. Resume a conversation or open the terminal first.'
         );
       }
-      await typeInPane(target, pane.paneId, command === 'clear' ? '/new' : '/compact');
+      await typeInPane(
+        target,
+        pane.paneId,
+        command === 'clear' ? '/new' : '/compact'
+      );
       return command === 'clear'
         ? 'Codex started a new conversation in the terminal.'
         : 'Codex is compacting the conversation in the terminal.';
@@ -289,11 +330,14 @@ export class ChatRuns {
     try {
       const target = this.deps.target(postId);
       if (!target) return;
+      // A Claude still opening in the terminal is looked for once it is open.
+      await this.opening.get(postId)?.catch(() => 'no-tab');
       // A Claude open in the terminal holds the conversation: close it, and
       // carry on whichever conversation it had (a `/clear` or `/resume` there
-      // moves it).
+      // moves it). It opens again in its tab when the run ends.
       const pane = await findAgentPane(target, postId);
       if (pane) {
+        run.reopenPane = pane.paneId;
         await stopTerminalAgent(target, pane);
         this.remember(postId, pane.sessionId);
       }
@@ -318,8 +362,10 @@ export class ChatRuns {
             // The chat's /model; the CLI's default without one.
             model: this.models.get(postId) || undefined,
             // Which session this is, for the board MCP's session tools, and
-            // the secret that proves it (exec.ts sessionToken).
+            // the secret that proves it (exec.ts sessionToken). Its own
+            // ports too, as its terminal tabs have (port-blocks.ts).
             env: {
+              ...sessionPortsEnv(target.paths.root, postId),
               FACTIII_SESSION: postId,
               FACTIII_SESSION_TOKEN: sessionToken(target.paths.root, postId)
             },
@@ -356,7 +402,15 @@ export class ChatRuns {
       }
     } finally {
       this.runs.delete(postId);
-      if (run.toTerminal) await this.toTerminal(postId).catch(() => 'no-tab');
+      this.deps.onRunning?.(postId, false);
+      // Asked for from the chat: any idle tab. Else back in the tab the run
+      // closed it in, or nowhere when that tab is gone or busy.
+      if (run.toTerminal || run.reopenPane) {
+        await this.openTerminal(
+          postId,
+          run.toTerminal ? undefined : (run.reopenPane ?? undefined)
+        ).catch(() => 'no-tab');
+      }
     }
   }
 }

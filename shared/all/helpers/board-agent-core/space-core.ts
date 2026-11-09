@@ -15,6 +15,7 @@ import { cliHomes } from './agent-homes';
 import { AuditLog } from './audit';
 import { removeDefaultHomeLeftovers } from './default-home-cleanup';
 import { type BoardMcpChannel, openBoardMcpRelay } from './board-mcp-relay';
+import { sessionPortBlocks } from './port-blocks';
 import {
   type SessionLinks,
   withSessionCardTools
@@ -88,6 +89,7 @@ import {
   keepOneTmuxPane,
   respawnTmuxPane,
   resurrectRestore,
+  safeTmuxName,
   setTmuxSessionOption,
   sourceTmuxConf,
   tmuxPanePaths,
@@ -1244,7 +1246,13 @@ export class SpaceCore {
     );
     if (revived.length === 0) return;
     const digest = await terminalDigest(target).catch(() => '');
+    // A tab of a session with its own port block gets that block back, not
+    // the board's (port-blocks.ts). Tabs are `terminal-<postId>-<tab>`.
+    const blocks = [...sessionPortBlocks(root)].map(
+      ([postId, ports]) => [`terminal-${safeTmuxName(postId)}-`, ports] as const
+    );
     for (const session of revived) {
+      const ports = blocks.find(([prefix]) => session.startsWith(prefix))?.[1];
       unclaimed.delete(session);
       await keepOneTmuxPane(target, session);
       await respawnTmuxPane({
@@ -1259,7 +1267,10 @@ export class SpaceCore {
           )
         ],
         cwd: paths.get(session) || target.paths.workspace,
-        env: target.stateEnv()
+        env: {
+          ...target.stateEnv(),
+          ...(ports ? { FACTIII_PORTS: ports.join(',') } : {})
+        }
       }).catch(() => {});
       if (digest) {
         await setTmuxSessionOption(target, session, TERMINAL_FP_OPTION, digest);

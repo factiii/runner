@@ -46,6 +46,9 @@ const ENGINE = path.resolve(__dirname, '../..');
 
 let db: VaultDb;
 let vault: RunnerVault;
+/** The same rows as Runner Storage, the store Claude and Codex may read
+ *  (.specs/runner-vault-ask.md "Which store Ask reads"). */
+let storage: RunnerVault;
 /** A file no question's words find: only an added one reaches the model. */
 let recipe: RunnerVaultFile;
 let ollama: http.Server;
@@ -205,7 +208,12 @@ async function ask(
 
 before(async () => {
   db = await openVaultDb({ dataDir: 'memory://', engineDir: ENGINE });
-  vault = new RunnerVault(db, new FsObjectStore(path.join(tmp, 'objects')), '1', () => {});
+  const objects = new FsObjectStore(path.join(tmp, 'objects'));
+  vault = new RunnerVault(db, objects, '1', () => {});
+  storage = new RunnerVault(db, objects, '1', () => {}, null, null, null, null, {
+    storeName: 'runner',
+    members: () => vault.memberIds()
+  });
   await vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
   await add('Insurance/insurance.txt', 'Home insurance. Policy number AB-123. Renews in May.');
   recipe = await add('Recipes/bread.txt', 'Flour, water, salt and yeast.');
@@ -304,6 +312,53 @@ describe('Ask on a runner', () => {
     );
   });
 
+  it('refuses the owner Claude and Codex on the Vault, before anything is read', async () => {
+    let read = false;
+    const asker = new VaultAsk(
+      vault,
+      engines({
+        cli: async () => {
+          read = true;
+          return '';
+        }
+      })
+    );
+    for (const engine of ['claude', 'codex']) {
+      await assert.rejects(
+        asker.handle('vaultAsk', { engine, question: 'What is my policy number?' }, OWNER),
+        /read by Local AI on this runner only/
+      );
+    }
+    // A Claude chat kept in the Vault from before: its follow-up runs on
+    // Claude, so it is refused too, whatever the payload says.
+    const [{ id: chatId }] = await db.query<{ id: string }>(
+      `INSERT INTO "RunnerAskChat" ("id", "userId", "title", "engine", "model")
+       VALUES (gen_random_uuid()::text, 1, 'old', 'claude', NULL) RETURNING "id"`
+    );
+    await assert.rejects(
+      asker.handle(
+        'vaultAsk',
+        { engine: 'ollama', model: 'llama3.2:3b', question: 'and now?', chatId },
+        OWNER
+      ),
+      /read by Local AI on this runner only/
+    );
+    await db.query('DELETE FROM "RunnerAskChat" WHERE "id" = $1', [chatId]);
+    assert.equal(read, false);
+  });
+
+  it('lets the owner ask Claude and Codex about Runner Storage', async () => {
+    const asker = new VaultAsk(
+      storage,
+      engines({ cli: async (_engine, _prompt, mcp) => `<p>Read through ${mcp.tools.length} tools.</p>` })
+    );
+    for (const engine of ['claude', 'codex']) {
+      const state = await ask(asker, { engine, question: 'What is my policy number?' }, OWNER);
+      assert.equal(state.error, null);
+      assert.match(state.text, /Read through \d+ tools/);
+    }
+  });
+
   it('answers a peer with Ollama from the files it found, streamed, citing them', async () => {
     const asker = new VaultAsk(vault, engines());
     const state = await ask(
@@ -343,7 +398,7 @@ describe('Ask on a runner', () => {
   });
 
   it('answers the owner with Claude, which searches and reads through the Vault MCP', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const state = await ask(asker, { engine: 'claude', question: 'What is my policy number?' }, OWNER);
     assert.equal(state.error, null);
     assert.equal(state.text, '<p>The policy number is AB-123 (insurance.txt).</p>');
@@ -387,7 +442,7 @@ describe('Ask on a runner', () => {
   });
 
   it('runs Claude and Codex on the model and effort chosen in Account > Backend', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     await ask(
       asker,
       { engine: 'claude', question: 'policy', cli: { model: 'sonnet', effort: 'max' } },
@@ -409,7 +464,7 @@ describe('Ask on a runner', () => {
   });
 
   it('refuses settings that are not the engine’s own', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     // Claude's model on Codex, and text that is on no list.
     for (const payload of [
       { engine: 'codex', question: 'policy', cli: { model: 'sonnet', effort: null } },
@@ -434,7 +489,7 @@ describe('Ask on a runner', () => {
   });
 
   it('answers the owner with Codex in a read-only sandbox, through the same tools', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const state = await ask(asker, { engine: 'codex', question: 'What is my policy number?' }, OWNER);
     assert.equal(state.error, null);
     assert.equal(state.text, '<p>The policy number is AB-123 (insurance.txt).</p>');
@@ -457,7 +512,7 @@ describe('Ask on a runner', () => {
   it('keeps the Vault MCP to its token, and closes it with the turn', async () => {
     let mcpUrl = '';
     const asker = new VaultAsk(
-      vault,
+      storage,
       engines({
         cli: async (_engine, _prompt, mcp) => {
           mcpUrl = mcp.url;
@@ -476,7 +531,7 @@ describe('Ask on a runner', () => {
   });
 
   it('refuses a model the runner does not have, and a turn that is not yours', async () => {
-    const asker = new VaultAsk(vault, engines({ clis: async () => ['claude'] }));
+    const asker = new VaultAsk(storage, engines({ clis: async () => ['claude'] }));
     await assert.rejects(
       asker.handle('vaultAsk', { engine: 'ollama', model: 'qwen2.5:32b', question: 'policy' }, OWNER),
       /not on this runner/
@@ -532,7 +587,7 @@ describe('Ask on a runner', () => {
   });
 
   it('names the added files to Claude, to read first', async () => {
-    await ask(new VaultAsk(vault, engines(), Date.now, 0), { engine: 'claude', question: 'policy', fileIds: [recipe.id] }, OWNER);
+    await ask(new VaultAsk(storage, engines(), Date.now, 0), { engine: 'claude', question: 'policy', fileIds: [recipe.id] }, OWNER);
     assert.match(seen().input, new RegExp(`Read them with read_my_file first:\\n\\nuploadId: ${recipe.id}\\nname: Recipes/bread.txt`));
   });
 
@@ -551,7 +606,7 @@ describe('Ask on a runner', () => {
   });
 
   it('keeps a note with Claude’s save_research, once a turn, and says so', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const state = await ask(
       asker,
       { engine: 'claude', question: 'What is my policy number? keep this', aiResearchId: 77 },
@@ -780,7 +835,7 @@ describe('Stopping a turn', () => {
 
   it('kills the Claude process, and stops no turn but the caller’s own', async () => {
     fs.rmSync(CLI_PID, { force: true });
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const { askId, chatId } = await slow(asker, { engine: 'claude' }, OWNER);
     const pid = Number(fs.readFileSync(CLI_PID, 'utf-8'));
     // Someone else's turn reads as gone, as a poll does.

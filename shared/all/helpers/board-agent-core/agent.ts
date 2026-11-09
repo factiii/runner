@@ -119,8 +119,9 @@ export type SpawnAgentOptions = {
    *  stdin; Codex only takes files, so they sit in the space's drops dir for
    *  the length of the run. */
   images?: AskImage[];
-  // Extra env vars for the spawn. Only ever carries SHORT-LIVED,
-  // harness-minted creds (see deploy-creds.ts) - never the user's raw keys.
+  // Extra env vars for the spawn: the session's own facts (its id, token and
+  // FACTIII_PORTS block) or SHORT-LIVED, harness-minted creds (see
+  // deploy-creds.ts) - never the user's raw keys.
   env?: Record<string, string>;
   callbacks: ClaudeStreamCallbacks;
 };

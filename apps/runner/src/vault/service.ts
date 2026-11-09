@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import type {
   BoardAgentAction,
   BoardAgentActionMap,
+  RunnerCategorizeStatus,
+  RunnerStoreName,
   RunnerVaultFile,
   RunnerVaultIngest,
   RunnerVaultNote,
@@ -28,6 +30,8 @@ import {
 
 import {
   deletableRows,
+  storeEngineAllowed,
+  VAULT_OLLAMA_ONLY,
   VAULT_REFUSAL,
   vaultActionAllowed,
   vaultOwnerOnly,
@@ -61,12 +65,18 @@ import type { RunnerVaultRouter } from './vaultRouter';
 // No client sends `vaultRpc` yet: these four are what the web, Oakbox and the
 // phone apps call (shared/utils/helpers/runnerVault.ts), so they stay until
 // those clients, installed builds included, have moved to it.
+//
+// One class, two stores (.specs/runner-vault.md "Two stores"): the daemon
+// makes one RunnerVault on the Vault's database and folder, and one on Runner
+// Storage's, the same code on its own paths (`storeName`). Every row it
+// answers carries its store. Who is let in is kept once, in the Vault's
+// share table: Runner Storage reads it from there (`members`).
 
 const PAGE = 50;
 const CATEGORIZE_RUNNING =
   'Categorize is running on this runner. Add files once it has finished, or stop it in Organize.';
 const DOWNLOAD_EXPIRES_S = 900;
-const NOT_HERE = 'That file is not in this vault.';
+export const NOT_HERE = 'That file is not in this vault.';
 export const VAULT_ROUTER_UPDATING =
   'This runner is still updating its Vault. Try again in a minute.';
 /** The files one Ask turn reads, and how much of each. About 6k tokens in
@@ -92,6 +102,18 @@ export const askTerms = (question: string): string[] =>
     .filter((word) => word.length >= ASK_TERM_MIN_CHARS && !ASK_STOP_WORDS.has(word))
     .sort((a, b) => b.length - a.length)
     .slice(0, ASK_TERMS);
+
+/** One store's options (.specs/runner-vault.md "Two stores"). */
+export type RunnerVaultOptions = {
+  /** Which store this is. The Vault when absent. */
+  storeName?: RunnerStoreName;
+  /** Who the owner let in, read from another store's share table (Runner
+   *  Storage reads the Vault's). Absent: this store's own. */
+  members?: () => Promise<Set<string>>;
+};
+
+/** Where `files` starts after: a row of another store, by its time and id. */
+export type FilesCursor = { at: string; id: string };
 
 /** Who a channel is in the Vault (RunnerVault.enter). */
 export type VaultCaller = {
@@ -144,8 +166,19 @@ export class RunnerVault {
     /** The shared vault router on this Vault (vaultRouter.ts). It throws
      *  while its Prisma client is not installed yet; null on a Vault made
      *  without it (the tests of the old actions). */
-    private readonly router: (() => RunnerVaultRouter) | null = null
+    private readonly router: (() => RunnerVaultRouter) | null = null,
+    private readonly options: RunnerVaultOptions = {}
   ) {}
+
+  /** Which of the runner's stores this is. */
+  get storeName(): RunnerStoreName {
+    return this.options.storeName ?? 'vault';
+  }
+
+  /** A row as this store answers it: tagged with the store. */
+  private tag<T extends object>(row: T): T & { store: RunnerStoreName } {
+    return { ...row, store: this.storeName };
+  }
 
   private categorize(): VaultCategorize {
     if (!this.categorizer) throw new Error('Categorize is not available on this runner.');
@@ -186,6 +219,7 @@ export class RunnerVault {
 
   /** The accounts the owner let in: the runner's own half of the share. */
   memberIds(): Promise<Set<string>> {
+    if (this.options.members) return this.options.members();
     if (!this.members) {
       this.members = this.db
         .query<{ memberId: number }>(
@@ -272,15 +306,17 @@ export class RunnerVault {
         return this.share(memberId, shared);
       }
       // The owner's alone (access.ts), so the caller is the owner.
+      // The Vault's own run is Local AI only: Claude and Codex are not
+      // offered on it, and refused if asked for (access.ts).
       case 'vaultCategorizeStatus':
-        return this.categorize().status(Number(caller));
-      case 'vaultCategorizeStart':
-        return this.categorize().start(
-          vaultCategorizeStartSchema.parse(payload),
-          Number(caller)
-        );
+        return this.categorizeView(await this.categorize().status(Number(caller)));
+      case 'vaultCategorizeStart': {
+        const run = vaultCategorizeStartSchema.parse(payload);
+        if (!storeEngineAllowed(this.storeName, run.engine)) throw new Error(VAULT_OLLAMA_ONLY);
+        return this.categorizeView(await this.categorize().start(run, Number(caller)));
+      }
       case 'vaultCategorizeCancel':
-        return this.categorize().cancel(Number(caller));
+        return this.categorizeView(await this.categorize().cancel(Number(caller)));
       // The owner's too (access.ts).
       case 'vaultFilePost': {
         const { uploadId } = vaultFilePostSchema.parse(payload);
@@ -293,7 +329,9 @@ export class RunnerVault {
       }
       case 'vaultNotes':
         return {
-          notes: await this.posts.notes(Number(caller), vaultNotesSchema.parse(payload ?? {}).noteId)
+          notes: (
+            await this.posts.notes(Number(caller), vaultNotesSchema.parse(payload ?? {}).noteId)
+          ).map((note) => this.tag(note))
         };
       case 'vaultNoteDelete':
         return {
@@ -302,6 +340,35 @@ export class RunnerVault {
       default:
         throw new Error(`Unknown vault action: ${String(action)}`);
     }
+  }
+
+  /** Categorize's status as this store offers it: the Vault lists no CLI,
+   *  so the app offers Local AI only on it. */
+  private categorizeView(status: RunnerCategorizeStatus): RunnerCategorizeStatus {
+    if (this.storeName !== 'vault') return status;
+    return { ...status, models: { ...status.models, cli: [], signedOut: [] } };
+  }
+
+  /** One page of the files for the channel behind `scope`, after `cursor`
+   *  when it is a row of another store: the daemon's list over both stores
+   *  (daemonVault.ts). Throws the refusal. */
+  async listFor(
+    scope: VouchedScope,
+    input: { query?: string; limit?: number; factiiiId?: number },
+    cursor: FilesCursor | null
+  ): Promise<BoardAgentActionMap['vaultFiles']['result']> {
+    const { role, readers, caller } = await this.enter(scope);
+    if (!vaultActionAllowed(role, 'vaultFiles')) throw new Error(vaultOwnerOnly('vaultFiles'));
+    return this.files(input, readers, caller, true, cursor);
+  }
+
+  /** Where a page after this file starts, or null when it is not here. */
+  async cursorOf(uploadId: string): Promise<FilesCursor | null> {
+    const [row] = await this.db.query<FilesCursor>(
+      'SELECT "createdAt"::text AS "at", "id" FROM "Upload" WHERE "id" = $1',
+      [uploadId]
+    );
+    return row ?? null;
   }
 
   /**
@@ -317,7 +384,7 @@ export class RunnerVault {
     if (role !== 'owner') throw new Error(vaultOwnerOnly('vaultNotes'));
     const note = await this.posts.saveNote(input, Number(caller));
     this.ingest?.kick();
-    return note;
+    return this.tag(note);
   }
 
   private async status(
@@ -355,7 +422,8 @@ export class RunnerVault {
       createdAt: new Date(row.createdAt).toISOString(),
       ingestStatus: row.ingestStatus ?? 'PENDING',
       mine: String(row.userId) === caller,
-      addedBy: String(row.userId) === caller ? null : String(row.userId)
+      addedBy: String(row.userId) === caller ? null : String(row.userId),
+      store: this.storeName
     };
   }
 
@@ -365,7 +433,9 @@ export class RunnerVault {
     caller: string,
     /** With each file's categories: the list Organize shows. Search and Ask
      *  do not read them. */
-    withTags = false
+    withTags = false,
+    /** Start after this row of another store (`listFor`). */
+    cursor: FilesCursor | null = null
   ): Promise<BoardAgentActionMap['vaultFiles']['result']> {
     const limit = input.limit ?? PAGE;
     const query = input.query?.trim() ?? '';
@@ -390,9 +460,18 @@ export class RunnerVault {
                  SELECT 1 FROM "_postUploads" pu
                    JOIN "PostFactiiiCount" c ON c."postId" = pu."A"
                   WHERE pu."B" = u."id" AND c."factiiiId" = $5))
+          AND ($6::text IS NULL OR (u."createdAt", u."id") < ($6::timestamp(3), $7::text))
         ORDER BY u."createdAt" DESC, u."id" DESC
         LIMIT $4`,
-      [readers, pattern, input.before ?? null, limit + 1, input.factiiiId ?? null]
+      [
+        readers,
+        pattern,
+        input.before ?? null,
+        limit + 1,
+        input.factiiiId ?? null,
+        cursor?.at ?? null,
+        cursor?.id ?? null
+      ]
     );
     const page = rows.slice(0, limit);
     const tags = withTags ? await this.tagsOf(page.map((row) => row.id)) : null;
@@ -469,7 +548,9 @@ export class RunnerVault {
       }))
     );
     // The caller's notes rank beside the files, nearest first.
-    const notes = await this.posts.noteMeaning(Number(caller), literal, limit);
+    const notes = (await this.posts.noteMeaning(Number(caller), literal, limit)).map((note) =>
+      this.tag(note)
+    );
     const hits = [...files, ...notes].sort((a, b) => a.distance - b.distance).slice(0, limit);
     return { hits, mode: 'meaning' };
   }
@@ -490,7 +571,7 @@ export class RunnerVault {
       containsPattern(trimmed),
       limit - files.length
     );
-    return [...files, ...notes];
+    return [...files, ...notes.map((note) => this.tag(note))];
   }
 
   /**
@@ -533,7 +614,10 @@ export class RunnerVault {
       `SELECT ${UPLOAD_COLUMNS} FROM "Upload" u WHERE u."id" = $1 AND u."userId" = ANY($2::int[])`,
       [uploadId, readers]
     );
-    if (!row) return this.posts.noteText(Number(caller), uploadId, chars);
+    if (!row) {
+      const note = await this.posts.noteText(Number(caller), uploadId, chars);
+      return note && { ...note, file: this.tag(note.file) };
+    }
     const rows = await this.db.query<{ text: string; page: number | null }>(
       `SELECT pc."text", pc."page"
          FROM "_postUploads" pu
@@ -659,6 +743,8 @@ export class RunnerVault {
 
   private async share(memberId: string, shared: boolean): Promise<RunnerVaultStatus> {
     if (memberId === this.ownerId) throw new Error('The owner already opens this vault.');
+    // Who is let in is kept once, in the Vault (the daemon sends this there).
+    if (this.options.members) throw new Error('Who opens this runner is set on its Vault.');
     await this.db.batch([
       shared
         ? {

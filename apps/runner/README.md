@@ -14,13 +14,16 @@ A headless daemon that runs Factiii's Board AI agents (Claude-driven coding sess
 ## Install
 
 ```bash
-npm install -g @factiii/runner
+curl -fsSL https://factiii.com/runner.sh | sh
 ```
 
-Or run without installing:
+It installs the newest release from [github.com/factiii/runner](https://github.com/factiii/runner/releases) after checking its `.sha256`, brings its own Node when the machine has none (or one outside 20 to 24), then runs `factiii-runner setup`. Run it again to update. npm has blocked every release after 0.27.0, so `npm install -g @factiii/runner` installs that old version until npm unblocks the package.
+
+Without the script:
 
 ```bash
-npx @factiii/runner setup
+npm install -g https://github.com/factiii/runner/releases/download/v0.39.0/factiii-runner-0.39.0.tgz
+factiii-runner setup
 ```
 
 ## Usage
@@ -40,7 +43,7 @@ factiii-runner password    # enter an old connection password once, to remove it
 
 ### Parts
 
-Each part says what it does, whether it is installed, and about how much disk and memory it costs. The same list is in the app under Runner Settings > Setup > Environment, where one button adds, removes, starts or stops a part and installs run in the background.
+Each part says what it does, whether it is installed, and about how much disk and memory it costs. The same list is in the app under the runner's Status > Features, where one button adds, removes, starts or stops a part and installs run in the background.
 
 | Part | Needs |
 |---|---|
@@ -64,7 +67,7 @@ Each part says what it does, whether it is installed, and about how much disk an
 - **"Fix it for me? [Y/n]"** when no administrator is needed: a tool Homebrew or npm installs (tmux, sops, age, the agent CLIs), or the runner's own folder. With a yes the runner installs tools and nothing else.
 - **The command to copy** when it needs `sudo` or is your decision to make: packages on Linux (apt, dnf, pacman), sleep and power settings, automatic login, lingering. The runner prints it and never runs it.
 
-The tools of this checklist (git, tmux, script, node, claude, codex, redis, sops, age, OrbStack, Tailscale) also show in the app, item by item, under Runner Settings > Setup > Environment. Initialize installs the basics (git, tmux, script, node, claude); each extra (codex, redis for live agent status in terminals, sops and age, OrbStack for containers, Tailscale for remote access) has its own Install button, and Connect Codex installs codex itself. Tailscale's Install also starts tailscaled as a system service (your password, once), makes you its operator, and runs `tailscale up`: open the "Sign in to Tailscale" button it shows, or set `TAILSCALE_AUTH_KEY` (an auth key, or an OAuth client secret with `?preauthorized=true` and its tags) in the runner's environment to join with no sign-in. Screen Sharing then works at `vnc://<its tailnet IP>`, even when Factiii is down.
+The tools of this checklist (git, tmux, script, node, claude, codex, redis, sops, age, OrbStack, Tailscale) also show in the app, item by item, under the runner's Status > Features. Initialize installs the basics (git, tmux, script, node, claude); each extra (codex, redis for live agent status in terminals, sops and age, OrbStack for containers, Tailscale for remote access) has its own Install button, and Connect Codex installs codex itself. Tailscale's Install also starts tailscaled as a system service (your password, once), makes you its operator, and runs `tailscale up`: open the "Sign in to Tailscale" button it shows, or set `TAILSCALE_AUTH_KEY` (an auth key, or an OAuth client secret with `?preauthorized=true` and its tags) in the runner's environment to join with no sign-in. Screen Sharing then works at `vnc://<its tailnet IP>`, even when Factiii is down.
 
 `doctor` exits 1 while a required item is unmet and 0 otherwise. Without a terminal, or with `--no-fix`, it only reports: it asks nothing and changes nothing. `--json` prints the same report for a script.
 

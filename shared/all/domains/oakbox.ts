@@ -316,11 +316,20 @@ export const overageMessage = (
 });
 
 /**
+ * The account's room on Factiii's servers (R2), by the name every app shows
+ * it under: the runner's Status tab beside Machine Storage, Oakbox's storage
+ * bars, its plans and its Storage sources. Machine storage is a runner's own
+ * disk.
+ */
+export const CLOUD_STORAGE_LABEL = 'Cloud Storage';
+
+/**
  * Where more storage is bought: the plan section of Oakbox's account page,
  * which lists the storage tiers. Factiii sells no storage of its own, so a
  * Factiii upload refused for space links here too.
  */
-export const STORAGE_PLANS_URL = 'https://oakbox.me/app/account?tab=profile#plan';
+export const STORAGE_PLANS_URL =
+  'https://oakbox.me/app/account?tab=profile#plan';
 
 /**
  * The refusal for a premium upload (a screen recording, or a post file over
@@ -329,7 +338,7 @@ export const STORAGE_PLANS_URL = 'https://oakbox.me/app/account?tab=profile#plan
  * link to STORAGE_PLANS_URL beside it.
  */
 export const OVER_STORAGE_ERROR =
-  'That file would put you over your storage. Buy more storage, or delete something first.';
+  'That file would put you over your Cloud Storage. Buy more Cloud Storage, or delete something first.';
 
 /** "2 TB" from 2000, so a tier's own label and a quota readout agree. */
 export const formatStorageGb = (gb: number): string =>
@@ -977,18 +986,35 @@ export const tronKind = (entry: {
  * because the two prompts are the last thing a person reads before files go,
  * and a folder's prompt has to name a count the client would otherwise phrase
  * its own way.
+ *
+ * `published`: the file's post is public, or how many of the files' posts
+ * are. Deleting a Cloud file its owner published takes the public post down
+ * too (.specs/file-vault.md → Delete), so the prompt says so. Absent or 0 is
+ * today's prompt.
  */
 export type VaultDeletion =
-  | { kind: 'file'; name: string }
-  | { kind: 'folder'; name: string; files: number }
-  | { kind: 'chosen'; count: number };
+  | { kind: 'file'; name: string; published?: boolean }
+  | { kind: 'folder'; name: string; files: number; published?: number }
+  | { kind: 'chosen'; count: number; published?: number };
 
 const plural = (n: number): string => (n === 1 ? 'file' : 'files');
+
+// The line a delete that takes public posts adds.
+const publicLine = (published: number): string =>
+  published === 1
+    ? ' 1 of them is a public post on Factiii, and goes for everyone.'
+    : ` ${published.toLocaleString()} of them are public posts on Factiii, and go for everyone.`;
 
 export const deletePrompt = (
   what: VaultDeletion
 ): { title: string; body: string } => {
   if (what.kind === 'file') {
+    if (what.published) {
+      return {
+        title: 'Delete this public post?',
+        body: `${what.name} is published on Factiii. Deleting it takes the post down for everyone, with anything read from it.`
+      };
+    }
     return {
       title: 'Delete this file?',
       // The whole path, not the leaf: `statement.txt` on its own does not say
@@ -996,15 +1022,17 @@ export const deletePrompt = (
       body: `${what.name} and anything read from it.`
     };
   }
+  const published = what.published ?? 0;
+  const extra = published > 0 ? publicLine(published) : '';
   if (what.kind === 'folder') {
     return {
       title: 'Delete this folder?',
-      body: `${what.name} and the ${what.files.toLocaleString()} ${plural(what.files)} in it, with anything read from them.`
+      body: `${what.name} and the ${what.files.toLocaleString()} ${plural(what.files)} in it, with anything read from them.${extra}`
     };
   }
   return {
     title: `Delete ${what.count.toLocaleString()} ${plural(what.count)}?`,
-    body: 'They go with anything read from them.'
+    body: `They go with anything read from them.${extra}`
   };
 };
 

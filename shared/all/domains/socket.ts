@@ -1,3 +1,4 @@
+import type { RoutineDueAck, RoutineDueFrame } from '../validators/routines';
 import type {
   AgentState,
   BoardAgentActionMap,
@@ -549,6 +550,13 @@ export interface ServerToClientEvents {
   'runner:recipient-request': (
     data: { spaceSlug: string; spaceId?: number; actor: RunnerActor },
     ack: (res: RunnerAck<{ recipient: string }>) => void
+  ) => void;
+  /** A Routine is due (.todos/routines.md): open a Chat session on the board
+   *  with its prompt, acting for the runner's owner. The server sends it only
+   *  to the owner's own runner. The ack names the session, or why not. */
+  'runner:routine-due': (
+    data: RoutineDueFrame,
+    ack: (res: RoutineDueAck) => void
   ) => void;
   /** Read the runner's audit log (owner only; the server checks that). */
   'runner:audit-read': (

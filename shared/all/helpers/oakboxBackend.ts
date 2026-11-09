@@ -3,7 +3,8 @@ import type {
   OllamaLibraryTag,
   RunnerLocalAiJob,
   RunnerLocalAiModels,
-  RunnerMachineHealth
+  RunnerMachineHealth,
+  RunnerStoreName
 } from '../domains/electron';
 import type {
   CLAUDE_ASK_EFFORTS,
@@ -82,13 +83,28 @@ export function runnerScope(backend: OakboxBackend): RunnerScope {
   }
 }
 
+/**
+ * The runners Ask may use: its model menu and its runner chats (decided
+ * 2026-11-08). Wider than `runnerScope` on Factiii: every runner of the
+ * person's own with a Vault online, chosen or not, so a connected runner's
+ * Claude, Codex and Ollama show up without first being chosen in Account >
+ * Backend. They are dialed only when the menu or the chat list opens, which
+ * is the person asking for them. Search and where files go still follow
+ * `runnerScope`. Runner mode is unchanged: its chosen runner only.
+ */
+export function askScope(backend: OakboxBackend): RunnerScope {
+  if (backend.mode === 'RUNNER') return runnerScope(backend);
+  return { key: 'factiii:ask', includes: () => true };
+}
+
 /** A computer of the person's own is part of the backend: always in Runner,
  *  and on Factiii once one is chosen. */
 export const usesComputer = (backend: OakboxBackend): boolean =>
   backend.mode === 'RUNNER' || backend.runnerId !== null;
 
-/** Where a file added now goes: the chosen runner's Vault in Runner mode,
- *  else Factiii's storage. */
+/** Where a file added now goes: the chosen runner in Runner mode (its Vault
+ *  or Runner Storage, as picked on the add sheet: RUNNER_STORE_CHOICES), else
+ *  Factiii's Cloud. */
 export const addsToRunner = (backend: OakboxBackend): number | null =>
   backend.mode === 'RUNNER' ? backend.runnerId : null;
 
@@ -124,12 +140,38 @@ export function factiiiFeatures(
 /** Organize in Runner mode, about files added in the other modes. Said
  *  always: knowing whether there are any would mean asking Factiii. */
 export const RUNNER_FACTIII_FILES_NOTE =
-  'Files you added with Vault · on Factiii are kept there. They show again when you switch back.';
+  'Files you added to the Cloud are kept there. They show again when you switch back.';
 
 /** Under the ways to add a file in Runner mode, in place of the cloud's AI
  *  notice (FILE_AI_NOTICE). */
 export const RUNNER_FILE_NOTICE =
-  'Files go to your runner over a direct link. Its own models read them, and nothing is sent to Factiii.';
+  'Files go to your runner over a direct link, and nothing is sent to Factiii.';
+
+/** The two stores on a runner a file can go to (.specs/runner-vault.md "Two
+ *  stores"), as the add sheet offers them in Runner mode: the Vault first,
+ *  and the default. Each line says what AI can read it. */
+export const RUNNER_STORE_CHOICES: {
+  id: RunnerStoreName;
+  label: string;
+  line: string;
+}[] = [
+  {
+    id: 'vault',
+    label: 'Vault',
+    line: 'On your computer. Only private AI on your computer can read it.'
+  },
+  {
+    id: 'runner',
+    label: 'Runner Storage',
+    line: 'On your computer. Any AI you choose can read it, Claude and Codex included.'
+  }
+];
+
+/** Over the add sheet's Vault / Runner Storage pick. */
+export const RUNNER_STORE_PICK_LABEL = 'Add to';
+
+export const runnerStoreChoice = (store: RunnerStoreName) =>
+  RUNNER_STORE_CHOICES.find((c) => c.id === store) ?? RUNNER_STORE_CHOICES[0]!;
 
 type ModeCopy = {
   mode: OakboxBackendMode;
@@ -143,10 +185,12 @@ type ModeCopy = {
 // Only what is true today: the privacy policy's sections 4 and 8 for
 // Factiii, runner-vault.md and runner-vault-ask.md "Ask with a runner's model"
 // for the runner. No price is typed here: plans and Trons come from their own cards.
+// Names (card a9bec1e7, round 4): Cloud is Factiii's servers, never called a
+// vault (card 7b54ebdc); a runner holds a Vault and Runner Storage.
 export const BACKEND_MODES: ModeCopy[] = [
   {
     mode: 'FACTIII',
-    title: 'Vault · on Factiii',
+    title: 'Cloud · on Factiii',
     line: 'Easiest. Works on any device, nothing to install.',
     points: [
       'Your files are stored privately. Only you can open them.',
@@ -157,9 +201,10 @@ export const BACKEND_MODES: ModeCopy[] = [
   },
   {
     mode: 'RUNNER',
-    title: 'Vault · on your computer',
+    title: 'Your computer',
     line: 'Most private. Your files and research agent stay on a computer you own.',
     points: [
+      'Two places on it: your Vault, which only private AI on your computer can read, and Runner Storage, which Claude and Codex can read too.',
       'You install the Oakbox runner on that computer. It needs to be on when you use Oakbox.',
       'Free. No plan and no Trons.',
       'We only sign you in. Your files never reach our servers.',
@@ -542,9 +587,7 @@ export const aiTargetMakeDefault = (
   target: AiTargetChoice,
   runnerName: string
 ): string =>
-  target === 'RUNNER'
-    ? `Use ${runnerName} for all AI`
-    : 'Use Trons for all AI';
+  target === 'RUNNER' ? `Use ${runnerName} for all AI` : 'Use Trons for all AI';
 
 /** Under the switch on the runner side: what it costs, and why it can fail. */
 export const aiOnRunnerLine = (runnerName: string, online: boolean): string =>

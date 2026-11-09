@@ -8,6 +8,7 @@ import {
   removeWorktreeAndBranch,
   worktreeLeftovers
 } from '../board-agent-core/git';
+import { releaseSessionPorts } from '../board-agent-core/port-blocks';
 import type { BaseSession } from '../board-agent-core/session';
 import {
   type CardRecord,
@@ -117,6 +118,12 @@ export async function teardownSession(
     ).catch(() => []);
   }
   await deleteCard(target, s.postId).catch(() => {});
+  // Last: its shells are dead, so a later session can take the ports.
+  try {
+    releaseSessionPorts(target.paths.root, s.postId);
+  } catch {
+    // Unwritable registry: the block stays held until the startup prune.
+  }
   return left;
 }
 

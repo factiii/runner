@@ -174,18 +174,21 @@ describe('vaultRpc', () => {
     assert.deepEqual(await rpc(PEER, 'deleteFiles', { uploadIds: ids }), {
       deleted: 1,
       kept: 0,
-      matched: 1
+      matched: 1,
+      published: 0
     });
     assert.deepEqual(await rpc(OWNER, 'deleteFiles', { folder: ['Taxes'], dryRun: true }), {
       deleted: 0,
       kept: 0,
-      matched: 1
+      matched: 1,
+      published: 0
     });
     assert.equal((await rpc<FilesPage>(OWNER, 'files')).files.length, 2);
     assert.deepEqual(await rpc(OWNER, 'deleteFiles', { folder: ['Taxes'] }), {
       deleted: 1,
       kept: 0,
-      matched: 1
+      matched: 1,
+      published: 0
     });
     // Its post, content rows and object went with it.
     const [{ posts }] = await db.query<{ posts: number }>(

@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import type { RunnerStoreName } from '@shared/all/domains/electron';
+
 // Where the Vault lives, and its database engine (PGlite), which the runner
 // package does not carry: adding the Vault part installs it, removing the
 // part removes it, and the files stay.
@@ -32,6 +34,25 @@ export function vaultPaths(runnerDir: string): VaultPaths {
     db: path.join(root, 'db'),
     objects: path.join(root, 'objects')
   };
+}
+
+/** One store's own database and files folder (.specs/runner-vault.md "Two
+ *  stores"). The engine is one install, shared by both. */
+export type StorePaths = { db: string; objects: string };
+
+/**
+ * Where a store lives. The Vault keeps `parts/vault/db` and `objects`, where
+ * it always was. Runner Storage is a second database and folder beside it,
+ * under `parts/runner-storage`, never inside the Vault's: two folders, so no
+ * query, search or index of one can reach the other's rows.
+ */
+export function storePaths(runnerDir: string, store: RunnerStoreName): StorePaths {
+  if (store === 'vault') {
+    const { db, objects } = vaultPaths(runnerDir);
+    return { db, objects };
+  }
+  const root = path.join(runnerDir, 'parts', 'runner-storage');
+  return { db: path.join(root, 'db'), objects: path.join(root, 'objects') };
 }
 
 const installedVersion = (engineDir: string, name: string): unknown => {

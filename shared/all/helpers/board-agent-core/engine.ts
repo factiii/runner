@@ -24,18 +24,18 @@ import {
   teardownSession
 } from '../card-ai/card-session';
 import { ClaudeModeEngine } from '../card-ai/claude-mode';
-import { TerminalModeEngine } from '../terminal-ai/terminal-mode';
-import { tmuxName } from '../terminal-ai/terminal';
+import { listConversations } from '../terminal-ai/chatHistory';
+import { findAgentPane } from '../terminal-ai/chatPane';
 import { ChatRuns } from '../terminal-ai/chatRun';
 import { terminalInterrupt } from '../terminal-ai/chatTerminal';
-import { findAgentPane } from '../terminal-ai/chatPane';
-import { listConversations } from '../terminal-ai/chatHistory';
-import { codexInterrupt } from '../terminal-ai/codexPane';
 import {
   readChatTranscript,
   readWorkPath,
   resolveWorkPath
 } from '../terminal-ai/chatTranscript';
+import { codexInterrupt } from '../terminal-ai/codexPane';
+import { tmuxName } from '../terminal-ai/terminal';
+import { TerminalModeEngine } from '../terminal-ai/terminal-mode';
 import { signOut, spawnAgent } from './agent';
 import {
   boardTerminalKey,
@@ -82,7 +82,18 @@ import {
   withSpaceGit
 } from './host-deploy';
 import { killTree } from './host-env';
-import { startDeployRun } from './host-run';
+import {
+  DEPLOY_SKILL,
+  isDeploySkill,
+  runOrigin,
+  type RunSkill,
+  startSkillRun
+} from './host-run';
+import {
+  checkMergedSkill,
+  prepareSkillUpdate,
+  type SkillLibraryUpdate
+} from './host-skill-update';
 import {
   adoptRunnerKey,
   changeSpacePassword,
@@ -119,7 +130,13 @@ import {
   parseJobs
 } from './jobs';
 import type { ModeEngine } from './mode';
+import {
+  OWNER_APPROVAL_TIMEOUT_MS,
+  type OwnerApprovalResult,
+  OwnerApprovals
+} from './owner-approval';
 import { isFailedPasswordAttempt } from './password-throttle';
+import { allocateSessionPorts, pruneSessionPorts } from './port-blocks';
 import { buildPrompt } from './prompt';
 import prompts from './prompts.json';
 import { type AgentProvider, resolveProvider } from './providers';
@@ -131,12 +148,6 @@ import {
   planSecretsBackupImport,
   storeKeyFor
 } from './secrets-backup';
-import {
-  OWNER_APPROVAL_TIMEOUT_MS,
-  type OwnerApprovalResult,
-  OwnerApprovals
-} from './owner-approval';
-import { DEPLOY_ORIGIN } from './secrets-gate';
 import { type InboxSubmit, SecretsInbox } from './secrets-inbox';
 import {
   type AuditVia,
@@ -160,8 +171,8 @@ import {
   listCards,
   patchCard
 } from './state';
-import { environmentStatus, installExtra } from './toolchain';
 import { captureTmuxPane } from './tmux';
+import { environmentStatus, installExtra } from './toolchain';
 import { slugifyWorkName } from './workName';
 
 /** How long a sign-in row may wait on the user. Device codes (GitHub, Codex)
@@ -220,6 +231,10 @@ export type BoardAgentEngineOptions = SpaceCoreOptions & {
   /** The runner's installable parts (apps/runner partsManager.ts). Set by the
    *  headless runner only: the desktop app answers "not supported". */
   runnerParts?: RunnerPartsHost;
+  /** This board signed a CLI in or out. Every board on the runner shares
+   *  the one CLI home, so the host passes it to the other boards' cached
+   *  sign-in (signinChanged); without it they kept saying signed in. */
+  onSigninChanged?: (provider: AgentProvider, signedIn: boolean) => void;
   /** A job settled, for the server relay. */
   onJobEnd?: (
     callId: string,
@@ -396,6 +411,7 @@ export class BoardAgentEngine {
   private onSimulatorAttach?: () => void;
   private onJobLog?: BoardAgentEngineOptions['onJobLog'];
   private onJobEnd?: BoardAgentEngineOptions['onJobEnd'];
+  private onSigninChanged?: BoardAgentEngineOptions['onSigninChanged'];
   private onJobState?: BoardAgentEngineOptions['onJobState'];
   private revokeGithubToken?: GithubTokenRevoker;
   private runnerService?: RunnerServiceHost;
@@ -404,6 +420,9 @@ export class BoardAgentEngine {
   private inbox: SecretsInbox | null = null;
   /** Members' dangerous job calls waiting on the runner owner. */
   private approvals = new OwnerApprovals();
+  /** Sessions whose port block is being reserved: not in memory yet, so the
+   *  startup prune must be told they are live. */
+  private reservingPorts = new Set<string>();
   private runnerOwnerId: string | null;
   /** Board AI questions being answered right now, across conversations. */
   private asksInFlight = 0;
@@ -455,7 +474,9 @@ export class BoardAgentEngine {
         this.getCardWorkspacePath(id) || this.core.target().paths.workspace,
       stored: (id) => this.terminal.get(id)?.agentSessionId || undefined,
       store: (id, conversation) =>
-        this.terminal.setAgentSessionId(id, conversation)
+        this.terminal.setAgentSessionId(id, conversation),
+      // The rail's dot: a chat turn is work, as list_sessions already says
+      onRunning: (id, running) => this.terminal.setChatRunning(id, running)
     });
     this.scratchpad = new ScratchpadStore(
       () => this.core.target(),
@@ -469,6 +490,7 @@ export class BoardAgentEngine {
     this.onSimulatorAttach = options.onSimulatorAttach;
     this.onJobLog = options.onJobLog;
     this.onJobEnd = options.onJobEnd;
+    this.onSigninChanged = options.onSigninChanged;
     this.onJobState = options.onJobState;
     this.runnerOwnerId = options.runnerOwnerId || null;
     this.revokeGithubToken = options.revokeGithubToken;
@@ -533,7 +555,7 @@ export class BoardAgentEngine {
     const runLive =
       this.runState.phase === 'running' ||
       this.runState.phase === 'awaiting-auth';
-    if (runLive && pending?.origin === DEPLOY_ORIGIN) {
+    if (runLive && pending?.origin === runOrigin(this.runSkill())) {
       this.setRun({
         phase: 'awaiting-auth',
         pendingCommand: pending.command,
@@ -1543,6 +1565,11 @@ export class BoardAgentEngine {
     startedAt: 0,
     finishedAt: 0
   };
+  /** The skill the current or last run follows. */
+  private runSkill(): RunSkill {
+    return this.runState.skill ?? DEPLOY_SKILL;
+  }
+
   private runResolvers: {
     human?: (answer: string) => void;
   } = {};
@@ -1589,27 +1616,39 @@ export class BoardAgentEngine {
   private syncRunActivity() {
     const { phase, question, pendingCommand, pendingKeys, error } =
       this.runState;
+    const skill = this.runSkill();
+    // Deploy keeps its words; any other run names its skill.
+    const what = isDeploySkill(skill) ? 'Deploy' : `Skill ${skill.name}`;
     switch (phase) {
       case 'running':
-        return this.activity.set('deploy-run', 'working', 'Deploying');
+        return this.activity.set(
+          'deploy-run',
+          'working',
+          isDeploySkill(skill) ? 'Deploying' : `Running ${skill.name}`
+        );
       case 'awaiting-input':
         return this.activity.set(
           'deploy-run',
           'awaiting-input',
-          'Deploy needs your answer',
+          `${what} needs your answer`,
           question
         );
       case 'awaiting-auth':
         return this.activity.set(
           'deploy-run',
           'awaiting-input',
-          'Deploy needs authorization',
+          `${what} needs authorization`,
           pendingKeys.length
             ? `${pendingCommand} (${pendingKeys.join(', ')})`
             : pendingCommand
         );
       case 'failed':
-        return this.activity.set('deploy-run', 'error', 'Deploy failed', error);
+        return this.activity.set(
+          'deploy-run',
+          'error',
+          `${what} failed`,
+          error
+        );
       // success / idle: the run is over and the modal holds the report.
       default:
         return this.activity.clear('deploy-run');
@@ -1619,7 +1658,10 @@ export class BoardAgentEngine {
   deployRunStart(
     sendLog: (entry: { type: string; content: string }) => void,
     provider?: AgentProvider,
-    releaseBranch?: string
+    releaseBranch?: string,
+    skill: RunSkill = DEPLOY_SKILL,
+    /** Update this copy of a library skill instead of running it. */
+    update?: SkillLibraryUpdate
   ): {
     started: boolean;
   } {
@@ -1628,18 +1670,23 @@ export class BoardAgentEngine {
       this.runState.phase === 'awaiting-input' ||
       this.runState.phase === 'awaiting-auth'
     ) {
-      throw new Error('A deploy run is already in progress.');
+      // One run per space, deploy or not: they share the console and the
+      // workspace checkout.
+      throw new Error(
+        `A run of ${this.runSkill().name} is already in progress.`
+      );
     }
     // A job and a release on one space at once would both deploy. The run's
     // own jobs start after this, so they are never refused by it.
     if (this.jobRunner?.busy()) {
       throw new Error(
-        'A job is running on this space. Start the deploy run when it ends.'
+        'A job is running on this space. Start the run when it ends.'
       );
     }
     const opts = this.deployCreatorOpts(sendLog, provider);
     this.runCancelled = false;
     this.runState = {
+      skill,
       provider: opts.provider,
       phase: 'running',
       todos: [],
@@ -1676,7 +1723,25 @@ export class BoardAgentEngine {
     // A command the run authorizes goes through the space's bridge now, so the
     // release timeline has to be reachable from there to still receive it.
     this.core.deployLog = bufferLog;
-    void startDeployRun({
+    // Filled in by the update's task once the checkout is reset; read after
+    // the run to check and save what it wrote.
+    let merge: { mergedPath: string; uuid: string } | null = null;
+    void startSkillRun({
+      ...(update && !isDeploySkill(skill)
+        ? {
+            task: async (workspace: string) => {
+              const prepared = await prepareSkillUpdate({
+                skill,
+                spaceDir: opts.spaceDir,
+                workspace,
+                update
+              });
+              merge = prepared;
+              return prepared.task;
+            }
+          }
+        : {}),
+      skill,
       spaceDir: opts.spaceDir,
       repoUrl: opts.repoUrl,
       mainBranch: opts.mainBranch,
@@ -1701,13 +1766,21 @@ export class BoardAgentEngine {
       .finally(() => {
         this.core.deployLog = null;
       })
-      .then(({ shipped, summary }) => {
+      .then(async ({ shipped, summary }) => {
+        const saved =
+          shipped && update && merge
+            ? await this.saveSkillUpdate(skill, merge, update.version)
+            : '';
         if (shipped) {
-          this.setRun({ phase: 'success', summary, finishedAt: Date.now() });
+          this.setRun({
+            phase: 'success',
+            summary: [summary, saved].filter(Boolean).join('\n\n'),
+            finishedAt: Date.now()
+          });
         } else {
           this.setRun({
             phase: 'failed',
-            error: `Deploy stopped: ${summary.split('\n')[0].trim()}`,
+            error: `${isDeploySkill(skill) ? 'Deploy' : skill.name} stopped: ${summary.split('\n')[0].trim()}`,
             summary,
             finishedAt: Date.now()
           });
@@ -1721,6 +1794,30 @@ export class BoardAgentEngine {
         });
       });
     return { started: true };
+  }
+
+  /** Save an approved library update the way the Skills tab saves an edit:
+   *  straight to this machine, or a branch to merge for the repo. Throws, so
+   *  the run fails, when the merge is missing or lost its origin. */
+  private async saveSkillUpdate(
+    skill: RunSkill,
+    merge: { mergedPath: string; uuid: string },
+    version: string
+  ): Promise<string> {
+    const content = await checkMergedSkill({
+      ...merge,
+      name: skill.name,
+      version
+    });
+    if (skill.scope === 'global') {
+      await this.skillWriteGlobal({ name: skill.name, content });
+      return `Saved ${skill.name} on this machine.`;
+    }
+    const { branch } = await this.skillProposeRepo({
+      name: skill.name,
+      content
+    });
+    return `Pushed ${skill.name} to ${branch}. Merge it to use the update from the repo.`;
   }
 
   deployRunAnswer(payload: BoardAgentActionMap['deployRunAnswer']['payload']): {
@@ -1745,7 +1842,9 @@ export class BoardAgentEngine {
     this.runResolvers.human?.('cancel');
     // Only the run's own: the gate is space-wide now, so cancelling a deploy
     // must not deny a terminal session's prompt that happens to be open.
-    if (this.gate.pending()?.origin === DEPLOY_ORIGIN) this.gate.cancel();
+    if (this.gate.pending()?.origin === runOrigin(this.runSkill())) {
+      this.gate.cancel();
+    }
     this.runResolvers = {};
     return { success: true };
   }
@@ -1756,7 +1855,7 @@ export class BoardAgentEngine {
       this.runState.phase === 'awaiting-input' ||
       this.runState.phase === 'awaiting-auth'
     ) {
-      throw new Error('A deploy run is still in progress.');
+      throw new Error('A run is still in progress.');
     }
     this.runState = {
       // Unread while idle - the next run sets its own. Carried rather than
@@ -2480,6 +2579,7 @@ export class BoardAgentEngine {
       (result) => {
         if (result.status === 'complete') {
           this.core.setLoggedIn('claude', true);
+          this.onSigninChanged?.('claude', true);
         }
         this.activity.clear('signin', 'claude');
         this.emitter.emitClaudeAuth(result);
@@ -2515,6 +2615,7 @@ export class BoardAgentEngine {
       (result) => {
         if (result.status === 'complete') {
           this.core.setLoggedIn('codex', true);
+          this.onSigninChanged?.('codex', true);
         }
         this.activity.clear('signin', 'codex');
         this.emitter.emitCodexAuth(result);
@@ -2555,6 +2656,7 @@ export class BoardAgentEngine {
     }
     await signOut(this.core.target(), provider);
     this.core.setLoggedIn(provider, false);
+    this.onSigninChanged?.(provider, false);
     return { success: true };
   }
 
@@ -2954,6 +3056,7 @@ export class BoardAgentEngine {
       startedVia: origin.startedVia
     };
 
+    await this.reserveSessionPorts(postId);
     if (mode === 'bare') {
       this.terminal.start(base, {
         baseBranch: baseBranch ?? '',
@@ -3053,6 +3156,7 @@ export class BoardAgentEngine {
     }
 
     const taskId = sanitizeTaskId(`${primaryPostId}-${Date.now()}`);
+    await this.reserveSessionPorts(primaryPostId);
     this.claude.startMerge(
       {
         taskId,
@@ -3112,6 +3216,23 @@ export class BoardAgentEngine {
     }
     const session = this.claude.get(id) ?? this.terminal.get(id);
     return session?.workspacePath || null;
+  }
+
+  /** The session's own FACTIII_PORTS block (port-blocks.ts), before anything
+   *  of it spawns; teardownSession frees it. Kept when it already has one, so
+   *  a resumed session keeps its ports. Best effort: without one the session
+   *  runs on the board's block, as every session did before blocks were per
+   *  session. The board's own Ask terminal is board-level and keeps that. */
+  private async reserveSessionPorts(postId: string): Promise<void> {
+    if (postId === boardTerminalKey(this.core.spaceSlug)) return;
+    this.reservingPorts.add(postId);
+    try {
+      await allocateSessionPorts(this.core.spaceDir(), postId);
+    } catch {
+      // No free block: the board's ports are what it had before.
+    } finally {
+      this.reservingPorts.delete(postId);
+    }
   }
 
   /** Tear a card down. See card-session.teardownSession. */
@@ -3186,6 +3307,20 @@ export class BoardAgentEngine {
         this.claude.hydrate(records);
         this.terminal.hydrate(records);
       }
+      // Blocks held by sessions nothing holds any more (lost without an End)
+      // go back to the pool. Every session that came back keeps its block, or
+      // gets one when it predates them: its running tabs keep the board's
+      // ports until restarted, new tabs and restarts get its own.
+      const live = this.claimedWork(records).postIds;
+      try {
+        pruneSessionPorts(
+          this.core.spaceDir(),
+          (id) => live.has(id) || this.reservingPorts.has(id)
+        );
+      } catch {
+        // Unwritable registry: the blocks stay held, which is safe.
+      }
+      for (const r of records) await this.reserveSessionPorts(r.postId);
       // After hydrate, so every record is a session the sweep can see.
       await this.sweepLeftovers(records);
     } catch {
@@ -3787,6 +3922,19 @@ export class BoardAgentEngine {
             ?.provider,
           (payload as BoardAgentActionMap['deployRunStart']['payload'])?.branch
         ) as BoardAgentActionMap[A]['result'];
+      case 'skillRunStart': {
+        const run = payload as BoardAgentActionMap['skillRunStart']['payload'];
+        return this.deployRunStart(
+          askLogSender ?? (() => {}),
+          run?.provider,
+          undefined,
+          {
+            scope: run?.scope === 'global' ? 'global' : 'repo',
+            name: run?.name ?? ''
+          },
+          run?.libraryUpdate
+        ) as BoardAgentActionMap[A]['result'];
+      }
       case 'deployRunState':
         return this.deployRunState() as BoardAgentActionMap[A]['result'];
       case 'deployRunAnswer':

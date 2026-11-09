@@ -13,6 +13,8 @@ import { SKILL_DIR_NAME_REGEX, SKILL_NAME_REGEX } from '../../validators';
 import { type AgentHomes, cliHomes, defaultAgentHomes } from './agent-homes';
 import { buildCloneUrl } from './git';
 import { gitCatFileBatch, hostGit, hostGitRemote } from './host-deploy';
+import { libraryOriginOf } from '../librarySkill';
+import { skillMentions } from '../skillConnections';
 import { parseSkill, resolveSkillDir } from './skill-format';
 import { hostSpacePaths } from './spacePaths';
 
@@ -32,7 +34,7 @@ const CLI_ROOTS = [CLAUDE_ROOT, '.codex/skills'];
 
 /** Personal skills live in the host user's real home, `~/.agents/skills`: the
  *  one canonical root, which the person's own sessions may read too. */
-function globalAgentsRoot(home: string = os.homedir()): string {
+export function globalAgentsRoot(home: string = os.homedir()): string {
   return path.join(home, '.agents', 'skills');
 }
 
@@ -98,12 +100,28 @@ export type SkillsOverview = {
   repoMigrationMissing: string[];
 };
 
+/** The `origin` field, present only for a copy of a library skill. */
+const originOf = (raw: string): Pick<SkillSummary, 'origin'> => {
+  const origin = libraryOriginOf(raw);
+  return origin ? { origin } : {};
+};
+
 function summarize(
   raw: string,
   base: Omit<SkillSummary, 'description' | 'errors'>
 ): SkillSummary {
   const { frontmatter, errors } = parseSkill(raw);
-  return { ...base, description: frontmatter.description, errors };
+  return {
+    ...base,
+    description: frontmatter.description,
+    errors,
+    // Read here, while the file is open, so the Skills tab draws how skills
+    // connect without reading each one again.
+    uses: skillMentions(raw),
+    // Whether the library has moved on is the server's to say; the runner
+    // only reports what the copy records.
+    ...originOf(raw)
+  };
 }
 
 /** Does one CLI skill dir point at `~/.agents/skills`? */

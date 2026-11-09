@@ -23,8 +23,9 @@ import type {
 // name what both databases have.
 //
 // What still differs between the two is passed in, never read here:
-//   VaultScope   what makes a row a vault row beyond its owner (the server's
-//                provenance tag; nothing on the runner, where every row is one)
+//   VaultScope   what makes a row a vault row beyond its owner (on the server,
+//                an upload ingest wrote; nothing on the runner, where every row
+//                is one)
 //   VaultSqlTag  Prisma's `sql` and `join`, from the backend's own client, so a
 //                fragment is built by the runtime that runs it
 //   effects      the posts a search hands back as the client renders them, the
@@ -71,6 +72,9 @@ export type PrismaFileRow = {
   ingestStatus: IngestStatus | null;
   ingestError: string | null;
   createdAt: Date;
+  /** Its post is PUBLISHED: deleting the file deletes a public post, so the
+   *  clients confirm that one on its own (.specs/file-vault.md → Delete). */
+  published: boolean;
 };
 
 /** The file `downloadUrl` found, for the backend to sign. */
@@ -82,8 +86,15 @@ export type PrismaVaultFile = {
   name: string | null;
 };
 
-/** What a delete (or its dry run) answers. */
-export type DeleteOutcome = { deleted: number; kept: number; matched: number };
+/** What a delete (or its dry run) answers. `published` is how many of the
+ *  matched files are under a PUBLISHED post, so a pick's confirm can say it
+ *  takes public posts with it. */
+export type DeleteOutcome = {
+  deleted: number;
+  kept: number;
+  matched: number;
+  published: number;
+};
 
 /** The wire shapes these queries fix; the rest stay the backend's. */
 export type PrismaVaultTypes = VaultTypes & {
@@ -119,18 +130,26 @@ const pagesOf = <V>(items: V[]): V[][] =>
     items.slice(i * PAGE, (i + 1) * PAGE)
   );
 
-// The file's private post, which is where its tags and text live. An Upload
-// carries none of its own.
+/**
+ * The statuses a vault file's post can have: private, or published in place by
+ * its owner (.specs/vault-router.md → Privacy levels). On the runner every
+ * post is PRIVATE, so the second never matches there.
+ */
+export const VAULT_POST_STATUSES = ['PRIVATE', 'PUBLISHED'] as const;
+
+// The file's post, which is where its tags and text live. An Upload carries
+// none of its own. Private, or published by its owner: publishing a Cloud file
+// keeps it in the vault.
 const vaultPostOf = (owners: number[]) => ({
   userId: ownedBy(owners),
   parentPostId: null,
-  status: 'PRIVATE' as const
+  status: { in: [...VAULT_POST_STATUSES] }
 });
 
 /**
  * One vault's files, narrowed the ways the UI narrows them. `owners` is the
  * caller's `vaultUsers`: one account, or a shared vault's. The factiii filter
- * reaches through the file's private post.
+ * reaches through the file's post.
  *
  * `scope.uploads` is what makes it *this user's vault* rather than everything
  * they have ever uploaded (on the server, helpers/vaultFactiiis.ts). `source`
@@ -161,8 +180,8 @@ export const vaultFileWhere = async (
         }
       : {}),
     // A search: the words are in the file's name, or in the text read out of
-    // it. Under AND, because the vault's own scope above is an OR and the
-    // category filter already holds the `posts` key. Verbatim only: the
+    // it. Under AND, because the category filter already holds the `posts`
+    // key (and the vault's own scope was an OR until 2026-11-08). Verbatim only: the
     // meaning search is `search`, which answers with posts, not with this
     // list's rows.
     ...(input?.query && input.query.length >= VAULT_SEARCH_MIN_CHARS
@@ -222,19 +241,19 @@ export const prismaVaultDb = <T extends PrismaVaultTypes>(
     }
   };
 
-  // Vault posts only: PRIVATE, top-level, inside the backend's scope (on the
-  // server, the provenance tag that says this file came from OneDrive or
-  // Oakbox — not the upload's `uploadSource`, which reads S3 for a post photo
-  // too), with a live file.
+  // Vault posts only: PRIVATE or published in place by their owner,
+  // top-level, inside the backend's scope (on the server, a post carrying a
+  // file ingest wrote — not the upload's `uploadSource`, which reads S3 for a
+  // post photo too), with a live file.
   //
-  // Owner-scoped: the viewer's own PRIVATE posts only. Raw bge query vector on
+  // Owner-scoped: the viewer's own posts only. Raw bge query vector on
   // the semantic path, NOT the whitened one unified search uses — whitening
   // centres the public corpus, and this is one person's documents.
   const vaultPostScope = async (
     caller: VaultCaller
   ): Promise<Prisma.Sql> => sql`
     p."userId" = ${caller.userId}
-      AND p."status" = 'PRIVATE'
+      AND p."status" IN ('PRIVATE', 'PUBLISHED')
       AND p."parentPostId" IS NULL
       AND ${await scope.posts()}
       AND EXISTS (
@@ -290,8 +309,9 @@ export const prismaVaultDb = <T extends PrismaVaultTypes>(
         JOIN "Post" p ON p."id" = pc."postId"
         JOIN "_postUploads" pu ON pu."A" = p."id"
         WHERE p."userId" IN (${join(caller.vaultUsers)})
-          AND p."status" = 'PRIVATE'
+          AND p."status" IN ('PRIVATE', 'PUBLISHED')
           AND p."parentPostId" IS NULL
+          AND ${await scope.posts()}
         GROUP BY pu."B"
         ORDER BY "distance" ASC, pu."B" ASC
         LIMIT ${limit}
@@ -323,6 +343,7 @@ export const prismaVaultDb = <T extends PrismaVaultTypes>(
           posts: {
             where: vaultPostOf(caller.vaultUsers),
             select: {
+              status: true,
               _count: {
                 select: {
                   contentRows: { where: { searchVector: { isNot: null } } }
@@ -339,6 +360,7 @@ export const prismaVaultDb = <T extends PrismaVaultTypes>(
       });
       return rows.map(({ posts, ...file }) => ({
         ...file,
+        published: posts[0]?.status === 'PUBLISHED',
         chunks: posts[0]?._count.contentRows ?? 0
       }));
     },
@@ -436,7 +458,7 @@ export const deleteFiles = async (
       key: true,
       name: true,
       uploadSource: true,
-      posts: { select: { id: true } }
+      posts: { select: { id: true, status: true } }
     }
   });
 
@@ -452,11 +474,16 @@ export const deleteFiles = async (
   };
 
   const matched = rows.filter((row) => inFolder(row.name));
+  // Files whose post is public: deleting them deletes a published post.
+  const published = matched.filter((row) =>
+    row.posts.some((post) => post.status === 'PUBLISHED')
+  ).length;
   if (dryRun) {
     return {
       deleted: 0,
       kept: matched.filter((row) => row.uploadSource !== 'S3').length,
-      matched: matched.length
+      matched: matched.length,
+      published
     };
   }
 
@@ -464,7 +491,9 @@ export const deleteFiles = async (
   // and un-syncing the folder is what removes them.
   const mine = matched.filter((row) => row.uploadSource === 'S3');
   const kept = matched.length - mine.length;
-  if (mine.length === 0) return { deleted: 0, kept, matched: matched.length };
+  if (mine.length === 0) {
+    return { deleted: 0, kept, matched: matched.length, published };
+  }
 
   // In a few statements, not three per file. A file at a time meant a post
   // delete, a row delete and an object delete each waiting on the last — about
@@ -501,5 +530,5 @@ export const deleteFiles = async (
     await options.folderEmptied(userId, folder.join('/'));
   }
 
-  return { deleted, kept, matched: matched.length };
+  return { deleted, kept, matched: matched.length, published };
 };

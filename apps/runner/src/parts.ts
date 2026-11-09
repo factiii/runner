@@ -13,7 +13,7 @@ import type { DoctorResult } from './doctor';
 
 // The runner's parts: the connector, which `setup` installs and pairs, and
 // everything else, which the owner adds one at a time or a module at a time
-// (`factiii-runner parts`, Runner Settings > Setup > Environment). A part is a
+// (`factiii-runner parts`, the runner's Status > Features). A part is a
 // set of doctor checks plus, for a part that runs something, a service.
 // Whether a part is installed is read off the machine each time, never
 // stored, so a runner from before parts shows what it already has as

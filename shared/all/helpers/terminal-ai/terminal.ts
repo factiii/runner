@@ -5,6 +5,7 @@ import type {
 } from '../../domains/electron';
 import { isCardPostId } from '../board-agent-core/boardTerminal';
 import { type ExecTarget, sessionToken } from '../board-agent-core/exec';
+import { sessionPortsEnv } from '../board-agent-core/port-blocks';
 import {
   respawnTmuxPane,
   resurrectSave,
@@ -30,8 +31,9 @@ export function tmuxName(terminalKey: string): string {
   return `terminal-${safeTmuxName(terminalKey)}`;
 }
 
-/** A tab's env: the space's, and which session it belongs to
- *  (FACTIII_SESSION), which the board MCP's session tools go by
+/** A tab's env: the space's, the session's own FACTIII_PORTS block
+ *  (port-blocks.ts; the board's for a session with none), which session it
+ *  belongs to (FACTIII_SESSION), which the board MCP's session tools go by
  *  (session-card-tools.ts), with the secret that proves it
  *  (FACTIII_SESSION_TOKEN, exec.ts sessionToken). */
 export function sessionEnv(
@@ -40,6 +42,7 @@ export function sessionEnv(
 ): Record<string, string> {
   return {
     ...target.stateEnv(),
+    ...sessionPortsEnv(target.paths.root, postId),
     FACTIII_SESSION: postId,
     FACTIII_SESSION_TOKEN: sessionToken(target.paths.root, postId)
   };

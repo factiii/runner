@@ -20,6 +20,10 @@ import {
   SKILL_TITLE_MAX,
   SKILL_TITLE_MIN
 } from './domains/skills';
+import {
+  isReservedUsername,
+  RESERVED_USERNAME_MESSAGE
+} from './domains/reservedUsernames';
 import { LayoutType } from './domains/spaces';
 import { UserType } from './domains/user';
 import { WATCH_PROGRESS_MAX_SECONDS } from './domains/watchProgress';
@@ -30,9 +34,15 @@ const usernameValidationRegex = /^[a-zA-Z0-9_]+$/;
 export const MIN_PASSWORD_LENGTH = 8;
 
 export const signupSchema = z.object({
-  username: z.string().min(1).regex(usernameValidationRegex, {
-    message: 'Username can only contain letters, numbers, and underscores'
-  }),
+  username: z
+    .string()
+    .min(1)
+    .regex(usernameValidationRegex, {
+      message: 'Username can only contain letters, numbers, and underscores'
+    })
+    .refine((name) => !isReservedUsername(name), {
+      message: RESERVED_USERNAME_MESSAGE
+    }),
   email: z.string().email(),
   password: z
     .string()
@@ -42,9 +52,17 @@ export const signupSchema = z.object({
   instanceId: z.number()
 });
 
-export const usernameSchema = z.string().min(1).regex(usernameValidationRegex, {
-  message: 'Username can only contain letters, numbers, and underscores'
-});
+// Profiles live at /<username>, so a name that is a route is refused
+// (domains/reservedUsernames.ts).
+export const usernameSchema = z
+  .string()
+  .min(1)
+  .regex(usernameValidationRegex, {
+    message: 'Username can only contain letters, numbers, and underscores'
+  })
+  .refine((name) => !isReservedUsername(name), {
+    message: RESERVED_USERNAME_MESSAGE
+  });
 
 // Fields shared by every username-first signup path (passkey + password). Email
 // is deliberately absent — username-only accounts add an email later.
@@ -653,7 +671,7 @@ export const postFeedInputSchema = z.discriminatedUnion('source', [
     source: z.literal('factiiis'),
     ...baseSchema
   }),
-  // Every anonymous post, author masked. Backs /user/Anonymous%20User, which is
+  // Every anonymous post, author masked. Backs /Anonymous%20User, which is
   // where anonymous posts' author links point.
   z.object({
     source: z.literal('anonymous'),
@@ -693,6 +711,17 @@ export const mySpacesInputSchema = z.object({
   search: z.string().optional(),
   defaultLayout: z.nativeEnum(LayoutType).optional(),
   recent: z.boolean().optional()
+});
+
+// spaces.suggested: the spaces page's Suggested Spaces list. With no
+// `search`, the spaces the caller has not joined, most members first. With a
+// `search`, every space the caller can see whose name or slug matches, name
+// matches first (.specs/spaces.md → "Suggested Spaces search"). `cursor` is
+// the last row's `id`.
+export const SPACE_SEARCH_MAX_LENGTH = 100;
+export const suggestedSpacesInputSchema = z.object({
+  cursor: z.number().optional(),
+  search: z.string().trim().max(SPACE_SEARCH_MAX_LENGTH).optional()
 });
 
 // board.moveTargets: the boards a card of `spaceSlug` can be moved to. With
@@ -1052,6 +1081,10 @@ export * from './validators/runnerVault';
 export * from './validators/oakboxBackend';
 // The IDE git panel's writes (bareGitAct, .specs/ide-git-panel.md).
 export * from './validators/runnerGit';
+// Routines: scheduled prompts on a runner or on Trons (.todos/routines.md).
+export * from './validators/routines';
+
+export * from './validators/mcpConnections';
 
 // One board-agent GitHub token, sent by a runner to be revoked at GitHub
 // (github.revokeToken). Charset and length are GitHub's token formats with

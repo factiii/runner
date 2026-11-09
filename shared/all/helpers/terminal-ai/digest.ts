@@ -30,8 +30,8 @@ export const TERMINAL_FP_OPTION = '@factiii-fp';
 /** Stands in for the per-tab cwd, so every tab in a space hashes alike. */
 const CWD_PLACEHOLDER = '/__cwd__';
 
-/** Derived from the ports a space has live, so it moves whenever someone starts
- *  a dev server — churn no restart would fix. */
+/** Ports, which are per session (port-blocks.ts) and move when a board's block
+ *  is replaced — churn no restart would fix. */
 const VOLATILE_ENV_KEYS = new Set(['FACTIII_PORTS']);
 
 /** The digest is recomputed on the tab strip's 4s poll and this is its only

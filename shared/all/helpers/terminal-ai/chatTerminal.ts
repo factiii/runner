@@ -29,10 +29,12 @@ export class ChatSendError extends Error {}
 const SHELLS = new Set(['bash', 'zsh', 'sh']);
 
 /** The session's first tab sitting at its shell prompt: a dev server or any
- *  other foreground process is never typed over. */
+ *  other foreground process is never typed over. With `only`, that tab or
+ *  none: null when it is gone or running something. */
 export async function idleShellPane(
   target: ExecTarget,
-  postId: string
+  postId: string,
+  only?: string
 ): Promise<string | null> {
   const prefix = `${tmuxName(postId)}-`;
   const out = await target
@@ -47,6 +49,7 @@ export async function idleShellPane(
     // Digits after the prefix: `abc-1`, not another card `abc-def`'s tab.
     const tab = session.slice(prefix.length);
     if (!/^\d+$/.test(tab) || !/^%\d+$/.test(paneId)) continue;
+    if (only && paneId !== only) continue;
     if (SHELLS.has(command.replace(/^-/, ''))) {
       idle.push({ tab: parseInt(tab, 10), paneId });
     }
@@ -98,13 +101,15 @@ async function trustFolder(target: ExecTarget, pane: string): Promise<void> {
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /** Open Claude in the session's first tab idle at its prompt, on
- *  `conversation` when there is one. False when no tab is free. */
+ *  `conversation` when there is one. With `pane`, only in that tab (the one
+ *  the chat closed Claude in). False when no tab is free. */
 export async function startTerminalAgent(
   target: ExecTarget,
   postId: string,
-  conversation: string | undefined
+  conversation: string | undefined,
+  pane?: string
 ): Promise<boolean> {
-  const shell = await idleShellPane(target, postId);
+  const shell = await idleShellPane(target, postId, pane);
   if (!shell) return false;
   await trustFolder(target, shell);
   // Validated rather than quoted: an id is a uuid, anything else starts a new

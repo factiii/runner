@@ -13,7 +13,7 @@ import type {
 import { LOCAL_AI_MODELS } from './localAiModels';
 
 // How a runner part reads, in one place for the runner's CLI
-// (`factiii-runner parts list`) and Runner Settings > Setup > Environment on web and mobile.
+// (`factiii-runner parts list`) and the runner's Status > Features on web and mobile.
 
 const MB_PER_GB = 1000;
 
@@ -106,6 +106,59 @@ export function moduleError(mod: RunnerPartsModule): string {
 /** A module or one of its sub-parts is mid-action. */
 export const moduleBusy = (mod: RunnerPartsModule): boolean =>
   mod.job?.state === 'running' || mod.parts.some(running);
+
+/** Status > Features: what this runner has (a status row) or could add (the
+ *  "Add to this runner" group). A module is on once any of its sub-parts is
+ *  in place or one is installing, so a module being added moves up at once
+ *  and its log shows there; the connector's module is always on. */
+export const moduleOn = (mod: RunnerPartsModule): boolean =>
+  mod.core ||
+  moduleBusy(mod) ||
+  mod.parts.some((p) => p.installed || p.running === true);
+
+/** A flat-list part (a runner from before modules), as moduleOn. */
+export const partOn = (part: RunnerPart): boolean =>
+  part.core || part.installed || part.running === true || running(part);
+
+/** The modules (or, from a runner before modules, the parts) on one side of
+ *  Features: on, or still to add. */
+export function featureRows(
+  state: RunnerPartsState,
+  group: 'on' | 'add'
+):
+  | { kind: 'modules'; modules: RunnerPartsModule[] }
+  | { kind: 'parts'; parts: RunnerPart[] } {
+  const wanted = group === 'on';
+  if (state.modules) {
+    return {
+      kind: 'modules',
+      modules: state.modules.filter((m) => moduleOn(m) === wanted)
+    };
+  }
+  return {
+    kind: 'parts',
+    parts: state.parts.filter((p) => partOn(p) === wanted)
+  };
+}
+
+/** How many rows a Features group has, to leave out an empty one. */
+export function featureCount(
+  state: RunnerPartsState,
+  group: 'on' | 'add'
+): number {
+  const rows = featureRows(state, group);
+  return rows.kind === 'modules' ? rows.modules.length : rows.parts.length;
+}
+
+/** The button that adds a whole module from the Add group: one word, as a
+ *  part's own Add. On a module already partly on it stays "Install all". */
+export const moduleActionLabel = (
+  action: RunnerModuleAction,
+  group: 'on' | 'add'
+): string =>
+  group === 'add' && action === 'add'
+    ? PART_ACTION_LABELS.add
+    : MODULE_ACTION_LABELS[action];
 
 /** Any part is mid-action, so the list is worth reading again soon. */
 export function partsBusy(state: RunnerPartsState | null): boolean {

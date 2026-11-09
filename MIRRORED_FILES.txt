@@ -66,6 +66,8 @@ apps/runner/src/machine.ts
 apps/runner/src/machineHealth.test.ts
 apps/runner/src/machineHealth.ts
 apps/runner/src/machineHealthIo.ts
+apps/runner/src/migrate.test.ts
+apps/runner/src/migrate.ts
 apps/runner/src/nuke.test.ts
 apps/runner/src/nuke.ts
 apps/runner/src/nukeCli.ts
@@ -163,6 +165,7 @@ apps/runner/src/vault/schemaGenCli.ts
 apps/runner/src/vault/search.test.ts
 apps/runner/src/vault/service.test.ts
 apps/runner/src/vault/service.ts
+apps/runner/src/vault/stores.test.ts
 apps/runner/src/vault/vaultRouter.test.ts
 apps/runner/src/vault/vaultRouter.ts
 apps/runner/src/vaultBackupStore.test.ts
@@ -199,6 +202,7 @@ shared/all/domains/mediaTranscript.ts
 shared/all/domains/oakbox.ts
 shared/all/domains/passwordCode.ts
 shared/all/domains/products.ts
+shared/all/domains/reservedUsernames.ts
 shared/all/domains/scheduledPosts.ts
 shared/all/domains/secretsBackup.ts
 shared/all/domains/skills.ts
@@ -229,6 +233,7 @@ shared/all/helpers/board-agent-core/host-deploy.ts
 shared/all/helpers/board-agent-core/host-env.ts
 shared/all/helpers/board-agent-core/host-run.ts
 shared/all/helpers/board-agent-core/host-secrets.ts
+shared/all/helpers/board-agent-core/host-skill-update.ts
 shared/all/helpers/board-agent-core/host-skills.ts
 shared/all/helpers/board-agent-core/index.ts
 shared/all/helpers/board-agent-core/jobs.ts
@@ -236,6 +241,7 @@ shared/all/helpers/board-agent-core/login-exec.ts
 shared/all/helpers/board-agent-core/owner-approval.ts
 shared/all/helpers/board-agent-core/password-throttle.ts
 shared/all/helpers/board-agent-core/plugin.ts
+shared/all/helpers/board-agent-core/port-blocks.ts
 shared/all/helpers/board-agent-core/prompt.ts
 shared/all/helpers/board-agent-core/prompts.json
 shared/all/helpers/board-agent-core/providers.ts
@@ -275,12 +281,14 @@ shared/all/helpers/categoryRules.ts
 shared/all/helpers/documentDate.ts
 shared/all/helpers/envFile.ts
 shared/all/helpers/ingestError.ts
+shared/all/helpers/librarySkill.ts
 shared/all/helpers/lidGrant.ts
 shared/all/helpers/localAiModels.ts
 shared/all/helpers/oakboxBackend.ts
 shared/all/helpers/oakboxRunnerSetup.ts
 shared/all/helpers/postContent.ts
 shared/all/helpers/researchTools.ts
+shared/all/helpers/routineSchedule.ts
 shared/all/helpers/runnerDocument.ts
 shared/all/helpers/runnerHealthCopy.ts
 shared/all/helpers/runnerNuke.ts
@@ -289,6 +297,7 @@ shared/all/helpers/runnerVaultBackup.ts
 shared/all/helpers/runningJobs.ts
 shared/all/helpers/scratchpad.ts
 shared/all/helpers/serverReadiness.ts
+shared/all/helpers/skillConnections.ts
 shared/all/helpers/terminal-ai/agentActivity.ts
 shared/all/helpers/terminal-ai/agentState.ts
 shared/all/helpers/terminal-ai/chatCommands.ts
@@ -312,7 +321,9 @@ shared/all/tsconfig.json
 shared/all/uploadTypes.ts
 shared/all/validators.ts
 shared/all/validators/embed.ts
+shared/all/validators/mcpConnections.ts
 shared/all/validators/oakboxBackend.ts
+shared/all/validators/routines.ts
 shared/all/validators/runnerGit.ts
 shared/all/validators/runnerJobs.ts
 shared/all/validators/runnerParts.ts
