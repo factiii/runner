@@ -9,8 +9,8 @@
 //
 // The rules:
 // - An agent acts for the person its session acts for (SessionStarter), and
-//   can never do more than that person could by hand: list needs the API
-//   level on a board, everything else the Terminals level, as the same
+//   can never do more than that person could by hand: list needs the Jobs
+//   level on a board, everything else the Shell level, as the same
 //   actions do over the data channel (runner-access.ts). The level is read at
 //   each call, so a level taken away counts for the next one.
 // - A session an agent starts acts for the same person, so it cannot climb
@@ -270,7 +270,7 @@ function callerStarter(
 function reachable(
   host: HypervisorHost,
   starter: SessionStarter,
-  needed: 'api' | 'terminals'
+  needed: 'jobs' | 'shell'
 ): string[] {
   return host
     .boards()
@@ -278,7 +278,7 @@ function reachable(
 }
 
 /** Find the session a call names, on a board the person reaches at
- *  Terminals. A board they cannot use says the same as a missing session:
+ *  Shell. A board they cannot use says the same as a missing session:
  *  what they cannot see is not confirmed to exist. */
 function findTarget(
   host: HypervisorHost,
@@ -288,7 +288,7 @@ function findTarget(
   const id = str(args.session);
   if (!id) return 'session is required: an id from list_sessions.';
   const wanted = str(args.board);
-  const boards = reachable(host, starter, 'terminals').filter(
+  const boards = reachable(host, starter, 'shell').filter(
     (slug) => !wanted || slug === wanted
   );
   const hits: {
@@ -319,7 +319,7 @@ function listSessions(
   args: Loose
 ): Answer {
   const wanted = str(args.board);
-  const boards = reachable(host, starter, 'api').filter(
+  const boards = reachable(host, starter, 'jobs').filter(
     (slug) => !wanted || slug === wanted
   );
   if (wanted && boards.length === 0) {
@@ -354,9 +354,9 @@ async function startSession(
       `Sessions can only be started on this runner (${host.runner}) for now: starting one on ${runner} is not supported yet.`
     );
   }
-  if (!levelAtLeast(host.level(starter, slug), 'terminals')) {
+  if (!levelAtLeast(host.level(starter, slug), 'shell')) {
     return fail(
-      `You cannot start sessions on ${slug} on this runner: that takes the Terminals level there.`
+      `You cannot start sessions on ${slug} on this runner: that takes the Shell level there.`
     );
   }
   const board = host.board(slug);

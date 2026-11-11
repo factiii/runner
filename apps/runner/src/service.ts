@@ -42,6 +42,9 @@ export type ServiceSpec = {
   /** Factiii Desktop's tools folder (host-env.ts TOOLS_DIR_ENV), when the
    *  runner installing the service was handed one. */
   toolsDir?: string;
+  /** `node` is Factiii.app's Electron run as Node (the runner Desktop
+   *  carries): the service needs ELECTRON_RUN_AS_NODE=1 to start it as one. */
+  electronNode?: boolean;
 };
 
 /** In every file `install` writes. `install` and `remove` leave a file
@@ -200,6 +203,9 @@ function serviceEnv(spec: ServiceSpec): [string, string][] {
   if (spec.customDir) env.push(['FACTIII_RUNNER_DIR', spec.runnerDir]);
   // The service's runner looks there first too, as the one that installed it.
   if (spec.toolsDir) env.push([TOOLS_DIR_ENV, spec.toolsDir]);
+  if (spec.electronNode) {
+    env.push(['ELECTRON_RUN_AS_NODE', '1'], ['FACTIII_BUNDLED_RUNNER', '1']);
+  }
   return env;
 }
 

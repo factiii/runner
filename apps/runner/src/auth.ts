@@ -139,16 +139,34 @@ export async function pairByCode(
   throw new Error('The pairing code expired. Run factiii-runner setup again.');
 }
 
-export async function pairWithBrowser(serverUrl: string): Promise<Paired> {
-  const runnerName = await prompt('Runner name (e.g., "mac-mini-office"): ');
+export async function pairWithBrowser(
+  serverUrl: string,
+  opts: {
+    /** The runner's name, instead of asking for it. */
+    name?: string;
+    /** Factiii Desktop: one JSON line with the approve link instead of the
+     *  QR code and the browser, which Desktop opens in its own signed-in
+     *  window. */
+    json?: boolean;
+  } = {}
+): Promise<Paired> {
+  const runnerName = opts.name?.trim() || (await prompt('Runner name (e.g., "mac-mini-office"): '));
   if (!runnerName) throw new Error('Runner name is required.');
 
   const api = createApi({ serverUrl });
   const start = await startPairing(api, runnerName, process.platform);
-  const paired = await pairByCode(api, start, {
-    out: (text) => process.stdout.write(text),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    open: openBrowser
-  });
+  const io: PairingIo = opts.json
+    ? {
+        out: () => undefined,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        open: (url) =>
+          process.stdout.write(`${JSON.stringify({ type: 'approve', url, code: start.userCode })}\n`)
+      }
+    : {
+        out: (text) => process.stdout.write(text),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        open: openBrowser
+      };
+  const paired = await pairByCode(api, start, io);
   return { ...paired, runnerName };
 }

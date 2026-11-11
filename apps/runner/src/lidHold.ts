@@ -1,4 +1,9 @@
-import { execFile, execFileSync, spawn } from 'node:child_process';
+import {
+  execFile,
+  type ExecFileException,
+  execFileSync,
+  spawn
+} from 'node:child_process';
 import fs from 'node:fs';
 
 import type { RunnerLidHoldState } from '@shared/all/domains/electron';
@@ -48,6 +53,14 @@ export const NO_GRANT_RETRY_MS = 5 * 60_000;
 /** The watcher's look at the runner's pid, in seconds. */
 const WATCH_EVERY_S = 10;
 
+/** The exit code of a finished execFile: 0 on success, the process's own
+ *  code when it has one, else 1 (a missing binary has a string code, ENOENT). */
+function exitCode(err: ExecFileException | null): number {
+  if (!err) return 0;
+  if (typeof err.code === 'number') return err.code;
+  return 1;
+}
+
 const realExec: LidExec = (bin, args) =>
   new Promise((resolve) => {
     execFile(
@@ -55,7 +68,7 @@ const realExec: LidExec = (bin, args) =>
       args,
       { encoding: 'utf-8', timeout: 10_000 },
       (err, stdout, stderr) => {
-        const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
+        const code = exitCode(err);
         resolve({ code, output: `${stdout ?? ''}${stderr ?? ''}` });
       }
     );

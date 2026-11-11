@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import type { SqlDriverAdapter, Transaction } from '@prisma/driver-adapter-utils';
 
-import type { DbReply, DbRequest, DriverOp } from './dbProtocol';
+import type { DbLoad, DbReply, DbRequest, DriverOp } from './dbProtocol';
 import { type PgliteClient, type PgliteModule, pgliteAdapter } from './pgliteAdapter';
 
 // The Vault's database process: PGlite (Postgres in WebAssembly, with
@@ -35,26 +35,33 @@ type Tx = {
 
 type Pglite = Tx & {
   transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
+  dumpDataDir(compression?: 'gzip' | 'none' | 'auto'): Promise<Blob>;
   close(): Promise<void>;
 };
 
 type PgliteLoaded = PgliteModule & {
   PGlite: {
-    create(dataDir: string, options: { extensions: object }): Promise<Pglite>;
+    create(dataDir: string, options: { extensions: object; loadDataDir?: Blob }): Promise<Pglite>;
   };
 };
 
 const send = (reply: DbReply) => process.send?.(reply);
 
 async function main(): Promise<void> {
-  const [dataDir, engineDir] = process.argv.slice(2);
+  const [dataDir, engineDir, mode] = process.argv.slice(2);
   if (!dataDir || !engineDir || !process.send) {
-    throw new Error('Usage: vault-db <data dir> <engine dir>, as a forked child.');
+    throw new Error('Usage: vault-db <data dir> <engine dir> [--load], as a forked child.');
   }
+  // A sealed Vault (sealedDb.ts) runs in memory: its decrypted dump comes
+  // over IPC as the first message, and only ever lives in this process.
+  const loaded = mode === '--load' ? await firstLoad() : null;
   const load = createRequire(path.join(engineDir, 'package.json'));
   const pglite = load('@electric-sql/pglite') as PgliteLoaded;
   const { vector } = load('@electric-sql/pglite/vector') as { vector: object };
-  const db = await pglite.PGlite.create(dataDir, { extensions: { vector } });
+  const db = await pglite.PGlite.create(dataDir, {
+    extensions: { vector },
+    ...(loaded ? { loadDataDir: new Blob([loaded as Uint8Array<ArrayBuffer>]) } : {})
+  });
   const adapter = pgliteAdapter(pglite, db as unknown as PgliteClient);
   const driver = driverOf(adapter);
 
@@ -81,6 +88,13 @@ async function main(): Promise<void> {
           send({ id: request.id, ok: true, results: [] });
           process.exit(0);
         }
+        if (request.op === 'dump') {
+          // In the queue, so no batch is half done; the sealed side waits
+          // for the driver's transactions to end before it asks.
+          const blob = await db.dumpDataDir('gzip');
+          send({ id: request.id, ok: true, value: new Uint8Array(await blob.arrayBuffer()) });
+          return;
+        }
         const results = await db.transaction(async (tx) => {
           const out: unknown[][] = [];
           for (const statement of request.statements) {
@@ -103,11 +117,26 @@ async function main(): Promise<void> {
       }
     });
   });
+  // Ctrl-C in the runner's terminal reaches this process too. The daemon
+  // decides when it ends: a sealed Vault's last dump is asked of it first.
+  process.on('SIGINT', () => undefined);
   // The daemon went away: nothing is left to answer.
   process.on('disconnect', () => {
     void db.close().finally(() => process.exit(0));
   });
   send({ id: 0, ok: true, results: [] });
+}
+
+/** The dump a `--load` child starts from (dbProtocol.ts `DbLoad`). */
+function firstLoad(): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    const onMessage = (message: DbLoad) => {
+      if (message?.op !== 'load') return;
+      process.off('message', onMessage);
+      resolve(message.data ? new Uint8Array(message.data) : null);
+    };
+    process.on('message', onMessage);
+  });
 }
 
 /** A failed call, with the adapter's mapped error when it is one. */

@@ -11,7 +11,9 @@ import {
   type Every,
   KeepAwake,
   parsePmsetBatt,
-  type RunnerPower
+  type RunnerPower,
+  type SpawnHolder,
+  windowsHoldScript
 } from './keepAwake';
 
 const NOW = Date.UTC(2026, 9, 24, 20);
@@ -27,6 +29,24 @@ function fake() {
     };
   };
   return { runs, caffeinate };
+}
+
+/** A fake `spawn` that records each helper's command too. */
+function fakeSpawn() {
+  const runs: {
+    command: string;
+    args: string[];
+    exit: (error?: Error) => void;
+    stopped: boolean;
+  }[] = [];
+  const spawn: SpawnHolder = (command, args, onExit) => {
+    const run = { command, args, exit: onExit, stopped: false };
+    runs.push(run);
+    return () => {
+      run.stopped = true;
+    };
+  };
+  return { runs, spawn };
 }
 
 const tmpFile = () =>
@@ -56,13 +76,13 @@ describe('keep-awake', () => {
     assert.equal(keep.state().on, true);
   });
 
-  it('refuses a past or far-off time, and off a Mac', () => {
+  it('refuses a past or far-off time, and a platform with no holder', () => {
     const { caffeinate } = fake();
     const keep = new KeepAwake(tmpFile(), { caffeinate, now: () => NOW, platform: 'darwin' });
     assert.throws(() => keep.set({ on: true, until: NOW - 1 }), /passed/);
     assert.throws(() => keep.set({ on: true, until: NOW + 40 * 24 * HOUR }), /30 days/);
-    const linux = new KeepAwake(tmpFile(), { caffeinate, now: () => NOW, platform: 'linux' });
-    assert.throws(() => linux.set({ on: true, until: null }), /Mac/);
+    const bsd = new KeepAwake(tmpFile(), { caffeinate, now: () => NOW, platform: 'freebsd' });
+    assert.throws(() => bsd.set({ on: true, until: null }), /Mac, Windows or Linux/);
   });
 
   it('a restarted runner takes it back up, unless its time has passed', () => {
@@ -220,16 +240,16 @@ describe('keep-awake', () => {
       assert.equal(again.keep.state().on, true);
     });
 
-    it('is a Mac runner only, for now', () => {
+    it('is a Mac, Windows or Linux runner only', () => {
       const { caffeinate } = fake();
-      const linux = new KeepAwake(tmpFile(), {
+      const bsd = new KeepAwake(tmpFile(), {
         caffeinate,
         now: () => NOW,
-        platform: 'linux'
+        platform: 'freebsd'
       });
       assert.throws(
-        () => linux.set({ on: true, until: null, auto: true }),
-        /Mac/
+        () => bsd.set({ on: true, until: null, auto: true }),
+        /Mac, Windows or Linux/
       );
     });
   });
@@ -399,5 +419,88 @@ describe('keep-awake', () => {
       percent: null
     });
     assert.deepEqual(parsePmsetBatt(''), { ac: null, percent: null });
+  });
+
+  describe('Windows and Linux', () => {
+    it('Windows: PowerShell sets the execution state and waits', () => {
+      const { runs, spawn } = fakeSpawn();
+      const keep = new KeepAwake(tmpFile(), { spawn, now: () => NOW, platform: 'win32' });
+      keep.set({ on: true, until: NOW + 2 * HOUR, display: true });
+      assert.equal(runs[0].command, 'powershell');
+      assert.deepEqual(runs[0].args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
+      const script = runs[0].args[3];
+      assert.equal(script, windowsHoldScript(true, 7200, process.pid));
+      assert.match(script, /SetThreadExecutionState\(\[uint32\]2147483651\)/);
+      assert.match(script, /AddSeconds\(7200\)/);
+      assert.match(script, new RegExp(`Get-Process -Id ${process.pid} `));
+      keep.set({ on: false, until: null });
+      assert.equal(runs[0].stopped, true);
+    });
+
+    it('Windows: no display, no time: system only, until the runner ends', () => {
+      const script = windowsHoldScript(false, null, 42);
+      assert.match(script, /\[uint32\]2147483649\)/);
+      assert.equal(script.includes('AddSeconds'), false);
+      assert.match(script, /while \(\(Get-Process -Id 42 -ErrorAction SilentlyContinue\)\)/);
+    });
+
+    it('Linux: systemd-inhibit around a wait on the runner, timed or not', () => {
+      const { runs, spawn } = fakeSpawn();
+      const keep = new KeepAwake(tmpFile(), { spawn, now: () => NOW, platform: 'linux' });
+      const head = [
+        '--what=idle:sleep',
+        '--mode=block',
+        '--who=factiii-runner',
+        '--why=Factiii Runner keep-awake'
+      ];
+      const wait = ['tail', `--pid=${process.pid}`, '-f', '/dev/null'];
+      keep.set({ on: true, until: null, display: true });
+      assert.equal(runs[0].command, 'systemd-inhibit');
+      assert.deepEqual(runs[0].args, [...head, ...wait]);
+      keep.set({ on: true, until: NOW + HOUR });
+      assert.equal(runs[0].stopped, true);
+      assert.deepEqual(runs[1].args, [...head, 'timeout', '3600', ...wait]);
+      runs[1].exit();
+      assert.equal(keep.state().on, false);
+    });
+
+    it('a missing binary ends the hold, and is said once', () => {
+      const { runs, spawn } = fakeSpawn();
+      const lines: string[] = [];
+      const keep = new KeepAwake(tmpFile(), {
+        spawn,
+        now: () => NOW,
+        platform: 'linux',
+        log: (line) => lines.push(line),
+        work: () => ({ sessions: 1, jobs: 0 }),
+        every: () => () => {}
+      });
+      keep.set({ on: true, until: null });
+      runs[0].exit(new Error('spawn systemd-inhibit ENOENT'));
+      assert.equal(keep.state().on, false);
+      // Automatic tries again each tick; the log does not.
+      keep.set({ on: true, until: null, auto: true });
+      runs[1].exit(new Error('spawn systemd-inhibit ENOENT'));
+      assert.equal(keep.state().work?.holding, false);
+      keep.tick();
+      runs[2].exit(new Error('spawn systemd-inhibit ENOENT'));
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /ENOENT/);
+    });
+
+    it('the real spawn ends cleanly on a missing binary', async () => {
+      const lines: string[] = [];
+      const keep = new KeepAwake(tmpFile(), {
+        now: () => NOW,
+        platform: 'linux',
+        log: (line) => lines.push(line)
+      });
+      // On this machine, systemd-inhibit may well exist; only check it when
+      // it does not.
+      keep.set({ on: true, until: NOW + 1000 });
+      await new Promise((r) => setTimeout(r, 200));
+      if (lines.length > 0) assert.equal(keep.state().on, false);
+      keep.set({ on: false, until: null });
+    });
   });
 });

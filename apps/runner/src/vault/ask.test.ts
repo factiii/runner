@@ -15,6 +15,7 @@ import type {
   RunnerVaultNote
 } from '@shared/all/domains/electron';
 import type { ExecTarget } from '@shared/all/helpers/board-agent-core/exec';
+import { isVaultOllamaOnly, VAULT_OLLAMA_ONLY } from '@shared/all/validators';
 import {
   RELAY_VAULT_REFUSAL,
   relaySecretsRefusal,
@@ -345,6 +346,33 @@ describe('Ask on a runner', () => {
     );
     await db.query('DELETE FROM "RunnerAskChat" WHERE "id" = $1', [chatId]);
     assert.equal(read, false);
+  });
+
+  it('refuses every engine but Ollama on the Vault with the one shared error', async () => {
+    let ran = false;
+    const asker = new VaultAsk(
+      vault,
+      engines({
+        cli: async () => {
+          ran = true;
+          return '';
+        }
+      })
+    );
+    // Claude and Codex: the runner's own refusal, the string the app matches.
+    for (const engine of ['claude', 'codex']) {
+      await assert.rejects(
+        asker.handle('vaultAsk', { engine, question: 'What is my policy number?' }, OWNER),
+        (err: Error) => err.message === VAULT_OLLAMA_ONLY && isVaultOllamaOnly(err.message)
+      );
+    }
+    // A cloud model, or any other engine, is not an engine the runner takes.
+    for (const engine of ['cloud', 'openrouter', 'trons']) {
+      await assert.rejects(
+        asker.handle('vaultAsk', { engine, question: 'What is my policy number?' }, OWNER)
+      );
+    }
+    assert.equal(ran, false);
   });
 
   it('lets the owner ask Claude and Codex about Runner Storage', async () => {

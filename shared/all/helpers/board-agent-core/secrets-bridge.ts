@@ -3,7 +3,11 @@ import net from 'net';
 import path from 'path';
 import { StringDecoder } from 'string_decoder';
 
-import type { RunnerJobInfo, RunnerJobState } from '../../domains/electron';
+import type {
+  RunnerJobInfo,
+  RunnerJobState,
+  RunnerJobTargetWait
+} from '../../domains/electron';
 import type { BoardMcpChannel, BoardMcpRelay } from './board-mcp-relay';
 import { hostSpacePaths } from './spacePaths';
 
@@ -135,6 +139,7 @@ export type SecretsBridgeHandlers = {
       state: RunnerJobState;
       exitCode: number | null;
       chunks: { seq: number; text: string }[];
+      wait?: RunnerJobTargetWait;
     }>;
     /** Sessions on this runner act as the owner, so they may cancel any. */
     cancel: (token: string, callId: string) => Promise<{ cancelled: boolean }>;
@@ -635,11 +640,19 @@ async function handleJobOp(
 
   let afterSeq = 0;
   let lastState = '';
+  let lastWait = '';
   while (!conn.destroyed) {
     const status = await jobs.status(token, callId, afterSeq);
-    if (status.state !== lastState) {
+    // A wait on a target is re-sent each time its holder or place moves.
+    const waitKey = status.wait ? JSON.stringify(status.wait) : '';
+    if (status.state !== lastState || waitKey !== lastWait) {
       lastState = status.state;
-      reply({ type: 'status', text: status.state });
+      lastWait = waitKey;
+      reply(
+        status.wait
+          ? { type: 'status', text: status.state, wait: status.wait }
+          : { type: 'status', text: status.state }
+      );
     }
     for (const chunk of status.chunks) {
       reply({ type: 'output', chunk: chunk.text });

@@ -127,7 +127,8 @@ const TART_SCRIPT = {
 
 // Extras the owner adds one at a time from the Environment list: a board runs
 // without them. Redis carries live agent status in terminals (agentState.ts);
-// OrbStack runs containers, for a repo whose dev stack is a compose file.
+// OrbStack runs containers, for a repo whose dev stack is a compose file;
+// ffmpeg serves a preview's video work.
 // Tailscale, the way in when Factiii is down, is only looked for: installing
 // it needs root and a tailnet sign-in, which belong to Factiii Desktop, not to
 // an npm package (npm pulled 0.28.0 and 0.33.0 as malware; see CHANGELOG).
@@ -144,7 +145,14 @@ const EXTRA_TOOLS: Tool[] = [
   { bin: 'tailscale', managers: [] },
   // Tart runs macOS VMs: a fresh Mac to try the desktop app or a runner on.
   // Its Homebrew tap no longer installs (it fails Homebrew's own checks).
-  { bin: 'tart', managers: ['brew'], script: TART_SCRIPT }
+  { bin: 'tart', managers: ['brew'], script: TART_SCRIPT },
+  // ffmpeg (with ffprobe) for a preview's server: the screen recording trim
+  // and the HLS copy run it, as production's image already does. Fedora
+  // packages the free build as ffmpeg-free.
+  {
+    bin: 'ffmpeg',
+    pkg: { brew: 'ffmpeg', apt: 'ffmpeg', dnf: 'ffmpeg-free', pacman: 'ffmpeg' }
+  }
 ];
 
 // Not harness dependencies: a space initializes without them, and the secrets

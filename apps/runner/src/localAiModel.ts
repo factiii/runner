@@ -13,6 +13,7 @@ import {
 } from '@shared/all/helpers/localAiModels';
 import { ollamaTagKey } from '@shared/all/helpers/oakboxBackend';
 import { localAiModelIdSchema } from '@shared/all/validators';
+import { missingPartMessage } from '@shared/all/helpers/runnerMissingPart';
 
 import { DISK_WARN_GB } from './machineHealth';
 import type { PartService } from './partsManager';
@@ -129,7 +130,7 @@ export async function pullModel(
   onLine: (line: string) => void
 ): Promise<void> {
   const bin = await io.resolveBin();
-  if (!bin) throw new Error('Ollama is not installed. Add Local AI first.');
+  if (!bin) throw new Error(missingPartMessage('local-ai', 'Ollama is not installed on the runner.'));
   const state = await localAiState(io);
   if (!state.picked) throw new Error(state.reason);
   const id = state.picked;

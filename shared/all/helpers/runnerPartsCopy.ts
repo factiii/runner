@@ -34,6 +34,7 @@ const BUSY_LABELS: Record<RunnerPartAction, string> = {
 /** Installing… while a job runs, then Running, Installed or Not added. */
 export function partStatusLabel(part: RunnerPart): string {
   if (part.job?.state === 'running') return BUSY_LABELS[part.job.action];
+  if (part.installed && part.outside) return 'Installed outside Factiii';
   if (part.running) return 'Running';
   if (part.installed) return 'Installed';
   return 'Not added';
@@ -51,6 +52,19 @@ export function partCost(part: RunnerPart): string {
   return part.memoryNowMb === null
     ? line
     : `${line} · ${size(part.memoryNowMb)} now`;
+}
+
+/** What a Remove deletes, said in its confirmation: only what the runner
+ *  installed, and the disk it frees. A model's weights are most of it. */
+export function removeConfirmText(what: {
+  title: string;
+  diskMb: number;
+  models: boolean;
+}): string {
+  const models = what.models
+    ? ' Its downloaded models go too, with their disk space.'
+    : '';
+  return `Removes what Factiii installed for ${what.title}, about ${size(what.diskMb)} on disk.${models} Anything you installed yourself stays.`;
 }
 
 /** The last job failed: its last line says why. Empty otherwise. */

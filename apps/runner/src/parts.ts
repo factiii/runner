@@ -357,7 +357,9 @@ export function describePart(
   res: Resolution,
   removable: readonly string[],
   service: ServiceState | null,
-  job: RunnerPartJob | null
+  job: RunnerPartJob | null,
+  /** The tools the runner installed (its ledger), to tell what is ours. */
+  ledger: readonly string[] = []
 ): RunnerPart {
   return {
     id: part.id,
@@ -371,6 +373,12 @@ export function describePart(
     memoryMb: part.memoryMb,
     memoryNowMb: service?.running ? service.memoryMb : null,
     core: Boolean(part.core),
+    // Installed with none of its tools from the runner: someone else's.
+    outside:
+      res.installed &&
+      !part.core &&
+      part.requires.length > 0 &&
+      !part.requires.some((id) => ledger.includes(id)),
     // Nothing else is offered while an action runs.
     actions:
       job?.state === 'running'

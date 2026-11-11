@@ -1,9 +1,9 @@
 import {
   type BoardAgentAction,
+  LEGACY_RUNNER_ACCESS_LEVELS,
   RUNNER_ACCESS_LEVELS,
   type RunnerAccessLevel,
-  type RunnerGrants,
-  type RunnerDangerousGrants
+  type RunnerGrants
 } from '../../domains/electron';
 
 // What a data channel may do on this runner (.specs/runner-member-access.md).
@@ -14,20 +14,20 @@ import {
 // includes the ones before it:
 //
 // - none: nothing. This is every member until the owner says otherwise.
-// - api: list and call jobs, read their job logs, answer or lock the secrets
+// - jobs: list and call jobs, read their job logs, answer or lock the secrets
 //   gate and submit an encrypted secret update - over the data channel and
-//   through the server (CLI, app). No shell.
-// - terminals: also terminals, card AI sessions and file writes. A terminal
-//   or a card AI session is a shell as the runner user, and inside an unlock
+//   through the server (CLI, app) - and the iOS Simulator's picture and
+//   input. No shell.
+// - shell: also terminals, card AI sessions and file writes. A terminal or a
+//   card AI session is a shell as the runner user, and inside an unlock
 //   window that user can reach the process holding the key.
-// - screens: also the iOS Simulator's picture and input. (It once also gave
-//   the runner's desktop view, removed 2026-10-25.)
 //
-// Beside the level, the owner may give a member one permission: Dangerous
-// jobs. A job that jobs.json marks `dangerous` runs at once for a member
-// with it; a member at API without it waits for the runner owner to approve
-// that one call (owner-approval.ts). It is off for every member until the
-// owner turns it on, and the owner never needs it.
+// Until 2026-11 there were four levels (API, Terminals, Screens beside None)
+// and a per-member Dangerous jobs permission. An old level reads as its new
+// one (LEGACY_RUNNER_ACCESS_LEVELS) and the old permission is dropped: a job
+// that jobs.json marks `dangerous` runs at once from Shell up (a shell can
+// read the job's keys anyway), and a member at Jobs waits for the runner
+// owner to approve that one call (owner-approval.ts).
 //
 // The levels live on the runner (access.json) and are enforced here, in the
 // runner, because the data channel reaches the runner directly; the UI hiding
@@ -37,9 +37,20 @@ import {
 /** What a channel has on one board: the owner, or a member's level there. */
 export type ChannelLevel = 'owner' | RunnerAccessLevel;
 
+/** A level off the wire or off disk, with an old level read as its new one
+ *  (api -> jobs, terminals and screens -> shell). Null for anything else. */
+export function parseKnownAccessLevel(raw: unknown): RunnerAccessLevel | null {
+  const level = RUNNER_ACCESS_LEVELS.find((l) => l === raw);
+  if (level) return level;
+  // hasOwn: a level called "constructor" is not a key of the map.
+  return typeof raw === 'string' && Object.hasOwn(LEGACY_RUNNER_ACCESS_LEVELS, raw)
+    ? LEGACY_RUNNER_ACCESS_LEVELS[raw]
+    : null;
+}
+
 /** A level off the wire or off disk. Anything that is not a level is none. */
 export function parseAccessLevel(raw: unknown): RunnerAccessLevel {
-  return RUNNER_ACCESS_LEVELS.find((level) => level === raw) ?? 'none';
+  return parseKnownAccessLevel(raw) ?? 'none';
 }
 
 const isRecord = (raw: unknown): raw is Record<string, unknown> =>
@@ -50,7 +61,9 @@ const isRecord = (raw: unknown): raw is Record<string, unknown> =>
  * shape that grants anything is `{ grants: { <board>: { <userId>: level } } }`.
  * Everything else reads as no grants, never as an error and never as access:
  * the two switches an older runner stored (`{ apiAccess, shareTerminals }`),
- * a level this build does not know, a user id that is empty.
+ * a level this build does not know, a user id that is empty. A level from
+ * before the three (api, terminals, screens) reads as its new one, and the
+ * old `dangerous` lists beside the grants are not read.
  */
 export function parseRunnerGrants(raw: unknown): RunnerGrants {
   if (!isRecord(raw) || !isRecord(raw.grants)) return {};
@@ -124,72 +137,6 @@ export function withGrant(
   return Object.fromEntries(boards);
 }
 
-/**
- * Parse the Dangerous jobs permission off a stored `access.json`, or off what
- * a runner reports: `{ dangerous: { <board>: [userId, ...] } }`. Null when there is
- * no `dangerous` field at all (a file or a runner from before the permission), so
- * the server can tell "nobody has it" from "this runner does not say". Every
- * malformed part is dropped, never read as the permission.
- */
-export function parseRunnerDangerousGrants(
-  raw: unknown
-): RunnerDangerousGrants | null {
-  if (!isRecord(raw) || !Object.hasOwn(raw, 'dangerous')) return null;
-  if (!isRecord(raw.dangerous)) return {};
-  const boards: [string, string[]][] = [];
-  for (const [spaceSlug, users] of Object.entries(raw.dangerous)) {
-    if (spaceSlug === '' || !Array.isArray(users)) continue;
-    const ids = [
-      ...new Set(
-        users.filter((id): id is string => typeof id === 'string' && id !== '')
-      )
-    ];
-    if (ids.length > 0) boards.push([spaceSlug, ids]);
-  }
-  return Object.fromEntries(boards);
-}
-
-/** Whether the owner let `userId` run dangerous jobs on `spaceSlug` without
- *  asking. Only with the API level there too: a member whose level was taken
- *  away keeps nothing, whatever is left in the list. */
-export function dangerousGranted(
-  grants: RunnerGrants,
-  dangerous: RunnerDangerousGrants | null | undefined,
-  spaceSlug: string,
-  userId: string
-): boolean {
-  if (
-    !dangerous ||
-    !userId ||
-    !spaceSlug ||
-    !Object.hasOwn(dangerous, spaceSlug)
-  ) {
-    return false;
-  }
-  return (
-    dangerous[spaceSlug].includes(userId) &&
-    levelAtLeast(grantedLevel(grants, spaceSlug, userId), 'api')
-  );
-}
-
-/** `dangerous` with one member's permission on one board turned on or off. */
-export function withDangerousGrant(
-  dangerous: RunnerDangerousGrants,
-  spaceSlug: string,
-  userId: string,
-  allowed: boolean
-): RunnerDangerousGrants {
-  const users = (
-    Object.hasOwn(dangerous, spaceSlug) ? dangerous[spaceSlug] : []
-  ).filter((id) => id !== userId);
-  if (allowed) users.push(userId);
-  const boards = Object.entries(dangerous).filter(
-    ([slug]) => slug !== spaceSlug
-  );
-  if (users.length > 0) boards.push([spaceSlug, users]);
-  return Object.fromEntries(boards);
-}
-
 /** Whether `level` reaches `needed`. An unknown level reaches nothing. */
 export function levelAtLeast(
   level: ChannelLevel,
@@ -200,7 +147,7 @@ export function levelAtLeast(
   return have >= 0 && have >= RUNNER_ACCESS_LEVELS.indexOf(needed);
 }
 
-/** Reads of the board, open from the API level up. None of these returns a
+/** Reads of the board, open from the Jobs level up. None of these returns a
  *  credential (getConfig reports only whether each connection exists). */
 const MEMBER_READ_ACTIONS: ReadonlySet<BoardAgentAction> =
   new Set<BoardAgentAction>([
@@ -216,7 +163,7 @@ const MEMBER_READ_ACTIONS: ReadonlySet<BoardAgentAction> =
     'deploySecretsStatus'
   ]);
 
-/** Jobs and the encrypted secret inbox: the API level. */
+/** Jobs and the encrypted secret inbox: the Jobs level. */
 const MEMBER_API_ACTIONS: ReadonlySet<BoardAgentAction> =
   new Set<BoardAgentAction>([
     // Jobs: by name, never a command.
@@ -233,7 +180,7 @@ const MEMBER_API_ACTIONS: ReadonlySet<BoardAgentAction> =
   ]);
 
 /** The secrets gate. Answering needs the password, and locking only takes
- *  access away. A job opens the gate, so the API level allows it. */
+ *  access away. A job opens the gate, so the Jobs level allows it. */
 const MEMBER_GATE_ACTIONS: ReadonlySet<BoardAgentAction> =
   new Set<BoardAgentAction>([
     'secretsAuthState',
@@ -241,7 +188,8 @@ const MEMBER_GATE_ACTIONS: ReadonlySet<BoardAgentAction> =
     'secretsLock'
   ]);
 
-/** The simulator: the Screens level. */
+/** The simulator: the Jobs level too. It is a picture and touches, not a
+ *  shell (it once needed a level of its own, Screens). */
 const SCREEN_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>(
   [
     'simulatorList',
@@ -303,6 +251,7 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     // Nuke erases the whole runner (nuke.ts): the owner's alone, by id too
     // (runnerNuke.ts nukeRefusal), and never on the relay.
     'runnerNuke',
+    'opsRemoveOldCopy',
     'secretsChangePassword',
     'secretsExportBackup',
     'secretsOpenBackup',
@@ -332,6 +281,7 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     // Factiii's AI features on the runner (RUNNER_AI_ACTIONS): the owner's
     // CLIs and models, and their subscription, answer it.
     'aiPrompt',
+    'aiPromptInfo',
     // Whether the runner's Claude and Codex are signed in, for Oakbox's
     // sign-ins with no board (RUNNER_SIGNIN_ACTIONS). Only ever runner-wide.
     'cliSignins',
@@ -352,9 +302,23 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultFilePost',
     'vaultNotes',
     'vaultNoteDelete',
+    // A device's viewing data in the owner's Vault (VAULT_ACTIONS,
+    // .specs/analytics.md): the owner's own, from their own devices.
+    'engagementPush',
+    'engagementQuery',
     // Move to…: files from one of the runner's stores to the other
     // (VAULT_ACTIONS), which decides what AI may read them.
-    'vaultMove'
+    'vaultMove',
+    // The Vault's key (VAULT_ACTIONS, .specs/vault.md "Encryption and the
+    // Vault key"): the owner's alone.
+    'vaultKeyStatus',
+    'vaultKeySetupStart',
+    'vaultKeySetup',
+    'vaultUnlock',
+    'vaultLock',
+    'vaultKeySettings',
+    'vaultKeyChangeStart',
+    'vaultKeyChange'
   ]);
 
 /** The runner's Vault (.specs/runner-vault.md "Actions"). The daemon answers
@@ -397,7 +361,21 @@ export const VAULT_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultNoteDelete',
     // Move to… between the Vault and Runner Storage: a copy, then the
     // original deleted. Never on the relay. The owner's alone.
-    'vaultMove'
+    'vaultMove',
+    // Viewing history and mood from the owner's devices: never on the relay,
+    // which is Factiii's server, and Factiii never sees it.
+    'engagementPush',
+    'engagementQuery',
+    // The Vault's key: the Vault key itself, new or typed, only travels on
+    // a direct link.
+    'vaultKeyStatus',
+    'vaultKeySetupStart',
+    'vaultKeySetup',
+    'vaultUnlock',
+    'vaultLock',
+    'vaultKeySettings',
+    'vaultKeyChangeStart',
+    'vaultKeyChange'
   ]);
 
 /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
@@ -414,7 +392,7 @@ export const LOCAL_AI_ACTIONS: ReadonlySet<BoardAgentAction> =
  *  Codex or Ollama. Never on a relayed link: the prompt is the person's words,
  *  and running it on the runner is the point of not sending it to Factiii. */
 export const RUNNER_AI_ACTIONS: ReadonlySet<BoardAgentAction> =
-  new Set<BoardAgentAction>(['aiPrompt']);
+  new Set<BoardAgentAction>(['aiPrompt', 'aiPromptInfo']);
 
 /** Claude's and Codex's sign-ins (.specs/runner-vault-ask.md "Oakbox's backend: setup, sign-ins, models").
  *  With a board they are that board's engine's, as factiii.com sends them.
@@ -440,17 +418,17 @@ function levelNeeded(action: BoardAgentAction): ChannelLevel {
   // A member's app asks for its own level to know what to hide, and a member
   // whose level was just taken away must be able to learn that.
   if (action === 'runnerAccessGet') return 'none';
-  if (SCREEN_ACTIONS.has(action)) return 'screens';
   if (
+    SCREEN_ACTIONS.has(action) ||
     MEMBER_READ_ACTIONS.has(action) ||
     MEMBER_GATE_ACTIONS.has(action) ||
     MEMBER_API_ACTIONS.has(action)
   ) {
-    return 'api';
+    return 'jobs';
   }
   // Everything else is a shell, a card AI session, a file write or a setting
   // of the board.
-  return 'terminals';
+  return 'shell';
 }
 
 /** Whether a channel at `level` on a board may run `action` there. */
@@ -522,7 +500,7 @@ export function channelLevel(
 
 /** Channel traffic that is not an action: a terminal's keystrokes, the
  *  self-update control, and the video track (the simulator). A terminal is a
- *  shell, so it needs the Terminals level; the video needs Screens. The self-update restarts the
+ *  shell, so it needs the Shell level; the video needs Jobs. The self-update restarts the
  *  runner (and every job, window and session on it) on a new version, so it
  *  is the owner's alone, whatever the level. */
 export type RawChannelUse = 'terminal' | 'runner-control' | 'video';
@@ -533,14 +511,13 @@ export function rawUseAllowed(
 ): boolean {
   if (level === 'owner') return true;
   if (use === 'runner-control') return false;
-  return levelAtLeast(level, use === 'video' ? 'screens' : 'terminals');
+  return levelAtLeast(level, use === 'video' ? 'jobs' : 'shell');
 }
 
 const LEVEL_NAMES: Record<RunnerAccessLevel, string> = {
   none: 'None',
-  api: 'API',
-  terminals: 'Terminals',
-  screens: 'Screens'
+  jobs: 'Jobs',
+  shell: 'Shell'
 };
 
 /** The refusal a member sees. Names the level the action needs, so nobody
@@ -593,6 +570,7 @@ export const RELAY_REFUSED_ACTIONS: ReadonlySet<BoardAgentAction> =
     'secretFileEnvSet',
     'secretFileEnvUnset',
     'setupAuthorize',
+    'opsRemoveOldCopy',
     'secretsChangePassword',
     'secretsExportBackup',
     'secretsOpenBackup',
@@ -657,15 +635,35 @@ export type RelayedCall =
   | 'recipient-request'
   | 'audit-read';
 
-export const NO_API_ACCESS =
-  'The owner of this runner has not given you API access on this board.';
+export const NO_JOBS_ACCESS =
+  'The owner of this runner has not given you the Jobs level on this board.';
+
+/** Whether a channel at `level` runs a job marked `dangerous` at once: the
+ *  owner, and a member at Shell (a shell as the runner user can read the
+ *  job's keys anyway). A member at Jobs waits for the owner's approval of
+ *  each such call. */
+export function runsDangerousJobs(level: ChannelLevel): boolean {
+  return levelAtLeast(level, 'shell');
+}
+
+/** Whether a session on this runner (a terminal, a card AI, a Chat or Code
+ *  session: the normal OS user) runs a job marked `dangerous` at once.
+ *  Without the ops user, yes: a shell as the runner user can read the job's
+ *  keys anyway. With the ops user on (`opsMode`, .specs/ops-user.md), no: the
+ *  session cannot read them any more, so each call waits for the runner
+ *  owner's approval, like a member at Jobs. Only the owner's own answer in
+ *  the app runs it (dangerousApprovalAnswer checks the owner by id). */
+export function sessionRunsDangerousJobs(opsMode: boolean): boolean {
+  return !opsMode;
+}
 
 /**
- * Whether a call of `job` must wait for the runner owner's approval, by the
- * Dangerous jobs permission alone (the level is checked before this). False
- * for a job that is not marked dangerous, and for the owner, a session on
- * the runner or a member with the permission (`mayRunDangerous`). Never a
- * refusal: the call waits instead (owner-approval.ts).
+ * Whether a call of `job` must wait for the runner owner's approval (the
+ * level is checked before this). False for a job that is not marked
+ * dangerous, and for the owner, a member at Shell, or a session on the
+ * runner while the ops user is off (`mayRunDangerous`, runsDangerousJobs,
+ * sessionRunsDangerousJobs). Never a refusal: the call waits instead
+ * (owner-approval.ts).
  */
 export function needsOwnerApproval(
   job: { dangerous?: boolean } | undefined,
@@ -683,12 +681,11 @@ export const OWNER_ONLY =
  * alone.
  *
  * - The audit log is the owner's, whatever the level.
- * - Everything else needs the API level on that board, unless the actor IS
+ * - Everything else needs the Jobs level on that board, unless the actor IS
  *   the owner.
- * - A job marked `dangerous` from a member without the Dangerous jobs
- *   permission is not refused: the job runner holds it for the owner's
- *   approval, on the definition it runs (needsOwnerApproval), whichever road
- *   the call took.
+ * - A job marked `dangerous` from a member below Shell is not refused: the
+ *   job runner holds it for the owner's approval, on the definition it runs
+ *   (needsOwnerApproval), whichever road the call took.
  *
  * An unknown owner id (a token that carries none) matches nobody, so the
  * check fails closed rather than open. Returns the refusal, or null.
@@ -707,7 +704,7 @@ export function relayedCallRefusal(opts: {
   if (opts.call === 'audit-read') return isOwner ? null : OWNER_ONLY;
   if (isOwner) return null;
   const level = grantedLevel(opts.grants, opts.spaceSlug, opts.actorUserId);
-  return levelAtLeast(level, 'api') ? null : NO_API_ACCESS;
+  return levelAtLeast(level, 'jobs') ? null : NO_JOBS_ACCESS;
 }
 
 /**

@@ -134,7 +134,8 @@ export class PartsManager {
           res,
           removableTools(part, ledger, installed),
           service,
-          job ? { ...job, lines: job.lines.slice(-SHOWN_LINES) } : null
+          job ? { ...job, lines: job.lines.slice(-SHOWN_LINES) } : null,
+          ledger
         );
       })
     );

@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 
 import type {
+  ArchivedSkill,
   SkillLinkState,
   SkillScope,
   SkillStatus,
@@ -36,6 +37,15 @@ const CLI_ROOTS = [CLAUDE_ROOT, '.codex/skills'];
  *  one canonical root, which the person's own sessions may read too. */
 export function globalAgentsRoot(home: string = os.homedir()): string {
   return path.join(home, '.agents', 'skills');
+}
+
+/** Skills kept on the host but outside every folder a CLI lists, so none of
+ *  them loads into a session; an agent reads one only when someone asks
+ *  (claude-seo was moved here out of `~/.claude/skills`). In the host user's
+ *  real home, like `~/.agents/skills`, not the runner's own Claude home.
+ *  Codex has no such folder. Listed only: nothing writes or runs it. */
+export function archiveRoot(home: string = os.homedir()): string {
+  return path.join(home, '.claude', 'skills-archive');
 }
 
 /** The host's per-CLI skill roots: `skills/` in the homes the CLIs use here.
@@ -81,6 +91,8 @@ const SYMLINK_MODE = '120000';
 export type SkillsOverview = {
   global: SkillSummary[];
   repo: SkillSummary[];
+  /** The host's `~/.claude/skills-archive`, read with the machine's skills. */
+  archive: ArchivedSkill[];
   /** Whether `.claude/skills` links to `.agents/skills`. Anything but
    *  `linked` blocks the modal until the user migrates. */
   globalLink: SkillLinkState;
@@ -145,32 +157,50 @@ async function globalLinkState(): Promise<SkillLinkState> {
   return states.includes('missing') ? 'missing' : 'linked';
 }
 
-/** Every skill under the host's `~/.agents/skills`. A missing root is normal:
- *  it just means no personal skills have been written yet. */
-async function listGlobal(): Promise<SkillSummary[]> {
-  const root = globalAgentsRoot();
+/** Every `<name>/SKILL.md` directly under one root on disk, by name. Anything
+ *  else there is not a skill: a notes file, or a folder with no SKILL.md (the
+ *  archive's `agents`). A missing root reads as empty. */
+async function skillDirsOnDisk(
+  root: string
+): Promise<{ name: string; dir: string; raw: string }[]> {
   const entries = await fs
     .readdir(root, { withFileTypes: true })
     .catch(() => []);
-  const out: SkillSummary[] = [];
+  const out: { name: string; dir: string; raw: string }[] = [];
   for (const entry of entries) {
     if (entry.isFile()) continue;
     const dir = path.join(root, entry.name);
     const raw = await fs
       .readFile(path.join(dir, 'SKILL.md'), 'utf-8')
       .catch(() => '');
-    if (!raw) continue;
-    out.push(
-      summarize(raw, {
-        name: entry.name,
-        scope: 'global',
-        dir,
-        status: 'live',
-        pendingBranch: ''
-      })
-    );
+    if (raw) out.push({ name: entry.name, dir, raw });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Every skill under the host's `~/.agents/skills`. A missing root is normal:
+ *  it just means no personal skills have been written yet. */
+async function listGlobal(): Promise<SkillSummary[]> {
+  return (await skillDirsOnDisk(globalAgentsRoot())).map(({ name, dir, raw }) =>
+    summarize(raw, {
+      name,
+      scope: 'global',
+      dir,
+      status: 'live',
+      pendingBranch: ''
+    })
+  );
+}
+
+/** Every skill in the host's archive. A missing archive is the usual case. */
+export async function listArchive(
+  root: string = archiveRoot()
+): Promise<ArchivedSkill[]> {
+  return (await skillDirsOnDisk(root)).map(({ name, dir, raw }) => ({
+    name,
+    description: parseSkill(raw).frontmatter.description,
+    dir
+  }));
 }
 
 /** Same, from the repo tree: a committed SKILL.md outside `.agents/skills`. */
@@ -538,18 +568,21 @@ function repoLinkState(ctx: RepoContext): SkillLinkState {
     : 'missing';
 }
 
-/** Everything the Skills modal lists: both global roots (from disk) and both
- *  repo roots (from `origin/<branch>` plus any unmerged skill/* branches). */
+/** Everything the Skills modal lists: both global roots and the archive (from
+ *  disk) and both repo roots (from `origin/<branch>` plus any unmerged
+ *  skill/* branches). */
 async function listSkillsImpl(opts: SkillsRepoOpts): Promise<SkillsOverview> {
-  const [global, globalLink] = await Promise.all([
+  const [global, globalLink, archive] = await Promise.all([
     listGlobal(),
-    globalLinkState()
+    globalLinkState(),
+    listArchive()
   ]);
 
   if (!opts.repoUrl || !opts.githubToken) {
     return {
       global,
       repo: [],
+      archive,
       globalLink,
       repoLink: 'linked',
       repoBranch: '',
@@ -567,6 +600,7 @@ async function listSkillsImpl(opts: SkillsRepoOpts): Promise<SkillsOverview> {
   return {
     global,
     repo,
+    archive,
     globalLink,
     repoLink: repoLinkState(ctx),
     repoBranch: ctx.branch,

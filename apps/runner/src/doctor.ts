@@ -378,6 +378,23 @@ export function buildChecks(host: DoctorHost): {
         feature: 'simulator panel',
         required: false,
         async check() {
+          // After an Xcode update, every simctl call first runs `xcodebuild
+          // -runFirstLaunch`, which asks for an admin password. This check
+          // repeats, so each run stacked another password prompt on the
+          // person's screen. Ask Xcode first (that call never prompts) and
+          // leave simctl alone until its setup is done.
+          const firstLaunch = await host.run('xcodebuild', ['-checkFirstLaunchStatus']);
+          if (firstLaunch.code !== 0) {
+            return {
+              state: 'unmet',
+              detail: 'Xcode needs to finish setting up after an update.',
+              fix: {
+                kind: 'command',
+                note: ['Open Xcode once and let it install its components, or:'],
+                commands: ['sudo xcodebuild -runFirstLaunch']
+              }
+            };
+          }
           const res = await host.run('xcrun', [
             'simctl',
             'list',

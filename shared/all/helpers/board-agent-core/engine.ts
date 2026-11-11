@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'child_process';
+import { rm } from 'fs/promises';
 import { basename, dirname, join } from 'path';
 import { z } from 'zod';
 
@@ -6,8 +7,10 @@ import type {
   BoardAgentActionMap,
   PendingDangerousApproval,
   RunnerCleanup,
+  RunnerJobEndState,
   RunnerPartsState,
   RunnerServiceOutcome,
+  RunnerJobTargetWait,
   RunnerServiceState,
   SecureStoreStatus
 } from '../../domains/electron';
@@ -121,16 +124,25 @@ import {
   readSkill,
   writeGlobalSkill
 } from './host-skills';
+import { runnerJobTargets } from './job-targets';
 import {
   filledCommand,
   type JobDef,
   JobRunner,
   JOBS_PATH,
+  type JobsApi,
   parseJobs
 } from './jobs';
 import type { ModeEngine } from './mode';
+import type { OpsLink, OpsLinkFactory } from './ops-link';
+import {
+  isOpsStoreAction,
+  OPS_BACKUP_OPEN_REFUSED,
+  runOpsStoreAction
+} from './ops-store-actions';
 import {
   OWNER_APPROVAL_TIMEOUT_MS,
+  type OwnerApprovalChange,
   type OwnerApprovalResult,
   OwnerApprovals
 } from './owner-approval';
@@ -139,6 +151,7 @@ import { allocateSessionPorts, pruneSessionPorts } from './port-blocks';
 import { buildPrompt } from './prompt';
 import prompts from './prompts.json';
 import { type AgentProvider, resolveProvider } from './providers';
+import { sessionRunsDangerousJobs } from './runner-access';
 import { ScratchpadStore } from './scratchpad-store';
 import {
   applySecretsBackupImport,
@@ -171,7 +184,7 @@ import {
   listCards,
   patchCard
 } from './state';
-import { captureTmuxPane } from './tmux';
+import { captureTmuxPane, killTerminalSessions } from './tmux';
 import { environmentStatus, installExtra } from './toolchain';
 import { slugifyWorkName } from './workName';
 
@@ -214,8 +227,15 @@ export type BoardAgentEngineOptions = SpaceCoreOptions & {
   /** A job's phase changed before it ended, for the server relay. */
   onJobState?: (
     callId: string,
-    state: 'queued' | 'waiting-owner' | 'waiting-auth' | 'running',
-    via: AuditVia
+    state:
+      | 'queued'
+      | 'waiting-owner'
+      | 'waiting-target'
+      | 'waiting-auth'
+      | 'running',
+    via: AuditVia,
+    /** Who holds the target, with 'waiting-target' (job-targets.ts). */
+    wait?: RunnerJobTargetWait
   ) => void;
   /** The runner owner's user id, from the runner's own pairing token. Only
    *  this id may answer a dangerous job approval; unset = nobody can, so
@@ -238,9 +258,13 @@ export type BoardAgentEngineOptions = SpaceCoreOptions & {
   /** A job settled, for the server relay. */
   onJobEnd?: (
     callId: string,
-    state: 'done' | 'denied' | 'failed' | 'cancelled',
+    state: RunnerJobEndState,
     exitCode: number | null
   ) => void;
+  /** This board's store, gate, window, jobs, approvals and inbox live with
+   *  the ops user (.specs/ops-user.md, apps/runner/src/ops). Absent: all of
+   *  them in this process, as always. */
+  opsLink?: OpsLinkFactory;
 };
 
 /** What the host does for the service actions (apps/runner runnerService.ts). */
@@ -294,9 +318,9 @@ export type ActionContext = {
    *  call, a member only its own. Absent = owner (older callers). */
   role?: 'owner' | 'member';
   /** Whether a member runs dangerous jobs on
-   *  this board without the owner's approval per call: the owner gave them
-   *  the permission. Ignored for the owner. Absent = each call waits for the
-   *  owner. */
+   *  this board without the owner's approval per call: they have the Shell
+   *  level there (runsDangerousJobs). Ignored for the owner. Absent = each
+   *  call waits for the owner. */
   dangerous?: boolean;
 };
 
@@ -417,6 +441,8 @@ export class BoardAgentEngine {
   private runnerService?: RunnerServiceHost;
   private runnerParts?: RunnerPartsHost;
   private jobRunner: JobRunner | null = null;
+  /** The ops user's side of this board, when the runner turned it on. */
+  private opsLink: OpsLink | null = null;
   private inbox: SecretsInbox | null = null;
   /** Members' dangerous job calls waiting on the runner owner. */
   private approvals = new OwnerApprovals();
@@ -488,8 +514,10 @@ export class BoardAgentEngine {
       () => this.core.target(),
       (payload) => this.emitter.emitScratchpad(payload)
     );
+    // The simulator is this Mac's, and stays here when sessions run in the
+    // dev VM (.specs/dev-vm.md).
     this.simulator = new SimulatorStore(
-      () => this.core.target(),
+      () => this.core.hostTarget(),
       (unit, at) => options.onSimulatorFrame?.(unit, at),
       options.nativeDir ?? ''
     );
@@ -505,7 +533,7 @@ export class BoardAgentEngine {
     // One activity row per waiting call: the owner's app opens its approval
     // popup on it, wherever the owner is in the app.
     const onDangerousApproval = options.onDangerousApproval;
-    this.approvals.subscribe((change) => {
+    const onApprovalChange = (change: OwnerApprovalChange) => {
       if ('opened' in change) {
         const req = change.opened;
         this.activity.set(
@@ -519,7 +547,25 @@ export class BoardAgentEngine {
       } else {
         this.activity.clear('dangerous-approval', change.closed);
       }
-    });
+    };
+    this.approvals.subscribe(onApprovalChange);
+    // The ops user's gate and approvals reach clients the same way as this
+    // process's own: the same activity rows, events and server pushes.
+    if (options.opsLink) {
+      const link = options.opsLink({
+        onLog: (callId, seq, text) => this.onJobLog?.(callId, seq, text),
+        onEnd: (callId, state, exitCode) =>
+          this.onJobEnd?.(callId, state, exitCode),
+        onState: (callId, state, via, wait) =>
+          this.onJobState?.(callId, state, via, wait)
+      });
+      this.opsLink = link;
+      this.core.ops = { keyNames: () => link.keyNames() };
+      link.subscribe((event) => {
+        if (event.type === 'approval') onApprovalChange(event.change);
+        else this.core.publishGate(link.gateState().pending);
+      });
+    }
     // Sessions on this runner call jobs through the secrets bridge.
     this.core.localJobs = {
       list: async () => (await this.jobsList()).jobs,
@@ -531,8 +577,10 @@ export class BoardAgentEngine {
           via: 'owner-terminal',
           from,
           // A session here is a shell as the runner user, which can read the
-          // job's keys anyway; the permission gates the API road, not this.
-          mayRunDangerous: true
+          // job's keys anyway; the level gates the API road, not this. With
+          // the ops user on it cannot, so its dangerous call waits for the
+          // owner (sessionRunsDangerousJobs).
+          mayRunDangerous: sessionRunsDangerousJobs(this.opsLink !== null)
         }),
       status: (callId, afterSeq) => this.jobStatus({ callId, afterSeq }),
       cancel: (callId, actor) =>
@@ -578,6 +626,7 @@ export class BoardAgentEngine {
   /** What the global authorization modal renders. Null when nothing is
    *  waiting, which is also how an answered prompt tells clients to close. */
   secretsAuthState(): BoardAgentActionMap['secretsAuthState']['result'] {
+    if (this.opsLink) return this.opsLink.gateState();
     return {
       pending: this.gate.pending(),
       unlocked: this.core.window.state()
@@ -588,6 +637,14 @@ export class BoardAgentEngine {
     payload: BoardAgentActionMap['secretsAuthAnswer']['payload'],
     ctx: ActionContext = OWNER_CONTEXT
   ): { success: boolean } {
+    if (this.opsLink) {
+      return this.opsLink.gateAnswer(payload.id, {
+        password: payload.password,
+        unlockFor: payload.unlockFor,
+        by: ctx.actor,
+        via: ctx.via
+      });
+    }
     return this.gate.answer(
       payload.id,
       payload.password === undefined
@@ -606,6 +663,8 @@ export class BoardAgentEngine {
   async secretsLock(ctx: ActionContext = OWNER_CONTEXT): Promise<{
     success: boolean;
   }> {
+    // The ops half locks and writes the audit line itself.
+    if (this.opsLink) return this.opsLink.lock(ctx.actor, ctx.via);
     const holder = this.core.window.holder();
     if (this.core.window.lock()) {
       await this.core.audit.append({
@@ -910,7 +969,8 @@ export class BoardAgentEngine {
     });
   }
 
-  private jobs(): JobRunner {
+  private jobs(): JobsApi {
+    if (this.opsLink) return this.opsLink.jobs;
     this.jobRunner ??= new JobRunner({
       load: () => this.loadJobs(),
       prepare: () => this.prepareJobWorkspace(),
@@ -955,11 +1015,14 @@ export class BoardAgentEngine {
       },
       askOwner: ({ signal, def, env, caller, via }) =>
         this.askOwner(def, env, caller, via, signal),
+      // One store for the whole process: a target waits across boards.
+      targets: { store: runnerJobTargets, board: this.core.spaceSlug },
       audit: this.core.audit,
       onLog: (callId, seq, text) => this.onJobLog?.(callId, seq, text),
       onEnd: (callId, state, exitCode) =>
         this.onJobEnd?.(callId, state, exitCode),
-      onState: (callId, state, via) => this.onJobState?.(callId, state, via)
+      onState: (callId, state, via, wait) =>
+        this.onJobState?.(callId, state, via, wait)
     });
     return this.jobRunner;
   }
@@ -1015,7 +1078,9 @@ export class BoardAgentEngine {
   ): BoardAgentActionMap['dangerousApprovalState']['result'] {
     if (!this.isRunnerOwner(ctx))
       throw new Error(DANGEROUS_APPROVAL_OWNER_ONLY);
-    return { pending: this.approvals.pending() };
+    return {
+      pending: this.opsLink ? this.opsLink.approvals() : this.approvals.pending()
+    };
   }
 
   /** The owner's yes or no to one waiting call. Approve runs that call once;
@@ -1027,6 +1092,12 @@ export class BoardAgentEngine {
     if (!this.isRunnerOwner(ctx))
       throw new Error(DANGEROUS_APPROVAL_OWNER_ONLY);
     const id = typeof payload?.id === 'string' ? payload.id : '';
+    if (this.opsLink) {
+      return this.opsLink.approvalAnswer(id, payload?.approve === true, {
+        by: { userId: String(ctx.actor.userId), name: ctx.actor.name },
+        via: ctx.via
+      });
+    }
     return {
       success: this.approvals.answer(id, payload?.approve === true, {
         by: { userId: String(ctx.actor.userId), name: ctx.actor.name },
@@ -1076,11 +1147,23 @@ export class BoardAgentEngine {
     } catch {
       // A malformed jobs.json offers no jobs (loadJobs throws the reason).
     }
-    const keys = new Set(await storedSecretKeys(spaceDir));
+    // With the ops user on, the store's names come from there (names only).
+    const opsKeys = this.opsLink
+      ? await this.opsLink.keyNames().catch(() => [])
+      : null;
+    const opsStored = (kind: 'env' | 'file') =>
+      (opsKeys ?? [])
+        .filter((k) => k.stored && (k.kind ?? 'env') === kind)
+        .map((k) => k.key);
+    const keys = new Set(
+      opsKeys ? opsStored('env') : await storedSecretKeys(spaceDir)
+    );
     // The GitHub connection answers for GH_TOKEN / GITHUB_TOKEN when the
     // store holds neither (authorizeAndRun), so neither is missing then.
     if (config.githubToken) for (const k of GITHUB_TOKEN_KEYS) keys.add(k);
-    const fileSecrets = new Set(await storedSecretFiles(spaceDir));
+    const fileSecrets = new Set(
+      opsKeys ? opsStored('file') : await storedSecretFiles(spaceDir)
+    );
     const missingOf = (job: JobDef) => [
       ...job.keys.filter((k) => !keys.has(k)),
       ...job.files.filter((f) => !fileSecrets.has(f))
@@ -1098,9 +1181,47 @@ export class BoardAgentEngine {
         .filter((j) => missingOf(j).length > 0)
         .map((j) => j.name),
       jobsCount: jobs.length,
-      secretsLocked: this.core.window.state() === null,
-      repoConnected
+      secretsLocked:
+        (this.opsLink
+          ? this.opsLink.gateState().unlocked
+          : this.core.window.state()) === null,
+      repoConnected,
+      // The ops user holds the store, and this user still has the copy
+      // setup made it from (opsRemoveOldCopy removes it).
+      oldSecretsCopy: this.opsLink
+        ? await secretsInitialized(this.secretsDirs().configDir)
+        : false
     };
+  }
+
+  /** With the ops user on: delete this board's store under the runner's own
+   *  user, the copy setup moved to the ops user and kept. First the ops
+   *  user's copy is opened with `password` (a store-list, names only): that
+   *  it opens is the proof it holds this board's secrets, so nothing is
+   *  removed that exists only here. A board the ops user does not hold yet
+   *  is refused with the way to move it (Repair). Only the `secrets` folder
+   *  goes; this user's audit log stays. */
+  async opsRemoveOldCopy(
+    payload: BoardAgentActionMap['opsRemoveOldCopy']['payload'],
+    ctx: ActionContext = OWNER_CONTEXT
+  ): Promise<BoardAgentActionMap['opsRemoveOldCopy']['result']> {
+    if (!this.opsLink) {
+      throw new Error(
+        'This runner keeps its secrets under its own user: there is no old copy to remove.'
+      );
+    }
+    const { configDir, spaceDir } = this.secretsDirs();
+    if (!(await secretsInitialized(configDir))) return { removed: false };
+    await runOpsStoreAction(
+      this.opsLink,
+      'deploySecretsList',
+      { password: payload.password },
+      ctx,
+      [],
+      { name: basename(spaceDir), hasLocalStore: async () => true }
+    );
+    await rm(join(spaceDir, 'secrets'), { recursive: true, force: true });
+    return { removed: true };
   }
 
   // The runner's always-on service (service.ts). Runner-wide, owner only
@@ -1202,6 +1323,7 @@ export class BoardAgentEngine {
   async secretsInboxList(): Promise<
     BoardAgentActionMap['secretsInboxList']['result']
   > {
+    if (this.opsLink) return { items: await this.opsLink.inboxList() };
     return { items: await this.secretsInbox().list() };
   }
 
@@ -1209,11 +1331,15 @@ export class BoardAgentEngine {
     payload: BoardAgentActionMap['secretsInboxAnswer']['payload'],
     ctx: ActionContext = OWNER_CONTEXT
   ): Promise<{ success: boolean }> {
+    if (this.opsLink) {
+      return this.opsLink.inboxAnswer(payload, ctx.actor, ctx.via);
+    }
     return this.secretsInbox().answer(payload, ctx.actor, ctx.via);
   }
 
   /** An encrypted update relayed by the server (`runner:secret-submit`). */
   secretsInboxSubmit(item: InboxSubmit): Promise<{ accepted: true }> {
+    if (this.opsLink) return this.opsLink.inboxSubmit(item);
     return this.secretsInbox().submit(item);
   }
 
@@ -1246,7 +1372,12 @@ export class BoardAgentEngine {
     return [
       {
         event: 'secrets-auth',
-        payload: { pending: this.gate.pending() !== null }
+        payload: {
+          pending:
+            (this.opsLink
+              ? this.opsLink.gateState().pending
+              : this.gate.pending()) !== null
+        }
       }
     ];
   }
@@ -1265,6 +1396,7 @@ export class BoardAgentEngine {
   /** The public age recipient a laptop CLI encrypts updates to: this
    *  board's, which changes whenever its password does. */
   async secretsRecipient(): Promise<string> {
+    if (this.opsLink) return this.opsLink.recipient();
     const { configDir, spaceDir } = this.secretsDirs();
     await adoptRunnerKey(dirname(spaceDir), spaceDir).catch(() => false);
     if (!(await secretsInitialized(configDir))) {
@@ -1691,7 +1823,7 @@ export class BoardAgentEngine {
     }
     // A job and a release on one space at once would both deploy. The run's
     // own jobs start after this, so they are never refused by it.
-    if (this.jobRunner?.busy()) {
+    if ((this.opsLink?.jobs ?? this.jobRunner)?.busy()) {
       throw new Error(
         'A job is running on this space. Start the run when it ends.'
       );
@@ -2609,9 +2741,11 @@ export class BoardAgentEngine {
     if (!this.core.isReady()) {
       throw new Error('Initialize the environment first, then sign in.');
     }
+    // Sign-ins are made on this host, never in the dev VM: its sessions are
+    // handed tokens (.specs/dev-vm.md, "Logins in memory only").
     this.claudeLogin ??= new ClaudeLoginFlow(
       this.core.spaceSlug,
-      this.core.target(),
+      this.core.hostTarget(),
       (result) => {
         if (result.status === 'complete') {
           this.core.setLoggedIn('claude', true);
@@ -2644,10 +2778,11 @@ export class BoardAgentEngine {
       throw new Error('Initialize the environment first, then sign in.');
     }
     // Codex is not one of the basics: its sign-in installs it (npm, no root).
-    await installExtra(this.core.target(), 'codex', () => {});
+    await installExtra(this.core.hostTarget(), 'codex', () => {});
+    // On this host, as Claude's above.
     this.codexLogin ??= new CodexLoginFlow(
       this.core.spaceSlug,
-      this.core.target(),
+      this.core.hostTarget(),
       (result) => {
         if (result.status === 'complete') {
           this.core.setLoggedIn('codex', true);
@@ -2690,7 +2825,7 @@ export class BoardAgentEngine {
     if (!this.core.isReady()) {
       throw new Error('Initialize the environment first.');
     }
-    await signOut(this.core.target(), provider);
+    await signOut(this.core.hostTarget(), provider);
     this.core.setLoggedIn(provider, false);
     this.onSigninChanged?.(provider, false);
     return { success: true };
@@ -3341,10 +3476,13 @@ export class BoardAgentEngine {
    *  a restart. */
   async reattachAndHydrate(): Promise<void> {
     // Updates parked before a restart get their prompt back, and the 24-hour
-    // sweep starts. Independent of the workspace, so first.
-    void this.secretsInbox()
-      .resume()
-      .catch(() => undefined);
+    // sweep starts. Independent of the workspace, so first. With the ops
+    // user on, the inbox is there and resumes there.
+    if (!this.opsLink) {
+      void this.secretsInbox()
+        .resume()
+        .catch(() => undefined);
+    }
     try {
       const attached = await this.core.reattachSpaceWorkspace();
       if (!attached) return;
@@ -3758,6 +3896,29 @@ export class BoardAgentEngine {
     await this.terminal.kill(postId);
   }
 
+  /** Stop every session the member `userId` started on this board: card AI
+   *  runs, Chat and Code terminals, their chats and every shell in them. Each
+   *  keeps its worktree, branch and record for the owner to look at or End.
+   *  For a member who lost the Shell level (.specs/runner-member-access.md,
+   *  "Changing a level"). Resolves with the titles (or ids) it stopped. */
+  async stopMemberSessions(userId: string): Promise<string[]> {
+    const target = this.core.target();
+    const reason = 'Stopped: the runner owner took this member\'s Shell access.';
+    const stopped: string[] = [];
+    for (const mode of [this.claude, this.terminal] as const) {
+      for (const postId of Object.keys(mode.listSummaries())) {
+        const session = mode.get(postId);
+        const by = session?.startedBy;
+        if (!session || by?.role !== 'member' || by.userId !== userId) continue;
+        if (mode === this.claude) await this.claude.halt(postId, reason);
+        else this.chatRuns.stop(postId);
+        await killTerminalSessions(target, postId).catch(() => {});
+        stopped.push(session.taskTitle || postId);
+      }
+    }
+    return stopped;
+  }
+
   /** Stop a card's headless agent so a terminal can take over its thread
    *  (no-op for a bare session, which has no headless agent). */
   async cardHandoff({ postId }: { postId: string }): Promise<void> {
@@ -3792,6 +3953,7 @@ export class BoardAgentEngine {
     clearInterval(this.workPathTimer);
     this.approvals.destroy();
     this.jobRunner?.destroy();
+    this.opsLink?.close();
     this.inbox?.destroy();
     void this.claudeLogin?.cancel();
     void this.codexLogin?.cancel();
@@ -3815,7 +3977,29 @@ export class BoardAgentEngine {
     askLogSender?: (entry: { type: string; content: string }) => void,
     ctx: ActionContext = OWNER_CONTEXT
   ): Promise<BoardAgentActionMap[A]['result']> {
-    const result = await this.route(action, payload, askLogSender, ctx);
+    // With the ops user on, the store is the ops half's: the Secrets tab's
+    // actions go there (ops-store-actions.ts), and opening a backup, which
+    // shows values, is refused.
+    if (this.opsLink && action === 'secretsOpenBackup') {
+      throw new Error(OPS_BACKUP_OPEN_REFUSED);
+    }
+    const result =
+      this.opsLink && isOpsStoreAction(action)
+        ? await runOpsStoreAction(
+            this.opsLink,
+            action,
+            payload as BoardAgentActionMap[typeof action]['payload'],
+            ctx,
+            this.core.readConfig().githubToken ? [...GITHUB_TOKEN_KEYS] : [],
+            {
+              name: basename(this.secretsDirs().spaceDir),
+              // This user's store, from before the ops user (secretsDirs is
+              // this user's runner dir).
+              hasLocalStore: () =>
+                secretsInitialized(this.secretsDirs().configDir)
+            }
+          )
+        : await this.route(action, payload, askLogSender, ctx);
     if (SECRETS_STORE_WRITES.has(action)) {
       this.emitter.emitSecretsChanged({ at: Date.now() });
     }
@@ -4050,6 +4234,11 @@ export class BoardAgentEngine {
       case 'secretsImportBackupApply':
         return (await this.secretsImportBackupApply(
           payload as BoardAgentActionMap['secretsImportBackupApply']['payload'],
+          ctx
+        )) as BoardAgentActionMap[A]['result'];
+      case 'opsRemoveOldCopy':
+        return (await this.opsRemoveOldCopy(
+          payload as BoardAgentActionMap['opsRemoveOldCopy']['payload'],
           ctx
         )) as BoardAgentActionMap[A]['result'];
       case 'secretsChangePassword':

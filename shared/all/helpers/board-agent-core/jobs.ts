@@ -2,7 +2,12 @@ import type { ChildProcess } from 'child_process';
 import crypto from 'crypto';
 import { z } from 'zod';
 
-import type { RunnerJobInfo, RunnerJobState } from '../../domains/electron';
+import type {
+  RunnerJobEndState,
+  RunnerJobInfo,
+  RunnerJobState,
+  RunnerJobTargetWait
+} from '../../domains/electron';
 import {
   RUNNER_JOB_NAME_REGEX,
   RUNNER_JOB_PARAM_NAME_REGEX,
@@ -10,6 +15,7 @@ import {
 } from '../../validators/runnerJobs';
 import type { AuditLog } from './audit';
 import { killTree } from './host-env';
+import type { JobTargets } from './job-targets';
 import { needsOwnerApproval } from './runner-access';
 import type { AuditVia, AuthorizedRunResult } from './secrets-run';
 import type { WindowActor } from './secrets-window';
@@ -22,8 +28,10 @@ import type { WindowActor } from './secrets-window';
 // its environment - never spliced into the command line, so no value can be
 // read as shell.
 //
-// One job runs at a time per space; the rest queue. State and the redacted log
-// stay in memory, bounded, for the caller to poll.
+// One job runs at a time per space; the rest queue. A job that names a
+// `target` also waits, across every board of the runner, while another job
+// with that target runs (job-targets.ts). State and the redacted log stay in
+// memory, bounded, for the caller to poll.
 
 export const JOBS_PATH = '.agents/skills/deploy/jobs.json';
 
@@ -74,10 +82,15 @@ const jobSchema = z.object({
     .positive()
     .max(MAX_TIMEOUT_MIN)
     .default(DEFAULT_TIMEOUT_MIN),
-  /** The owner wants to see each call of it. A member without
-   *  the owner's Dangerous jobs permission then waits for the runner owner
+  /** The owner wants to see each call of it. A member below
+   *  the Shell level then waits for the runner owner
    *  to approve each call (owner-approval.ts). Absent = not dangerous. */
-  dangerous: z.boolean().optional()
+  dangerous: z.boolean().optional(),
+  /** What the job changes, e.g. "factiii-server": while one job with this
+   *  target runs on any board of this runner, another waits for it
+   *  ('waiting-target', FIFO). Same shape as a job name. Absent = no
+   *  cross-board wait. */
+  target: z.string().regex(JOB_NAME).optional()
 });
 
 const jobsFileSchema = z.object({ jobs: z.array(jobSchema) });
@@ -322,6 +335,9 @@ export type JobHost = {
     onSpawn: (proc: ChildProcess) => void;
     onPhase: (phase: 'waiting-auth' | 'running') => void;
   }) => Promise<AuthorizedRunResult>;
+  /** The runner-wide target holds (job-targets.ts) and this board's name
+   *  for the wait line. Absent = `target` is ignored. */
+  targets?: { store: JobTargets; board: string };
   /** Hold a member's call of a dangerous job until the runner owner
    *  answers (owner-approval.ts). True = run this one call. Absent = nobody
    *  can approve, so such a call ends as denied. */
@@ -338,22 +354,43 @@ export type JobHost = {
   onLog?: (callId: string, seq: number, text: string) => void;
   onEnd?: (
     callId: string,
-    state: 'done' | 'denied' | 'failed' | 'cancelled',
+    state: RunnerJobEndState,
     exitCode: number | null
   ) => void;
   /** Each phase a call enters before it ends, with the road it came by, so
    *  the server can show "waiting for approval" on a call it relayed. */
   onState?: (
     callId: string,
-    state: 'queued' | 'waiting-owner' | 'waiting-auth' | 'running',
-    via: AuditVia
+    state:
+      | 'queued'
+      | 'waiting-owner'
+      | 'waiting-target'
+      | 'waiting-auth'
+      | 'running',
+    via: AuditVia,
+    /** Set with 'waiting-target', again each time the holder or the place
+     *  in line moves. */
+    wait?: RunnerJobTargetWait
   ) => void;
 };
+
+/** Where a call is. Only 'waiting-target' carries a wait (who holds the
+ *  target, the call's place in line), so the state and the wait can never
+ *  disagree. */
+type CallPhase =
+  | { state: 'waiting-target'; wait: RunnerJobTargetWait }
+  | { state: Exclude<RunnerJobState, 'waiting-target'> };
+
+/** The wait to report beside a call's state: only while it waits on a
+ *  target. */
+function phaseWait(phase: CallPhase): { wait?: RunnerJobTargetWait } {
+  return phase.state === 'waiting-target' ? { wait: phase.wait } : {};
+}
 
 type Call = {
   callId: string;
   job: string;
-  state: RunnerJobState;
+  phase: CallPhase;
   exitCode: number | null;
   chunks: { seq: number; text: string }[];
   nextSeq: number;
@@ -363,6 +400,8 @@ type Call = {
   /** Who started it, for the cancel check and the audit lines. */
   caller: WindowActor;
   abort: AbortController;
+  /** Frees the target this call holds; called once, when it ends. */
+  release: (() => void) | null;
 };
 
 export class JobRunner {
@@ -370,6 +409,8 @@ export class JobRunner {
   /** The space's queue: each call starts when the one before it settles. */
   private chain: Promise<void> = Promise.resolve();
   private destroyed = false;
+  /** Aborts every target wait when the space shuts down. */
+  private shutdown = new AbortController();
 
   constructor(
     private host: JobHost,
@@ -384,8 +425,8 @@ export class JobRunner {
    * Accept a call and queue it. Resolves once the call is checked (known job,
    * params match), not when it finishes: the caller polls `status` or
    * listens for `onEnd`. `callId` is the server's when it minted one, so both
-   * sides key the call the same way. A dangerous job from a caller without
-   * the permission is accepted too, as 'waiting-owner': it joins the queue
+   * sides key the call the same way. A dangerous job from a caller below
+   * Shell is accepted too, as 'waiting-owner': it joins the queue
    * only once the runner owner approves it, so the wait holds up nobody else.
    */
   async call(opts: {
@@ -398,8 +439,9 @@ export class JobRunner {
      *  runner made the call. */
     from?: string;
     /** Whether the caller runs a job marked `dangerous` without the owner's
-     *  approval: the owner, a session on this runner, or a member with the
-     *  Dangerous jobs permission on this board. Checked here, on the
+     *  approval: the owner, a member at Shell on this board
+     *  (runsDangerousJobs), or a session on this runner while the ops user
+     *  is off (sessionRunsDangerousJobs). Checked here, on the
      *  definition that runs, whichever road the call took. Absent = the call
      *  waits for the owner. */
     mayRunDangerous?: boolean;
@@ -419,7 +461,7 @@ export class JobRunner {
     const call: Call = {
       callId,
       job: def.name,
-      state: askOwner ? 'waiting-owner' : 'queued',
+      phase: { state: askOwner ? 'waiting-owner' : 'queued' },
       exitCode: null,
       chunks: [],
       nextSeq: 1,
@@ -427,7 +469,8 @@ export class JobRunner {
       endedAt: null,
       proc: null,
       caller: opts.caller,
-      abort: new AbortController()
+      abort: new AbortController(),
+      release: null
     };
     this.calls.set(callId, call);
     void this.host.audit?.append({
@@ -450,9 +493,83 @@ export class JobRunner {
       void this.waitForOwner(call, def, env, opts);
     } else {
       this.host.onState?.(callId, 'queued', opts.via);
-      this.chain = this.chain.then(() => this.run(call, def, env, opts));
+      this.enqueue(call, def, env, opts);
     }
     return { callId };
+  }
+
+  /** Join the space's queue, first taking the job's target when it names
+   *  one. A call waiting on its target is outside the queue, so it holds up
+   *  nobody on its own board; it joins the queue once it holds the target,
+   *  and keeps it until it ends. */
+  private enqueue(
+    call: Call,
+    def: JobDef,
+    env: Record<string, string>,
+    opts: { caller: WindowActor; via: AuditVia }
+  ): void {
+    const targets = this.host.targets;
+    if (def.target && targets) {
+      const who = {
+        callId: call.callId,
+        job: def.name,
+        board: targets.board,
+        callerName: opts.caller.name
+      };
+      const release = targets.store.tryAcquire(def.target, who);
+      if (!release) {
+        void this.waitForTarget(call, def, env, opts, def.target, who);
+        return;
+      }
+      call.release = release;
+    }
+    this.chain = this.chain.then(() => this.run(call, def, env, opts));
+  }
+
+  /** Wait in line for `target` (job-targets.ts), then queue. Cancelled
+   *  while waiting: it ends unrun. The space shutting down: it fails. */
+  private async waitForTarget(
+    call: Call,
+    def: JobDef,
+    env: Record<string, string>,
+    opts: { caller: WindowActor; via: AuditVia },
+    target: string,
+    who: { callId: string; job: string; board: string; callerName: string }
+  ): Promise<void> {
+    const started = this.now();
+    const store = this.host.targets?.store;
+    if (!store) return;
+    try {
+      call.release = await store.acquire(
+        target,
+        who,
+        AbortSignal.any([call.abort.signal, this.shutdown.signal]),
+        (wait) => {
+          call.phase = { state: 'waiting-target', wait };
+          this.host.onState?.(call.callId, 'waiting-target', opts.via, wait);
+        }
+      );
+    } catch {
+      const cancelled = call.abort.signal.aborted;
+      if (!cancelled) {
+        this.push(call, '\nThis space is shutting down.\n');
+      }
+      await this.end(
+        call,
+        def,
+        opts,
+        cancelled ? 'cancelled' : 'failed',
+        null,
+        null,
+        started
+      );
+      return;
+    }
+    if (call.phase.state === 'waiting-target') {
+      call.phase = { state: 'queued' };
+      this.host.onState?.(call.callId, 'queued', opts.via);
+    }
+    this.chain = this.chain.then(() => this.run(call, def, env, opts));
   }
 
   /** Hold a dangerous job call for the owner, outside the queue. Approved:
@@ -480,9 +597,9 @@ export class JobRunner {
       approved = false;
     }
     if (approved && !call.abort.signal.aborted && !this.destroyed) {
-      call.state = 'queued';
+      call.phase = { state: 'queued' };
       this.host.onState?.(call.callId, 'queued', opts.via);
-      this.chain = this.chain.then(() => this.run(call, def, env, opts));
+      this.enqueue(call, def, env, opts);
       return;
     }
     if (!call.abort.signal.aborted) {
@@ -506,7 +623,7 @@ export class JobRunner {
     opts: { caller: WindowActor; via: AuditVia }
   ): Promise<void> {
     const started = this.now();
-    let state: 'done' | 'denied' | 'failed' | 'cancelled' = 'failed';
+    let state: RunnerJobEndState = 'failed';
     let exitCode: number | null = null;
     let unlockedBy: string | null = null;
     try {
@@ -527,8 +644,8 @@ export class JobRunner {
           call.proc = proc;
         },
         onPhase: (phase) => {
-          if (call.state === phase) return;
-          call.state = phase;
+          if (call.phase.state === phase) return;
+          call.phase = { state: phase };
           this.host.onState?.(call.callId, phase, opts.via);
         }
       });
@@ -558,18 +675,21 @@ export class JobRunner {
     await this.end(call, def, opts, state, exitCode, unlockedBy, started);
   }
 
-  /** Settle a call: its final state, the job-end audit line, and onEnd. */
+  /** Settle a call: its final state, the job-end audit line, and onEnd. It
+   *  frees the call's target first, so the next in line starts at once. */
   private async end(
     call: Call,
     def: JobDef,
     opts: { caller: WindowActor; via: AuditVia },
-    state: 'done' | 'denied' | 'failed' | 'cancelled',
+    state: RunnerJobEndState,
     exitCode: number | null,
     unlockedBy: string | null,
     started: number
   ): Promise<void> {
+    call.release?.();
+    call.release = null;
     call.proc = null;
-    call.state = state;
+    call.phase = { state };
     call.exitCode = exitCode;
     call.endedAt = this.now();
     await this.host.audit?.append({
@@ -600,8 +720,8 @@ export class JobRunner {
 
   /**
    * Cancel a call. Only the actor who started it or the runner owner may
-   * (`byOwner`). Waiting on the owner: the approval is withdrawn. Queued: it
-   * never starts. Waiting on the gate: its prompt is
+   * (`byOwner`). Waiting on the owner: the approval is withdrawn. Waiting on
+   * a target: it leaves the line. Queued: it never starts. Waiting on the gate: its prompt is
    * withdrawn. Running: its process group gets SIGTERM, then SIGKILL after
    * the grace period. It ends as 'cancelled' through the normal end path, so
    * temp files are wiped and onEnd fires. False when it had already ended.
@@ -622,7 +742,7 @@ export class JobRunner {
     if (call.endedAt !== null || call.abort.signal.aborted) {
       return { cancelled: false };
     }
-    const was = call.state;
+    const was = call.phase.state;
     call.abort.abort();
     await this.host.audit?.append({
       actor: by,
@@ -646,6 +766,7 @@ export class JobRunner {
     state: RunnerJobState;
     actor: { userId: string; name: string };
     startedAt: string;
+    wait?: RunnerJobTargetWait;
   }[] {
     return [...this.calls.values()]
       .filter((c) => c.endedAt === null)
@@ -658,9 +779,10 @@ export class JobRunner {
       .map((c) => ({
         callId: c.callId,
         job: c.job,
-        state: c.state,
+        state: c.phase.state,
         actor: { userId: c.caller.userId, name: c.caller.name },
-        startedAt: new Date(c.createdAt).toISOString()
+        startedAt: new Date(c.createdAt).toISOString(),
+        ...phaseWait(c.phase)
       }));
   }
 
@@ -684,6 +806,7 @@ export class JobRunner {
     state: RunnerJobState;
     exitCode: number | null;
     chunks: { seq: number; text: string }[];
+    wait?: RunnerJobTargetWait;
   } {
     const call = this.calls.get(callId);
     if (
@@ -695,9 +818,10 @@ export class JobRunner {
       throw new Error(RUNNER_NO_SUCH_JOB_CALL);
     }
     return {
-      state: call.state,
+      state: call.phase.state,
       exitCode: call.exitCode,
-      chunks: call.chunks.filter((c) => c.seq > afterSeq)
+      chunks: call.chunks.filter((c) => c.seq > afterSeq),
+      ...phaseWait(call.phase)
     };
   }
 
@@ -718,14 +842,25 @@ export class JobRunner {
     }
   }
 
-  /** Kill what is running; queued calls fail as they come up. */
+  /** Kill what is running; queued calls fail as they come up, and calls
+   *  waiting on a target fail now. */
   destroy(): void {
     this.destroyed = true;
+    this.shutdown.abort();
     for (const call of this.calls.values()) {
       if (call.proc) killTree(call.proc);
     }
   }
 }
+
+/** What the engine uses of a space's jobs: the in-process JobRunner, or the
+ *  ops user's runner seen through the ops socket (.specs/ops-user.md,
+ *  apps/runner/src/ops/link.ts), which mirrors calls so `status` and
+ *  `active` stay synchronous. */
+export type JobsApi = Pick<
+  JobRunner,
+  'list' | 'call' | 'cancel' | 'active' | 'busy' | 'status' | 'destroy'
+>;
 
 /** `branch=main, env=prod` for the audit line: param values are validated,
  *  caller-chosen text and never secret, so they are what makes the line

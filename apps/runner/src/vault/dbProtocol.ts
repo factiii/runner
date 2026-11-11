@@ -34,7 +34,14 @@ export type DriverOp =
 export type DbRequest =
   | { id: number; op: 'batch'; statements: Statement[] }
   | { id: number; op: 'driver'; driver: DriverOp }
+  /** The whole data folder as a gzip tarball (PGlite's dumpDataDir), for
+   *  the sealed Vault to encrypt and write (sealedDb.ts). Answers `value`. */
+  | { id: number; op: 'dump' }
   | { id: number; op: 'close' };
+
+/** The first message to a child started with `--load` (a sealed Vault's
+ *  in-memory database): the dump to start from, or null for a new one. */
+export type DbLoad = { op: 'load'; data: Uint8Array | null };
 
 export type DbReply =
   | { id: number; ok: true; results: unknown[][] }

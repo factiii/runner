@@ -181,6 +181,35 @@ describe('runJob', () => {
     assert.equal(io.stdout, 'row\n');
   });
 
+  it('prints who holds the target while a call waits on it, again only when it moves', async () => {
+    const io = fakeIo();
+    const startedAt = new Date(Date.now() - 4 * 60_000 - 5_000).toISOString();
+    const wait = (position: number) => ({
+      target: 'factiii-server',
+      holder: { job: 'deploy-prod-server', board: 'factiii-board', callerName: 'Jon', startedAt },
+      position
+    });
+    const code = await runJob(
+      scriptedApi([
+        { state: 'waiting-target', exitCode: null, chunks: [], wait: wait(2) },
+        { state: 'waiting-target', exitCode: null, chunks: [], wait: wait(2) },
+        { state: 'waiting-target', exitCode: null, chunks: [], wait: wait(1) },
+        { state: 'running', exitCode: null, chunks: [] },
+        { state: 'done', exitCode: 0, chunks: [] }
+      ]),
+      args,
+      io
+    );
+    assert.equal(code, 0);
+    assert.match(
+      io.stderr,
+      /Waiting: deploy-prod-server on factiii-board, run by Jon, started 4 min ago\. You're #2\.\n/
+    );
+    assert.equal(io.stderr.split("You're #2.").length - 1, 1);
+    assert.equal(io.stderr.split("You're #1.").length - 1, 1);
+    assert.equal(io.stderr.split('waits for factiii-server').length - 1, 1);
+  });
+
   it('exits 77 when the runner owner does not approve a dangerous job call', async () => {
     const io = fakeIo();
     const code = await runJob(

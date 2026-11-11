@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 
 import type {
   BoardAgentAction,
@@ -20,6 +21,10 @@ import {
   vaultAskSchema,
   vaultChatSchema,
   vaultFilesSchema,
+  vaultKeyChangeStartSchema,
+  vaultKeyConfirmSchema,
+  vaultKeySettingsSchema,
+  vaultUnlockSchema,
   vaultMoveSchema,
   RUNNER_VAULT_READ_CHUNK_BYTES,
   RUNNER_VAULT_WRITE_CHUNK_BYTES,
@@ -46,7 +51,10 @@ import {
 } from './engine';
 import { VaultIngest } from './ingest';
 import { FsObjectStore, RUNNER_STORAGE_TICKET_SCHEME, ticketStore } from './objectStore';
+import { openSealedVaultDb } from './sealedDb';
+import { sealPaths } from './sealMigration';
 import { NOT_HERE, RunnerVault, VAULT_ROUTER_UPDATING } from './service';
+import { VAULT_SEALING, VaultKeys } from './vaultKeys';
 import { loadVaultClient, RunnerVaultRouter } from './vaultRouter';
 
 // The Vault as the daemon holds it: one per runner, its database started on
@@ -72,8 +80,31 @@ import { loadVaultClient, RunnerVaultRouter } from './vaultRouter';
 // row tagged with its store. A ticket goes back to the store that signed it.
 // Runner Storage is made by the first file added to it: until then the
 // runner has none, and nothing starts its database.
+//
+// Encryption at rest (.specs/vault.md "Encryption and the Vault key"): once
+// set up, the Vault's database runs in memory from an encrypted dump
+// (sealedDb.ts) and its files are sealed (objectStore.ts `sealKey`), both
+// under the master key VaultKeys holds while unlocked (vaultKeys.ts). While
+// locked every Vault action answers VAULT_LOCKED, and so does a read with no
+// store named, which would read the Vault too; Runner Storage named alone
+// answers as before. Who is let in is cached beside the keys
+// (`members.json`, ids the server already knows), so a locked Vault still
+// knows whom to let link up.
 
 const IDLE_MS = 10 * 60_000;
+
+/** The Vault key's actions, answered locked or not, owner only. */
+const KEY_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>([
+  'vaultKeyStatus',
+  'vaultKeySetupStart',
+  'vaultKeySetup',
+  'vaultUnlock',
+  'vaultLock',
+  'vaultKeySettings',
+  'vaultKeyChangeStart',
+  'vaultKeyChange'
+]);
+const KEYS_OWNER_ONLY = 'Only the owner of this runner manages its Vault key.';
 
 const ASK_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>([
   'vaultAskModels',
@@ -152,8 +183,17 @@ export type DaemonVault = {
    *  runner has no Vault (unpaired, or the part is not added). */
   ingest(): Promise<RunnerVaultIngest | null>;
   /** Stop both stores' database processes (they start again on the next
-   *  call). */
+   *  call); an unlocked Vault is flushed and locked. */
   close(): Promise<void>;
+  /** The Vault's encryption (vaultKeys.ts). */
+  keys: VaultKeys;
+};
+
+export type DaemonVaultOptions = {
+  /** For the tests: the idle lock, in ms. */
+  lockIdleMs?: number;
+  /** For the tests: a light scrypt (vaultKeys.ts `kdf`). */
+  kdf?: { N: number; r: number; p: number };
 };
 
 /** One store as the daemon holds it. */
@@ -164,6 +204,8 @@ type Slot = {
   asker: VaultAsk | null;
   /** Its database process, for `close`. */
   db: { close(): Promise<void> } | null;
+  /** Its files, for dropping sealed uploads on lock. */
+  store?: FsObjectStore;
 };
 
 export function createDaemonVault(
@@ -172,14 +214,105 @@ export function createDaemonVault(
   onMembers: (members: string[]) => void,
   embedder: Embedder,
   engines: AskEngines,
-  categorizeEngines: CategorizeEngines
+  categorizeEngines: CategorizeEngines,
+  options: DaemonVaultOptions = {}
 ): DaemonVault {
   const paths = vaultPaths(runnerDir);
+  const sealed = sealPaths(paths.root);
+  const membersCache = path.join(paths.root, 'members.json');
   let known = new Set<string>();
   let installing: Promise<void> | null = null;
   const slots: Record<RunnerStoreName, Slot> = {
     vault: { name: 'vault', paths: storePaths(runnerDir, 'vault'), vault: null, asker: null, db: null },
     runner: { name: 'runner', paths: storePaths(runnerDir, 'runner'), vault: null, asker: null, db: null }
+  };
+
+  /** Let go of the Vault's database and everything that read it: flushed
+   *  and closed (sealed), before a lock drops the key or setup seals it. */
+  const releaseVault = async () => {
+    const slot = slots.vault;
+    await slot.db?.close();
+    slot.store?.dropUploads();
+    slot.db = null;
+    slot.vault = null;
+    slot.asker = null;
+    slot.store = undefined;
+  };
+
+  /** The plaintext database's counts, to check the sealed copy holds them. */
+  let plainCounts = '';
+  const COUNTS_SQL =
+    'SELECT (SELECT count(*) FROM "Upload")::text AS u, (SELECT count(*) FROM "Post")::text AS p, (SELECT count(*) FROM "SearchVector")::text AS v, (SELECT count(*) FROM "_vault_migrations")::text AS m';
+
+  const keys = new VaultKeys({
+    root: paths.root,
+    idleMs: options.lockIdleMs,
+    kdf: options.kdf,
+    onLock: releaseVault,
+    onUnlock: () => {
+      // Who is let in, and the files left waiting, from the open Vault.
+      void get('vault')
+        .memberIds()
+        .then((members) => {
+          known = members;
+          writeMembersCache(membersCache, [...members]);
+          onMembers([...members]);
+          get('vault').kickIngest();
+        })
+        .catch((err: unknown) => console.error(`[vault] after unlock: ${message(err)}`));
+    },
+    seal: {
+      before: releaseVault,
+      dumpPlain: async () => {
+        if (!fs.existsSync(paths.db)) return null;
+        const db = await openVaultDb({ dataDir: paths.db, engineDir: paths.engine });
+        try {
+          plainCounts = JSON.stringify(await db.query(COUNTS_SQL));
+          return await db.dump();
+        } finally {
+          await db.close();
+        }
+      },
+      verifyDump: async (plain) => {
+        const db = await openVaultDb({ dataDir: 'memory://', engineDir: paths.engine, load: plain });
+        try {
+          const counts = JSON.stringify(await db.query(COUNTS_SQL));
+          if (counts !== plainCounts) {
+            throw new Error('The encrypted copy of the Vault does not hold what the Vault holds. Nothing was changed.');
+          }
+        } finally {
+          await db.close();
+        }
+      }
+    }
+  });
+
+  /** The key actions (vaultKeys.ts), the owner's alone. */
+  const keyAction = async (action: BoardAgentAction, payload: unknown, scope: VouchedScope) => {
+    if (scope.role !== 'owner') throw new Error(KEYS_OWNER_ONLY);
+    switch (action) {
+      case 'vaultKeyStatus':
+        return keys.status();
+      case 'vaultKeySetupStart':
+      case 'vaultKeySetup': {
+        // Refused before a key is shown that could not be used.
+        if (!ownerUserId) throw new Error('This runner is not paired.');
+        if (!engineInstalled(paths.engine)) throw new Error(RUNNER_NO_VAULT);
+        return action === 'vaultKeySetupStart' ? keys.setupStart() : keys.setup(vaultKeyConfirmSchema.parse(payload));
+      }
+      case 'vaultUnlock':
+        return keys.unlock(vaultUnlockSchema.parse(payload));
+      case 'vaultLock':
+        return keys.lock();
+      case 'vaultKeySettings':
+        return keys.settings(vaultKeySettingsSchema.parse(payload).lockIdleMinutes);
+      case 'vaultKeyChangeStart':
+        return keys.changeStart(vaultKeyChangeStartSchema.parse(payload ?? {}));
+      case 'vaultKeyChange':
+        return keys.change(vaultKeyConfirmSchema.parse(payload));
+      default:
+        throw new Error(`Unknown key action ${action}.`);
+    }
   };
 
   /** Put the router's client into the engine folder, once at a time. */
@@ -213,17 +346,31 @@ export function createDaemonVault(
       throw new Error(RUNNER_NO_VAULT);
     }
     const slot = slots[name];
+    // The sealed Vault is not served while locked or being encrypted.
+    const seal = name === 'vault' && keys.sealed();
+    if (name === 'vault' && keys.busy()) throw new Error(VAULT_SEALING);
+    if (seal) keys.key();
     if (!slot.vault) {
       const db = lazyVaultDb(
-        () => openVaultDb({ dataDir: slot.paths.db, engineDir: paths.engine }),
+        seal
+          ? () =>
+              openSealedVaultDb({
+                engineDir: paths.engine,
+                dumpPath: sealed.dump,
+                key: () => keys.key(),
+                onActivity: () => keys.touch()
+              })
+          : () => openVaultDb({ dataDir: slot.paths.db, engineDir: paths.engine }),
         IDLE_MS
       );
       slot.db = db;
       const store = new FsObjectStore(
         slot.paths.objects,
         Date.now,
-        name === 'runner' ? RUNNER_STORAGE_TICKET_SCHEME : undefined
+        name === 'runner' ? RUNNER_STORAGE_TICKET_SCHEME : undefined,
+        seal ? () => keys.key() : undefined
       );
+      slot.store = store;
       let router: RunnerVaultRouter | null = null;
       slot.vault = new RunnerVault(
         db,
@@ -231,6 +378,7 @@ export function createDaemonVault(
         ownerUserId,
         (members) => {
           known = new Set(members);
+          if (name === 'vault') writeMembersCache(membersCache, members);
           onMembers(members);
         },
         new VaultIngest(db, store, embedder),
@@ -246,9 +394,16 @@ export function createDaemonVault(
           );
           return router;
         },
-        // Who is let in is the Vault's to keep; Runner Storage reads it.
+        // Who is let in is the Vault's to keep; Runner Storage reads it,
+        // from the cache while the Vault is locked or being encrypted.
         name === 'runner'
-          ? { storeName: 'runner', members: () => get('vault').memberIds() }
+          ? {
+              storeName: 'runner',
+              members: () =>
+                keys.sealed() && keys.state() !== 'unlocked'
+                  ? Promise.resolve(new Set(known))
+                  : get('vault').memberIds()
+            }
           : { storeName: 'vault' }
       );
     }
@@ -468,7 +623,10 @@ export function createDaemonVault(
         if (!vaultRole(scope, known)) throw new Error(VAULT_REFUSAL);
         return { hits: [], mode: 'absent' } satisfies BoardAgentActionMap['vaultSearch']['result'];
       }
+      if (KEY_ACTIONS.has(action)) return keyAction(action, payload, scope);
       const asked = payloadStore(payload);
+      // Any other call is the Vault's activity, for the idle lock.
+      keys.touch();
       if (ASK_ACTIONS.has(action)) return ask(action, payload, asked, scope);
       switch (action) {
         // A ticket goes back to the store that signed it.
@@ -526,6 +684,11 @@ export function createDaemonVault(
         }
         case 'vaultMove':
           return move(payload, scope);
+        // Viewing data lives in the Vault only, whatever the payload names:
+        // Claude and Codex read Runner Storage, and never this.
+        case 'engagementPush':
+        case 'engagementQuery':
+          return get('vault').handle(action, payload, scope);
         // vaultRpc, Categorize: the store named, else the Vault.
         default:
           return named(asked ?? 'vault').handle(action, payload, scope);
@@ -536,19 +699,49 @@ export function createDaemonVault(
     load: async () => {
       if (!ownerUserId || !engineInstalled(paths.engine)) return;
       if (!fromSource && !routerClientInstalled(paths.engine)) installRouter();
+      if (keys.state() === 'locked') {
+        // Locked: who is let in from the cache; the rest waits for unlock.
+        known = new Set(readMembersCache(membersCache));
+        onMembers([...known]);
+        if (exists('runner')) get('runner').kickIngest();
+        return;
+      }
       known = await get('vault').memberIds();
+      writeMembersCache(membersCache, [...known]);
       onMembers([...known]);
       // Files left PENDING when the runner last stopped, in either store.
       for (const name of present()) get(name).kickIngest();
     },
     ingest: async () => {
       if (!ownerUserId || !engineInstalled(paths.engine)) return null;
+      if (keys.sealed() && keys.state() !== 'unlocked') return null;
       return get('vault').ingestCounts();
     },
     close: async () => {
+      await keys.lock().catch((err: unknown) => console.error(`[vault] lock at close: ${message(err)}`));
       await Promise.all(STORES.map((name) => slots[name].db?.close()));
-    }
+    },
+    keys
   };
+}
+
+/** Who is let in, as the Vault last said: ids only. */
+function readMembersCache(file: string): string[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeMembersCache(file: string, members: string[]): void {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, JSON.stringify(members), { mode: 0o600 });
+  } catch {
+    // Only a cache: the Vault itself holds the list.
+  }
 }
 
 /** A write's or read's ticket, for its store; a bad payload is the store's

@@ -24,7 +24,6 @@ import {
   isReservedUsername,
   RESERVED_USERNAME_MESSAGE,
 } from "./domains/reservedUsernames";
-import { LayoutType } from "./domains/spaces";
 import {
   SHOP_MAX_LINES,
   SHOP_MAX_QUANTITY,
@@ -32,7 +31,11 @@ import {
 } from "./domains/shop";
 import { UserType } from "./domains/user";
 import { WATCH_PROGRESS_MAX_SECONDS } from "./domains/watchProgress";
-import { ALLOWED_CONTENT_TYPES_TUPLE } from "./uploadTypes";
+import {
+  ALLOWED_CONTENT_TYPES_TUPLE,
+  RECORDING_MAX_PARTS,
+  RECORDING_PART_BYTES,
+} from "./uploadTypes";
 
 const usernameValidationRegex = /^[a-zA-Z0-9_]+$/;
 
@@ -292,6 +295,38 @@ export const finalizeUploadSchema = z.object({
 
 // One upload of the caller's, by id (uploads.trimStatus).
 export const uploadIdSchema = z.object({ uploadId: z.string().guid() });
+
+// A screen recording sent in parts while it records
+// (.specs/screen-recording.md → Upload while recording). Created when the
+// take starts, a part signed each time RECORDING_PART_BYTES have gathered,
+// completed at Stop with what is left, aborted on Discard or Restart.
+export const createRecordingUploadSchema = z.object({
+  // mp4 from a browser or the phone's screen capture; QuickTime from the
+  // phone's camera on iOS.
+  contentType: z.enum(["video/mp4", "video/quicktime"]),
+  name: z.string().trim().max(255).optional(),
+});
+
+export const signRecordingPartSchema = z.object({
+  uploadId: z.string().guid(),
+  partNumber: z.number().int().min(1).max(RECORDING_MAX_PARTS),
+  // Exactly RECORDING_PART_BYTES for every part but the last.
+  size: z.number().int().positive().max(RECORDING_PART_BYTES),
+});
+
+export const completeRecordingUploadSchema = z.object({
+  uploadId: z.string().guid(),
+  width: z.number().int().positive().max(25000).optional(),
+  height: z.number().int().positive().max(25000).optional(),
+});
+
+// Pressing Post on a recording sent in parts: the trim and the words are
+// settings until then, so the server cuts the file only now.
+export const prepareRecordingSchema = z.object({
+  uploadId: z.string().guid(),
+  trim: videoTrimSchema.optional(),
+  transcript: mediaTranscriptSchema.optional(),
+});
 
 // Admin storage waiver (.specs/uploads.md → "Admin storage waiver"): the
 // charged uploads of one post, and waiving or un-waiving one of them.
@@ -654,6 +689,35 @@ const baseSchema = {
   boardPageSize: z.number().int().min(1).max(BOARD_PAGE_SIZE_MAX).optional(),
 };
 
+// GET /platform/sitemap/posts. With no hub the whole post sitemap; with one,
+// only the listed posts that hub page shows (a space, a topic's records, a
+// profile), so a hub's crawlable post list is the sitemap narrowed and never a
+// second filter. At most one hub per request.
+export const SITEMAP_POSTS_LIMIT_MAX = 500;
+export const sitemapPostsQuerySchema = z
+  .object({
+    space: z.string().min(1).max(200).optional(),
+    // Comma-separated factiii ids: /f/{slug} aggregates same-slug records.
+    topics: z
+      .string()
+      .regex(/^\d{1,10}(,\d{1,10}){0,99}$/)
+      .transform((ids) => ids.split(",").map(Number))
+      .optional(),
+    user: z.string().min(1).max(200).optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(SITEMAP_POSTS_LIMIT_MAX)
+      .optional(),
+  })
+  .refine(
+    (query) =>
+      [query.space, query.topics, query.user].filter(Boolean).length <= 1,
+    { message: "Pass at most one of space, topics, user" },
+  );
+export type SitemapPostsQuery = z.infer<typeof sitemapPostsQuerySchema>;
+
 export const postFeedInputSchema = z.discriminatedUnion("source", [
   z.object({
     source: z.literal("home"),
@@ -716,14 +780,15 @@ export const postRestoreInputSchema = z.object({
 });
 
 // spaces.my: the spaces the caller is a member of, pinned first, then the
-// last visited. `search` narrows by name or slug; `defaultLayout` keeps only
-// the spaces that open on that layout (the terminal window's board search
-// passes Board). `recent` orders by last visited alone, pins ignored (the
-// launcher's board picker). `cursor` is the last row's `membershipId`.
+// last visited. `search` narrows by name or slug; `hasBoard` keeps only the
+// spaces that have a board (SpaceConfig.hasBoard, whatever view they open
+// on: the terminal window's board search and the routine form pass it).
+// `recent` orders by last visited alone, pins ignored (the launcher's board
+// picker). `cursor` is the last row's `membershipId`.
 export const mySpacesInputSchema = z.object({
   cursor: z.number().optional(),
   search: z.string().optional(),
-  defaultLayout: z.nativeEnum(LayoutType).optional(),
+  hasBoard: z.boolean().optional(),
   recent: z.boolean().optional(),
 });
 
@@ -1106,6 +1171,8 @@ export * from "./validators/embed";
 // The runner's installable parts (factiii-runner parts, Runner > Parts).
 export * from "./validators/runnerParts";
 export * from "./validators/runnerVault";
+export * from "./validators/engagementVault";
+export * from "./validators/vaultKeys";
 // Oakbox > Account > Backend: Factiii, a runner, or both.
 export * from "./validators/oakboxBackend";
 // The IDE git panel's writes (bareGitAct, .specs/ide-git-panel.md).
@@ -1163,6 +1230,11 @@ export type ShopCartInput = z.infer<typeof shopCartSchema>;
 export const shopCheckoutSchema = z.object({
   cart: shopCartSchema,
   address: shippingAddressSchema,
+});
+
+// Admin → Commerce → Shop → Refund: one order Printify cancelled.
+export const shopRefundOrderSchema = z.object({
+  orderId: z.number().int().positive(),
 });
 export * from "./validators/aiConfirmations";
 export * from "./validators/audioRooms";

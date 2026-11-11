@@ -609,3 +609,19 @@ describe('machine health and free up space', () => {
     await assert.rejects(manager.cleanup({ confirm: 'yes' }));
   });
 });
+
+describe('installed outside Factiii', () => {
+  it('a part installed with none of its tools from the runner is someone else\'s, and has no Remove', async () => {
+    const { describePart } = await import('./parts');
+    const terminals = findPart('terminals')!;
+    const installed = { installed: true, missing: [], fixes: [], manual: [] };
+    const outside = describePart(terminals, installed, [], null, null, []);
+    assert.equal(outside.outside, true);
+    assert.ok(!outside.actions.includes('remove'));
+    const ours = describePart(terminals, installed, ['tmux'], null, null, ['tmux']);
+    assert.equal(ours.outside, false);
+    assert.ok(ours.actions.includes('remove'));
+    // Not installed: neither.
+    assert.equal(describePart(terminals, { ...installed, installed: false }, [], null, null, []).outside, false);
+  });
+});

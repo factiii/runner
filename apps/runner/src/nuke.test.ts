@@ -157,7 +157,7 @@ describe('who may nuke', () => {
 
   it('is owner-only on every level and refused on the relay before any check', () => {
     assert.ok(OWNER_ONLY_ACTIONS.has('runnerNuke'));
-    for (const level of ['none', 'api', 'terminals', 'screens'] as const) {
+    for (const level of ['none', 'jobs', 'shell'] as const) {
       assert.equal(actionAllowed(level, 'runnerNuke'), false);
     }
     assert.equal(actionAllowed('owner', 'runnerNuke'), true);

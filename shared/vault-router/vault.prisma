@@ -71,6 +71,21 @@ model Upload {
   // the upload while it is set, so the untrimmed take is never published
   // (.specs/screen-recording.md → Trim).
   trimPendingAt     DateTime?
+  // A screen recording sent in parts while it records (S3 multipart,
+  // .specs/screen-recording.md → Upload while recording): where it is in its
+  // life, moved only by helpers/uploadLifecycle.ts (moveUploadLifecycle),
+  // which refuses a move the table there does not allow. Null on every
+  // upload sent as one PUT, which has no such life.
+  lifecycle         UploadLifecycle?
+  // When `lifecycle` last moved, or a part was last signed while UPLOADING:
+  // the sweep aborts a take whose parts stopped coming hours ago.
+  lifecycleAt       DateTime?
+  // The storage's multipart upload id while UPLOADING; cleared once the
+  // parts are joined into the object (or aborted).
+  multipartId       String?
+  // Set when Post asked for the recording's trim and HLS copy
+  // (uploads.prepareRecording), so a retried Post never cuts the cut file.
+  preparedAt        DateTime?
   // A screen recording's transcript is its post's SPEECH rows (PostContent
   // with this upload's id, .specs/screen-recording.md → Transcript), the same
   // rows and vectors a vault video's words get. Partial: only the first
@@ -104,6 +119,8 @@ model Upload {
   @@index([userId, ontologyAt])
   // The unattached-upload sweep: "which post uploads have waited too long".
   @@index([pendingPostAt])
+  // The stale multipart sweep: "which takes stopped sending parts".
+  @@index([lifecycle, lifecycleAt])
   // The storage sum: "which of this user's uploads count against the quota".
   @@index([userId, chargesStorage])
   @@index([storageWaivedById])
@@ -355,6 +372,14 @@ enum UploadType {
   IMAGE
   VIDEO
   DOCUMENT
+}
+
+enum UploadLifecycle {
+  UPLOADING
+  UPLOADED
+  POSTED
+  DISCARDED
+  FAILED
 }
 
 enum UploadStatus {

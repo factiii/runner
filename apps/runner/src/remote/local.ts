@@ -1,11 +1,11 @@
 import net from 'net';
 
-import type { RunnerJobInfo } from '@shared/all/domains/electron';
+import type { RunnerJobInfo, RunnerJobTargetWait } from '@shared/all/domains/electron';
 
 import { boardLabel } from '../boardRegistry';
 
 import { sessionBoard } from './api';
-import { cancelCommand, EXIT, leftGateApproved, printJobs, reportCancel, type JobIo } from './job';
+import { cancelCommand, EXIT, leftGateApproved, printJobs, reportCancel, targetWaitLine, type JobIo } from './job';
 
 // LOCAL mode for `factiii-runner job`: on the runner itself (a Deploy-button
 // run, a card or terminal session) there is no CLI login, but the session has
@@ -20,7 +20,7 @@ export type LocalBridge = { sock: string; token: string };
 type BridgeMessage =
   | { type: 'jobs'; jobs: RunnerJobInfo[] }
   | { type: 'job-accepted'; callId: string }
-  | { type: 'status'; text: string }
+  | { type: 'status'; text: string; wait?: RunnerJobTargetWait }
   | { type: 'output'; chunk: string }
   | { type: 'exit'; code: number }
   | { type: 'denied' }
@@ -135,6 +135,7 @@ export async function localRunJob(
   let error = '';
   let waitingShown = false;
   let lastStatus: string | null = null;
+  let lastWaitKey = '';
 
   const request = bridgeRequest(
     bridge.sock,
@@ -152,6 +153,13 @@ export async function localRunJob(
             io.err('\nwaiting for approval on your phone\n');
           } else if (leftGateApproved(lastStatus, msg.text)) {
             io.err('approved\n');
+          }
+          if (msg.text === 'waiting-target') {
+            const wait = targetWaitLine(msg.wait, lastWaitKey);
+            if (wait) {
+              lastWaitKey = wait.key;
+              io.err(wait.line);
+            }
           }
           lastStatus = msg.text;
           break;

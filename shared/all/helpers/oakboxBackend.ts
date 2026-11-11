@@ -44,6 +44,9 @@ export type OakboxBackend = {
   aiSource: AiSource;
   /** On RUNNER, the CLI it uses; null lets the runner pick. */
   aiCli: AiCli | null;
+  /** The runner AI features run on, apart from Oakbox's `runnerId`; null is
+   *  that one, else the first online (pickRunner). */
+  aiRunnerId: number | null;
 };
 
 /** An account that never chose. */
@@ -57,7 +60,8 @@ export const DEFAULT_OAKBOX_BACKEND: OakboxBackend = {
   codexEffort: null,
   aiOnRunner: false,
   aiSource: 'TRONS',
-  aiCli: null
+  aiCli: null,
+  aiRunnerId: null
 };
 
 /** A runner as Oakbox's lists carry it (`runners.vaultOnline`). */

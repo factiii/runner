@@ -150,7 +150,7 @@ describe('runner-wide CLI sign-ins', () => {
     for (const action of RUNNER_SIGNIN_ACTIONS) {
       assert.ok(actionAllowed('owner', action));
     }
-    assert.equal(actionAllowed('terminals', 'cliSignins'), false);
+    assert.equal(actionAllowed('shell', 'cliSignins'), false);
     assert.match(RELAY_SIGNIN_REFUSAL, /^RELAY_REFUSES_SECRETS/);
   });
 });

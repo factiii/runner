@@ -81,6 +81,7 @@ function fakeHost(over: Partial<DoctorHost> = {}): DoctorHost {
       if (bin === 'xcode-select') {
         return { code: 0, output: '/Applications/Xcode.app/Contents/Developer\n' };
       }
+      if (bin === 'xcodebuild') return { code: 0, output: '' };
       if (bin === 'xcrun') {
         return { code: 0, output: '{"devices":{"iOS-18":[{"udid":"A"},{"udid":"B"}]}}' };
       }
@@ -190,6 +191,23 @@ describe('the checklist', () => {
     }
     // pmset gave no answer: not known, and never held against the machine.
     assert.equal(state(results, 'power'), 'unknown');
+  });
+
+  it('never calls simctl while Xcode still needs its first-launch setup', async () => {
+    const calls: string[] = [];
+    const base = fakeHost();
+    const host = fakeHost({
+      async run(bin, args) {
+        calls.push(bin);
+        if (bin === 'xcodebuild') return { code: 1, output: '' };
+        return base.run(bin, args);
+      }
+    });
+    const { results } = await runDoctor(buildChecks(host), fakeUi(null), { fix: true });
+    const sim = results.find((r) => r.id === 'simulator');
+    assert.equal(sim?.state, 'unmet');
+    assert.match(sim?.detail ?? '', /finish setting up/);
+    assert.ok(!calls.includes('xcrun'), 'simctl would run xcodebuild -runFirstLaunch, which prompts');
   });
 
   it('leaves the Mac-only items off a Linux host, and says the keychain is beta there', async () => {

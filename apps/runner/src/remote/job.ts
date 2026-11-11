@@ -1,7 +1,10 @@
-import type {
-  RunnerJobInfo,
-  RunnerJobState
+import {
+  isRunnerJobEndState,
+  type RunnerJobInfo,
+  type RunnerJobState,
+  type RunnerJobTargetWait
 } from '@shared/all/domains/electron';
+import { jobTargetWaitLine } from '@shared/all/helpers/board-agent-core/job-targets';
 
 import { ApiError, describeSpace, isNewAddress, PROCEDURES, type Api, type OpenRunner } from './api';
 
@@ -25,7 +28,22 @@ export type JobStatus = {
   state: RunnerJobState;
   exitCode: number | null;
   chunks: { seq: number; text: string }[];
+  /** Who holds the job's target, while 'waiting-target'. */
+  wait?: RunnerJobTargetWait | null;
 };
+
+/** The line for a call waiting on its target, or null when the wait did not
+ *  move since `lastKey` (same holder, same place in line). */
+export function targetWaitLine(
+  wait: RunnerJobTargetWait | null | undefined,
+  lastKey: string,
+  now = Date.now()
+): { key: string; line: string } | null {
+  if (!wait) return null;
+  const key = `${wait.target}|${wait.holder.job}|${wait.holder.board}|${wait.holder.startedAt}|${wait.position}`;
+  if (key === lastKey) return null;
+  return { key, line: `${jobTargetWaitLine(wait, now)}\n` };
+}
 
 export type JobIo = {
   out: (text: string) => void;
@@ -83,10 +101,6 @@ function leftOwnerApproved(prev: string | null, next: string): boolean {
 function ranWithCode(status: Pick<JobStatus, 'exitCode'>): boolean {
   const code = status.exitCode;
   return code !== null && Number.isInteger(code) && code > 0 && code <= 255;
-}
-
-function isTerminal(state: RunnerJobState): boolean {
-  return state === 'done' || state === 'denied' || state === 'failed' || state === 'cancelled';
 }
 
 /** The exact command that cancels a call, for the Ctrl-C message. */
@@ -233,6 +247,8 @@ export async function runJob(
     let lastState: RunnerJobState | null = null;
     // Still held for the runner owner's approval of a dangerous job call.
     let ownerWait = false;
+    // The last wait on a target printed, so a poll repeats it only on a move.
+    let lastWaitKey = '';
     let failures = 0;
 
     for (;;) {
@@ -270,7 +286,7 @@ export async function runJob(
           io.err('approved by the runner owner\n');
         }
         // Kept through the end, so a denial can say whose it was.
-        if (!isTerminal(status.state)) {
+        if (!isRunnerJobEndState(status.state)) {
           ownerWait = status.state === 'waiting-owner';
         }
         if (status.state === 'waiting-owner') {
@@ -284,8 +300,20 @@ export async function runJob(
         }
         lastState = status.state;
       }
+      if (status.state === 'waiting-target') {
+        const wait = targetWaitLine(status.wait, lastWaitKey);
+        if (wait) {
+          if (!lastWaitKey) {
+            io.err(
+              `\n${args.job} waits for ${status.wait?.target ?? 'its target'}: another job that changes it is running on this runner. It starts on its own when that one ends; to give up: ${cancel}\nA runner restart drops the wait: then cancel it and run the job again.\n`
+            );
+          }
+          lastWaitKey = wait.key;
+          io.err(wait.line);
+        }
+      }
 
-      if (isTerminal(status.state)) {
+      if (isRunnerJobEndState(status.state)) {
         const code = exitCodeFor(status);
         if (status.state === 'denied') {
           io.err(

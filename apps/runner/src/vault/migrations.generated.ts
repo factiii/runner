@@ -35,4 +35,8 @@ export const VAULT_MIGRATIONS: { id: string; sql: string }[] = [
     id: "0008_2026-11-06",
     sql: "-- AlterTable\nALTER TABLE \"Upload\" ADD COLUMN     \"transcriptPartial\" BOOLEAN NOT NULL DEFAULT false;\n\n-- AlterTable\nALTER TABLE \"Post\" ADD COLUMN     \"byAi\" BOOLEAN NOT NULL DEFAULT false;\n\n-- AlterTable\nALTER TABLE \"PostContent\" ADD COLUMN     \"uploadId\" TEXT;\n\n-- CreateIndex\nCREATE INDEX \"PostContent_uploadId_idx\" ON \"PostContent\"(\"uploadId\");\n\n-- AddForeignKey\nALTER TABLE \"PostContent\" ADD CONSTRAINT \"PostContent_uploadId_fkey\" FOREIGN KEY (\"uploadId\") REFERENCES \"Upload\"(\"id\") ON DELETE CASCADE ON UPDATE CASCADE;"
   },
+  {
+    id: "0009_2026-11-10",
+    sql: "-- CreateEnum\nCREATE TYPE \"UploadLifecycle\" AS ENUM ('UPLOADING', 'UPLOADED', 'POSTED', 'DISCARDED', 'FAILED');\n\n-- AlterTable\nALTER TABLE \"Upload\" ADD COLUMN     \"lifecycle\" \"UploadLifecycle\",\nADD COLUMN     \"lifecycleAt\" TIMESTAMP(3),\nADD COLUMN     \"multipartId\" TEXT,\nADD COLUMN     \"preparedAt\" TIMESTAMP(3);\n\n-- CreateIndex\nCREATE INDEX \"Upload_lifecycle_lifecycleAt_idx\" ON \"Upload\"(\"lifecycle\", \"lifecycleAt\");"
+  },
 ];

@@ -286,6 +286,13 @@ function tarballEngines(file: string): string {
  * matches the release's .sha256.
  */
 export async function installLatest(): Promise<boolean> {
+  // The runner Factiii Desktop carries (Contents/Resources/runner, on the
+  // app's Electron) updates with the app: npm would install a second runner
+  // beside it that nothing runs.
+  if (process.env.FACTIII_BUNDLED_RUNNER === '1') {
+    console.error('[update] this runner ships inside Factiii Desktop and updates with the app.');
+    return false;
+  }
   // Only ever forward. A release unpublished from npm stays "latest" in the
   // server's cache for up to an hour, so the app offers it while npm's own
   // latest is older: installing then put 0.33.0 runners back on 0.27.0, and

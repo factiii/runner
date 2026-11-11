@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { missingPartMessage } from '@shared/all/helpers/runnerMissingPart';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -68,7 +69,7 @@ export function localAiService(io: LocalAiIo): PartService {
     status,
     async start(onLine) {
       const bin = await io.resolveBin();
-      if (!bin) throw new Error('Ollama is not installed. Add the Local AI part first.');
+      if (!bin) throw new Error(missingPartMessage('local-ai', 'Ollama is not installed on the runner.'));
       if ((await status()).running) {
         throw new Error('Ollama is already running on this machine.');
       }

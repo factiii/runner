@@ -4,9 +4,8 @@ import type { PendingDangerousApproval } from '../../domains/electron';
 
 // The runner owner's yes for one member's call of a dangerous job
 // (.specs/runner-member-access.md "Dangerous jobs"). A job marked `dangerous`
-// in jobs.json (one the owner wants to see each call of); a member the owner
-// has not given the Dangerous jobs permission does not get refused, their
-// call waits here until the OWNER approves that one call. No password: the
+// in jobs.json (one the owner wants to see each call of); a member below the
+// Shell level does not get refused, their call waits here until the OWNER approves that one call. No password: the
 // engine checks that whoever answers is the runner's owner by id. A no, a
 // withdrawn call (cancelled, the space going down) or 10 minutes without an
 // answer all end the call as denied. Nothing approves a later call: each one

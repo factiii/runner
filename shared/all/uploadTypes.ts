@@ -42,6 +42,20 @@ export const RAW_UPLOAD_MAX_BYTES = 100 * 1024 * 1024; // 100MB
  */
 export const PREMIUM_UPLOAD_MAX_BYTES = 2_000_000_000;
 
+/**
+ * The part a screen recording is sent in while it records (S3 multipart,
+ * .specs/screen-recording.md → Upload while recording). R2 wants every part
+ * but the last the same size and at least 5 MiB, so a part is exactly this
+ * and only the last may be smaller. About 20 s of a take at the recorder's
+ * bitrate.
+ */
+export const RECORDING_PART_BYTES = 5 * 1024 * 1024;
+
+/** The most parts a recording can need: PREMIUM_UPLOAD_MAX_BYTES of them. */
+export const RECORDING_MAX_PARTS = Math.ceil(
+  PREMIUM_UPLOAD_MAX_BYTES / RECORDING_PART_BYTES
+);
+
 /** The cap a post upload is held to, by plan. */
 export const postUploadMaxBytes = (isPremium: boolean): number =>
   isPremium ? PREMIUM_UPLOAD_MAX_BYTES : RAW_UPLOAD_MAX_BYTES;

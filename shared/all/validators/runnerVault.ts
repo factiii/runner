@@ -33,6 +33,17 @@ const uploadId = z.string().uuid();
 export const RUNNER_STORES = ['vault', 'runner'] as const;
 export const runnerStoreSchema = z.enum(RUNNER_STORES);
 
+/** The runner's refusal of any engine but Ollama on a request that reads the
+ *  Vault (.specs/vault.md "Which AI reads which store"): Ask, Categorize and
+ *  the turn's MCP server. One string the app matches (`isVaultOllamaOnly`),
+ *  as `AI_NO_CLI_SIGNED_IN` is. */
+export const VAULT_OLLAMA_ONLY =
+  'Your Vault is read by Local AI on this runner only, never by Claude or Codex. They read Runner Storage. Pick a Local AI model to ask about your Vault.';
+
+/** Is this error the runner's Vault refusal? */
+export const isVaultOllamaOnly = (message: string | null | undefined): boolean =>
+  message?.startsWith(VAULT_OLLAMA_ONLY) ?? false;
+
 /** The `store` a payload names, or null for none. A payload whose `store` is
  *  not one of the two is refused, never read as the Vault. */
 export function payloadStore(

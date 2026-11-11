@@ -44,6 +44,7 @@ import { VaultAskTools } from './askTools';
 import type { VaultCategorize } from './categorize';
 import type { VaultDb } from './db';
 import type { Embedder } from './embedder';
+import { VaultEngagement } from './engagement';
 import type { VaultIngest } from './ingest';
 import type { FsObjectStore } from './objectStore';
 import { VaultPosts } from './posts';
@@ -148,6 +149,7 @@ export class RunnerVault {
   private members: Promise<Set<string>> | null = null;
   private chatStore: VaultChats | null = null;
   private postStore: VaultPosts | null = null;
+  private engagementStore: VaultEngagement | null = null;
   private toolStore: VaultAskTools | null = null;
 
   constructor(
@@ -203,6 +205,11 @@ export class RunnerVault {
   /** A file's page and the kept notes (posts.ts). */
   private get posts(): VaultPosts {
     return (this.postStore ??= new VaultPosts(this.db));
+  }
+
+  /** The owner's viewing data from their devices (engagement.ts). */
+  private get engagement(): VaultEngagement {
+    return (this.engagementStore ??= new VaultEngagement(this.db));
   }
 
   /** The ingest's counts over the owner's readers (the owner and whoever
@@ -337,6 +344,11 @@ export class RunnerVault {
         return {
           deleted: await this.posts.deleteNote(vaultNoteDeleteSchema.parse(payload).noteId, Number(caller))
         };
+      // The owner's viewing data (engagement.ts), owner only (access.ts).
+      case 'engagementPush':
+        return this.engagement.push(payload, Number(caller));
+      case 'engagementQuery':
+        return this.engagement.query(payload, Number(caller));
       default:
         throw new Error(`Unknown vault action: ${String(action)}`);
     }

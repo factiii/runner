@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, type ExecFileException, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -49,6 +49,14 @@ import {
 const MAX_OUTPUT = 8 * 1024 * 1024;
 const UTF16_BOM = '﻿';
 
+/** The exit code of a finished execFile: 0 on success, the process's own
+ *  code when it has one, else 1 (a missing binary has a string code, ENOENT). */
+function exitCode(err: ExecFileException | null): number {
+  if (!err) return 0;
+  if (typeof err.code === 'number') return err.code;
+  return 1;
+}
+
 /** Run a command, no shell. Resolves with the code and both streams. With
  *  `timeoutMs`, a command still running then is killed and fails. */
 export function run(
@@ -69,7 +77,7 @@ export function run(
       },
       (err, stdout, stderr) => {
         // A missing binary has a string code (ENOENT); any failure is non-zero.
-        const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
+        const code = exitCode(err);
         resolve({ code, output: `${stdout}${stderr}` });
       }
     );
@@ -209,7 +217,8 @@ export function serviceSpec(): ServiceSpec | null {
     path: servicePath(node, process.env.PATH ?? '', platform, process.argv[1]),
     shell: process.env.SHELL,
     lang: process.env.LANG,
-    toolsDir: process.env[TOOLS_DIR_ENV]?.trim() || undefined
+    toolsDir: process.env[TOOLS_DIR_ENV]?.trim() || undefined,
+    electronNode: process.env.ELECTRON_RUN_AS_NODE === '1'
   };
 }
 

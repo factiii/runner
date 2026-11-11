@@ -84,10 +84,10 @@ describe('board registry', () => {
   });
 
   it('moves a board-keyed entry to the new slug', () => {
-    const grants = { 'old-name': { '5': 'api' }, other: { '6': 'terminals' } };
+    const grants = { 'old-name': { '5': 'jobs' }, other: { '6': 'shell' } };
     assert.deepEqual(rekeyBoard(grants, { from: 'old-name', to: 'new-name' }), {
-      other: { '6': 'terminals' },
-      'new-name': { '5': 'api' }
+      other: { '6': 'shell' },
+      'new-name': { '5': 'jobs' }
     });
     assert.equal(rekeyBoard(grants, { from: 'none', to: 'x' }), grants);
   });

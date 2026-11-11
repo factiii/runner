@@ -16,9 +16,17 @@ import type {
 } from '../helpers/terminal-ai/chatRun';
 import type { ChatTranscript } from '../helpers/terminal-ai/chatTranscript';
 import type {
+  AiPromptInfo,
+  AiPromptInfoPayload,
   AiPromptPayload,
   CliAskSettings
 } from '../validators/oakboxBackend';
+import type {
+  EngagementPush,
+  EngagementPushResult,
+  EngagementQuery,
+  EngagementQueryResult
+} from '../validators/engagementVault';
 import type { BareGitOp } from '../validators/runnerGit';
 import type {
   LocalAiActPayload,
@@ -129,6 +137,16 @@ export type SkillSummary = {
    *  tab, it is read from that folder instead of invoked by name. Absent on
    *  every other skill, and from older runners. */
   onRequest?: boolean;
+};
+
+/** A skill kept on the runner machine outside every folder a CLI lists
+ *  (`~/.claude/skills-archive`), so it never loads into a session: an agent
+ *  reads it only when someone asks. Listed, never edited or run. */
+export type ArchivedSkill = {
+  name: string;
+  description: string;
+  /** Absolute, on the runner host. */
+  dir: string;
 };
 
 export type CardAILogEntry = {
@@ -292,8 +310,8 @@ export type PendingSecretsAuth = {
 };
 
 /** One member's call of a dangerous job that
- *  waits for the runner owner to approve it, because the owner has not given
- *  that member the Dangerous jobs permission. Everything the owner needs to
+ *  waits for the runner owner to approve it, because that member is below
+ *  the Shell level on the board. Everything the owner needs to
  *  decide, in full: the one command line that will run, with every param
  *  filled in. A param is a validated, caller-chosen string, never a secret,
  *  so it may be shown whole (an SQL statement, say). */
@@ -402,9 +420,8 @@ export type RunnerJobInfo = {
   files: string[];
   /** Param name -> the regex its value must match. */
   params: Record<string, string>;
-  /** The owner wants to see each call (jobs.json marks it): a member without
-   *  the owner's Dangerous jobs permission waits for the runner owner to
-   *  approve each call (owner-approval.ts). Absent from an older runner,
+  /** The owner wants to see each call (jobs.json marks it): a member below
+   *  the Shell level waits for the runner owner to approve each call (owner-approval.ts). Absent from an older runner,
    *  which does not gate on it. */
   dangerous?: boolean;
 };
@@ -420,6 +437,11 @@ export type RunnerAttention = {
   /** No unlock window is open. Locked is the store's resting state. */
   secretsLocked: boolean;
   repoConnected: boolean;
+  /** With the ops user on, this board's store is still also under the
+   *  runner's own user (setup copies it, and keeps the old one until it is
+   *  removed): the AI's user can reach that copy. Absent from an older
+   *  runner. */
+  oldSecretsCopy?: boolean;
 };
 
 /** The runner's own always-on service (`factiii-runner service`), as Runner
@@ -478,6 +500,10 @@ export type RunnerPart = {
   memoryNowMb: number | null;
   /** The connector: always there, never removed. */
   core: boolean;
+  /** Installed, but not by the runner: none of its tools is in the
+   *  runner's ledger, so `parts remove` leaves it alone and offers no
+   *  Remove. Absent from an older runner. */
+  outside?: boolean;
   actions: RunnerPartAction[];
   job: RunnerPartJob | null;
 };
@@ -686,6 +712,99 @@ export type DesktopServerStatus = {
 
 /** What a desktop server-mode action did. */
 export type DesktopServerResult = { ok: boolean; message: string };
+
+// "Set up this computer" (.specs/ops-user.md, "Factiii Desktop"): the
+// checklist Factiii Desktop runs in its main process (desktop setup/steps.ts),
+// drawn by the web app's /runners/setup and the desktop's fallback window.
+
+export type DesktopSetupStepState =
+  | 'waiting'
+  | 'working'
+  | 'done'
+  | 'failed'
+  | 'skipped';
+
+/** A fix the page can offer on a failed step. The main process owns what
+ *  each one does; the page only names it. */
+export type DesktopSetupStepActionId = 'move-to-applications';
+
+export type DesktopSetupStepView = {
+  id: string;
+  title: string;
+  state: DesktopSetupStepState;
+  /** One line under the title: what is happening, or what was done. */
+  detail: string | null;
+  /** The failure, exactly as the command or check said it. */
+  error: string | null;
+  /** The collapsed details: each line the step logged. */
+  log: string[];
+  action: { id: DesktopSetupStepActionId; label: string } | null;
+  /** A step the person does (switch to the Factiii account): never run,
+   *  and not waited on for the list to be finished. */
+  manual?: boolean;
+};
+
+export type DesktopSetupMode = 'setup' | 'repair';
+
+/** Where the runner goes, the answer to "Is this the Mac you use every
+ *  day?": `here` in this account, or `account`, a standard macOS account of
+ *  its own made by the same admin prompt. */
+export type DesktopSetupPlace = 'here' | 'account';
+
+export type DesktopSetupView = {
+  mode: DesktopSetupMode;
+  running: boolean;
+  /** Reading which steps this Mac already has, before the first start
+   *  (each such step then reads `done`, "Already done"). Absent from a shell
+   *  older than the check. */
+  checking?: boolean;
+  /** Set up only: the answer, null until asked (desktop keeps it in
+   *  `setup-choice.json`). Absent from an older shell: no question. */
+  place?: DesktopSetupPlace | null;
+  /** The runner's own account, once made: its name, and its password until
+   *  the person says it is saved (shown once, never stored or logged). */
+  account?: { name: string; password: string | null } | null;
+  /** This macOS user (who gets the app and, set up here, the runner), and
+   *  whether it is an admin. Absent from an older shell. */
+  user?: { name: string; admin: boolean };
+  steps: DesktopSetupStepView[];
+};
+
+/** One line of Software > Recommended setup (desktop setup/recommend.ts):
+ *  what is not as it should be on this Mac, and the fix, or the steps when
+ *  it is the person's to do. */
+export type DesktopRecommendation = {
+  id: 'own-account' | 'ops' | 'keep-awake' | 'filevault';
+  title: string;
+  detail: string;
+  /** What the Fix button does; null: steps only. */
+  fix: 'account' | 'repair' | 'keep-awake' | null;
+  steps: string[];
+};
+
+/** Whether this Mac wants the checklist: never set up, or the ops user is on
+ *  and its service does not answer. Null: nothing to do. */
+export type DesktopSetupNeeded = DesktopSetupMode | null;
+
+/** What the nuke's teardown did on this Mac (desktop ipc/setup.ts): the
+ *  ops user's root half behind one admin prompt, then the app's own files. */
+export type DesktopTeardownResult = {
+  ok: boolean;
+  /** The script's lines and what was removed, for the panel. */
+  lines: string[];
+  /** The person backed out of the admin prompt: nothing was removed. */
+  cancelled?: boolean;
+};
+
+/** The page's own actions besides a step's fix (desktop ipc/setup.ts). */
+export type DesktopSetupActionId =
+  | DesktopSetupStepActionId
+  | 'remove-old-copies'
+  | 'open-ops-panel'
+  | 'place-here'
+  | 'place-here-anyway'
+  | 'place-account'
+  | 'account-password-saved';
 
 /** The runner's launchd job as Factiii Desktop last read it
  *  (`launchctl print gui/<uid>/<label>`, desktop helpers/launchd.ts). */
@@ -1016,6 +1135,9 @@ export type RunnerJobState =
   // A member's call of a dangerous job, held until the runner owner
   // approves it; denied on a no or after 10 minutes without an answer.
   | 'waiting-owner'
+  // The job names a `target` (jobs.json) that a job on this or another
+  // board of the runner holds; it starts when the target frees, FIFO.
+  | 'waiting-target'
   | 'waiting-auth'
   | 'running'
   // Server only: the runner got the call but did not confirm it in time, so
@@ -1026,6 +1148,30 @@ export type RunnerJobState =
   | 'denied'
   | 'failed'
   | 'cancelled';
+
+/** The states a call can end in, the one list every runner, server and
+ *  client check reads. A call in one of these never moves again. */
+export const RUNNER_JOB_END_STATES = [
+  'done',
+  'denied',
+  'failed',
+  'cancelled'
+] as const satisfies readonly RunnerJobState[];
+
+export type RunnerJobEndState = (typeof RUNNER_JOB_END_STATES)[number];
+
+/** Whether a state (or any string, e.g. off the wire) is an end state. */
+export function isRunnerJobEndState(state: unknown): state is RunnerJobEndState {
+  return (RUNNER_JOB_END_STATES as readonly unknown[]).includes(state);
+}
+
+/** A call in 'waiting-target': who holds the target and the call's place in
+ *  line (1 = next to start). Names only. */
+export type RunnerJobTargetWait = {
+  target: string;
+  holder: { job: string; board: string; callerName: string; startedAt: string };
+  position: number;
+};
 
 export type SecretsInboxItem = {
   id: string;
@@ -1516,6 +1662,34 @@ export type RunnerVaultStatus = {
   runnerStorage?: { files: number; bytes: number } | null;
 };
 
+/** The Vault's encryption as the runner holds it (.specs/vault.md "Encryption
+ *  and the Vault key"). `plain`: not encrypted yet (a Vault from before step
+ *  4, or one never set up); `locked`: encrypted, its key not in memory;
+ *  `unlocked`: open. */
+export type RunnerVaultKeyState = 'plain' | 'locked' | 'unlocked';
+
+export type RunnerVaultKeyStatus = {
+  state: RunnerVaultKeyState;
+  /** The Vault's own id once encrypted: what a device files a remembered
+   *  Vault key under. */
+  vaultId: string | null;
+  lockIdleMinutes: number;
+  /** When the Vault key was last set (ISO), or null before setup. */
+  keySetAt: string | null;
+  /** Why this Vault cannot be unlocked at all (a key file this runner does
+   *  not read), or null. */
+  problem: string | null;
+};
+
+/** A new Vault key the runner made and holds until it is confirmed (typed
+ *  or filled back): shown once, to save in the password manager. */
+export type RunnerVaultNewKey = {
+  pendingId: string;
+  vaultKey: string;
+  /** ISO. */
+  expiresAt: string;
+};
+
 /** A runner's Categorize run (.specs/runner-vault-ask.md "Categorize on the
  *  runner"), as the app last read it. */
 export type RunnerCategorizeRun = {
@@ -1633,35 +1807,28 @@ export type SimulatorInput = SimulatorCommand & { udid: string };
 
 /** What the owner gives one board member on a runner, lowest first. Each
  *  level includes the ones before it (runner-access.ts). */
-export const RUNNER_ACCESS_LEVELS = [
-  'none',
-  'api',
-  'terminals',
-  'screens'
-] as const;
+export const RUNNER_ACCESS_LEVELS = ['none', 'jobs', 'shell'] as const;
 export type RunnerAccessLevel = (typeof RUNNER_ACCESS_LEVELS)[number];
+
+/** The four levels before 2026-11, as an older runner stores and reports them
+ *  and an older app sends them, mapped to the three that replaced them:
+ *  API to Jobs, Terminals and Screens to Shell (runner-access.ts
+ *  parseAccessLevel). */
+export const LEGACY_RUNNER_ACCESS_LEVELS: Readonly<
+  Record<string, RunnerAccessLevel>
+> = { api: 'jobs', terminals: 'shell', screens: 'shell' };
 
 /** Every level the owner gave: board slug -> user id -> level. A board or a
  *  user that is not listed is at 'none'. Lives on the runner (access.json). */
 export type RunnerGrants = Record<string, Record<string, RunnerAccessLevel>>;
 
-/** Who the owner let run dangerous jobs without
- *  asking: board slug -> the user ids. Kept beside the levels in access.json,
- *  and counts only for a member who also has the API level there. Anyone
- *  else's call waits for the owner's approval, which is what every file from
- *  before it reads as. */
-export type RunnerDangerousGrants = Record<string, string[]>;
-
 /** One board's access as the runner tells it to the asking channel. */
 export type RunnerAccessState = {
-  /** The asker's own level on this board. The owner reads 'screens'. */
+  /** The asker's own level on this board. The owner reads 'shell'. */
   level: RunnerAccessLevel;
   /** User id -> level on this board. Sent to the owner only; a member gets
    *  an empty map and never learns another member's level. */
   grants: Record<string, RunnerAccessLevel>;
-  /** The user ids with the permission on this board. Sent to the owner only,
-   *  like `grants`. */
-  dangerousGrants?: string[];
 };
 
 /** Which part of the product a tool of the environment is for. */
@@ -2035,11 +2202,16 @@ export type BoardAgentActionMap = {
   //            this runner drives sees it.
   //   repo   - committed skills, read at a ref. Edits become a pushed
   //            `skill/*` branch and stay pending until a human merges it.
+  // The list also carries the host's archive (`~/.claude/skills-archive`),
+  // which is no scope: nothing here writes, reads or runs it.
   skillsList: {
     payload: void;
     result: {
       global: SkillSummary[];
       repo: SkillSummary[];
+      /** The host's archived skills. Absent from a runner older than the
+       *  archive, and the tab then shows no Archive group. */
+      archive?: ArchivedSkill[];
       /** Whether `.claude/skills` links to `.agents/skills` in each scope.
        *  Anything but `linked` blocks the skills manager until the user
        *  migrates. */
@@ -2211,6 +2383,13 @@ export type BoardAgentActionMap = {
   };
   /** Re-wrap the age key under a new password (owner only). No secret value
    *  changes; the old password stops working. */
+  /** With the ops user on: delete this board's old store under the runner's
+   *  own user, once the ops user's copy opens with `password`, the proof it
+   *  holds the board's secrets. Owner only, never over the relay. */
+  opsRemoveOldCopy: {
+    payload: { password: string };
+    result: { removed: boolean };
+  };
   secretsChangePassword: {
     payload: { oldPassword: string; newPassword: string };
     result: { success: boolean };
@@ -2221,7 +2400,10 @@ export type BoardAgentActionMap = {
    *  them under `passphrase`. The passphrase alone opens the file. */
   secretsExportBackup: {
     payload: { password: string; passphrase: string };
-    result: { filename: string; bundle: string };
+    /** With the ops user on, the backup stays in the ops home and `bundle`
+     *  is '': `keptOnRunner` names the file there, which Factiii Desktop's
+     *  ops panel copies out ("Save a copy"). Absent: `bundle` is the file. */
+    result: { filename: string; bundle: string; keptOnRunner?: string };
   };
   /** Read a backup file's secrets (owner only, never over the relay). The
    *  runner unseals `bundle` with `passphrase` and answers with the values.
@@ -2257,7 +2439,7 @@ export type BoardAgentActionMap = {
     result: { secrets: string[]; files: string[] };
   };
   /** What this runner gives the members of this board (runner-access.ts):
-   *  one level per member, None, API, Terminals or Screens. Any channel may
+   *  one level per member, None, Jobs or Shell. Any channel may
    *  read its own level (a member's app hides what it cannot use); only the
    *  owner sets one, and a set moves one member on this board. */
   runnerAccessGet: {
@@ -2265,11 +2447,10 @@ export type BoardAgentActionMap = {
     result: RunnerAccessState;
   };
   runnerAccessSet: {
-    /** One change per call: a member's level, or whether they run
-     *  dangerous jobs without the owner's approval per call. */
-    payload:
-      | { userId: string; level: RunnerAccessLevel }
-      | { userId: string; dangerous: boolean };
+    /** One change per call: a member's level. (An older app may still send
+     *  `{ userId, dangerous }`, the permission before 2026-11; a runner
+     *  refuses it.) */
+    payload: { userId: string; level: RunnerAccessLevel };
     result: RunnerAccessState;
   };
   /** What needs the owner on this runner and board (the attention badge).
@@ -2346,6 +2527,8 @@ export type BoardAgentActionMap = {
         state: RunnerJobState;
         actor: { userId: string; name: string };
         startedAt: string;
+        /** Set in 'waiting-target'. Absent from an older runner. */
+        wait?: RunnerJobTargetWait;
       }[];
     };
   };
@@ -2356,6 +2539,8 @@ export type BoardAgentActionMap = {
       state: RunnerJobState;
       exitCode: number | null;
       chunks: { seq: number; text: string }[];
+      /** Set in 'waiting-target'. Absent from an older runner. */
+      wait?: RunnerJobTargetWait;
     };
   };
   /** Read the audit log, newest first (owner only). `chainIntact` covers the
@@ -3318,6 +3503,58 @@ export type BoardAgentActionMap = {
       failed: { uploadId: string; error: string }[];
     };
   };
+  /** The Vault's encryption and its Vault key (.specs/vault.md "Encryption
+   *  and the Vault key"), owner only, never on the relay. Answered locked or
+   *  not; every other vault action on a locked Vault answers VAULT_LOCKED. */
+  vaultKeyStatus: {
+    payload: Record<string, never>;
+    result: RunnerVaultKeyStatus;
+  };
+  /** Turn encryption on, step one: a new Vault key, held by the runner until
+   *  it comes back in `vaultKeySetup`. Nothing is encrypted yet. */
+  vaultKeySetupStart: {
+    payload: Record<string, never>;
+    result: RunnerVaultNewKey;
+  };
+  /** Step two: the key confirmed, the Vault encrypted (in place, if it has
+   *  files) under it. */
+  vaultKeySetup: {
+    payload: { pendingId: string; vaultKey: string };
+    result: RunnerVaultKeyStatus;
+  };
+  vaultUnlock: {
+    payload: { vaultKey: string };
+    result: RunnerVaultKeyStatus;
+  };
+  vaultLock: { payload: Record<string, never>; result: RunnerVaultKeyStatus };
+  vaultKeySettings: {
+    payload: { lockIdleMinutes: number };
+    result: RunnerVaultKeyStatus;
+  };
+  /** Change the Vault key, step one: a new key (the current one needed only
+   *  while locked; giving it also unlocks). */
+  vaultKeyChangeStart: {
+    payload: { vaultKey?: string };
+    result: RunnerVaultNewKey;
+  };
+  /** Step two: the new key confirmed; the master key is wrapped under it
+   *  alone, and the old key stops working. */
+  vaultKeyChange: {
+    payload: { pendingId: string; vaultKey: string };
+    result: RunnerVaultKeyStatus;
+  };
+  /** A device's viewing data into the owner's Vault (.specs/analytics.md
+   *  "The runner's Vault"), owner only, never on the relay: an upsert on
+   *  each row's id, so a re-send is harmless. */
+  engagementPush: {
+    payload: EngagementPush;
+    result: EngagementPushResult;
+  };
+  /** The owner's viewing data from every device, as one view reads it. */
+  engagementQuery: {
+    payload: EngagementQuery;
+    result: EngagementQueryResult;
+  };
   /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
    *  backend: setup, sign-ins, models"): what Ollama holds, the table with its fit, machine health
    *  and the last pull or remove. Owner only, runner-wide, never on the
@@ -3339,6 +3576,14 @@ export type BoardAgentActionMap = {
   aiPrompt: {
     payload: AiPromptPayload;
     result: { text: string; engine: 'claude' | 'codex' | 'ollama' };
+  };
+  /** Which of the runner's engines read images with an `aiPrompt`, so the
+   *  client offers only those for an image feature. A runner from before it
+   *  refuses the action: it reads none. Owner only, runner-wide, never on
+   *  the relay, like `aiPrompt`. */
+  aiPromptInfo: {
+    payload: AiPromptInfoPayload;
+    result: AiPromptInfo;
   };
   /** Search ollama.com from the runner, never from Factiii's server: a
    *  query's models, or one model's tags with whether each fits. */

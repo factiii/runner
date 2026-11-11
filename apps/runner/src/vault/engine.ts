@@ -25,11 +25,14 @@ const VAULT_PRISMA_PACKAGE = '@prisma/client';
 const VAULT_PRISMA_VERSION = '7.10.1';
 export const VAULT_CLIENT_FILE = 'vault-client.js';
 
-type VaultPaths = { engine: string; db: string; objects: string };
+type VaultPaths = { root: string; engine: string; db: string; objects: string };
 
 export function vaultPaths(runnerDir: string): VaultPaths {
   const root = path.join(runnerDir, 'parts', 'vault');
   return {
+    // The keys, the sealed dump and the migration's journal live here
+    // (sealMigration.ts `sealPaths`).
+    root,
     engine: path.join(root, 'engine'),
     db: path.join(root, 'db'),
     objects: path.join(root, 'objects')

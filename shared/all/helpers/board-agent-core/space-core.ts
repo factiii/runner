@@ -6,6 +6,7 @@ import {
   type PendingSecretsAuth,
   type RunnerJobInfo,
   type RunnerJobState,
+  type RunnerJobTargetWait,
   type SecureStoreStatus,
   SETUP_LOG_PREFIX,
   type TerminalDefault
@@ -78,6 +79,7 @@ import {
   secretsSocketPath,
   startSecretsBridge
 } from './secrets-bridge';
+import { OPS_FREE_COMMAND_REFUSED } from './ops-link';
 import { SecretsGate, UNATTRIBUTED } from './secrets-gate';
 import {
   writeClaudeSecretsRules,
@@ -149,6 +151,11 @@ export interface SpaceCoreOptions {
    *  tools (session-hypervisor.ts). Set by the daemon, which holds every
    *  board's engine; absent on desktop, whose MCP has no hypervisor tools. */
   hypervisor?: HypervisorHost;
+  /** Where this board's sessions run, given the host target: the dev VM
+   *  (.specs/dev-vm.md, apps/runner/src/devVm) when the runner turns it on.
+   *  Absent: on this host, as always. What must stay on the host (sign-ins,
+   *  the simulator) asks for `hostTarget()` instead. */
+  sessionTarget?: (host: ExecTarget) => ExecTarget;
 }
 
 /** What the engine lends the bridge so a session on this runner can call
@@ -168,6 +175,7 @@ export type LocalJobs = {
     state: RunnerJobState;
     exitCode: number | null;
     chunks: { seq: number; text: string }[];
+    wait?: RunnerJobTargetWait;
   };
   cancel: (
     callId: string,
@@ -225,6 +233,7 @@ export class SpaceCore {
     this.onGateOpen = options.onGateOpen;
     this.ownerActor = options.ownerActor;
     this.hypervisor = options.hypervisor;
+    this.sessionTargetOf = options.sessionTarget;
     // A window opening releases the jobs queued behind the prompt that opened
     // it, and either edge changes what secretsAuthState reports - so clients
     // refetch on the same signal a prompt change sends.
@@ -238,35 +247,39 @@ export class SpaceCore {
     });
     // A row survives the modal being dismissed, so a command blocked on the
     // owner's password is never invisible; the event drives the modal itself.
-    this.gate.subscribe(() => {
-      const pending = this.gate.pending();
-      if (pending && pending.id !== this.announcedGateId) {
-        this.announcedGateId = pending.id;
-        this.onGateOpen?.(pending);
-      }
-      // One row per REQUEST, not per space: when an answer moves the next
-      // queued request on screen (a job behind an inbox prompt), the old row
-      // is retired and the pending flag drops first, then the new row and
-      // the flag arrive. A client that dedups on id or on an unchanged
-      // `pending: true` would otherwise never notice a new prompt.
-      const shown = this.shownGateId;
-      if (shown && shown !== pending?.id) {
-        this.activity.clear('secrets-auth', shown);
-        this.shownGateId = '';
-        if (pending) this.emitter.emitSecretsAuth({ pending: false });
-      }
-      if (pending) {
-        this.activity.set(
-          'secrets-auth',
-          'awaiting-input',
-          'Needs your store password',
-          `${pending.origin}: ${pending.command}`,
-          pending.id
-        );
-        this.shownGateId = pending.id;
-      }
-      this.emitter.emitSecretsAuth({ pending: pending !== null });
-    });
+    this.gate.subscribe(() => this.publishGate(this.gate.pending()));
+  }
+
+  /** Tell clients and the server about the request on the gate: this space's
+   *  own, or the ops user's (.specs/ops-user.md), whose link calls this on
+   *  each change it reports. */
+  publishGate(pending: PendingSecretsAuth | null): void {
+    if (pending && pending.id !== this.announcedGateId) {
+      this.announcedGateId = pending.id;
+      this.onGateOpen?.(pending);
+    }
+    // One row per REQUEST, not per space: when an answer moves the next
+    // queued request on screen (a job behind an inbox prompt), the old row
+    // is retired and the pending flag drops first, then the new row and
+    // the flag arrive. A client that dedups on id or on an unchanged
+    // `pending: true` would otherwise never notice a new prompt.
+    const shown = this.shownGateId;
+    if (shown && shown !== pending?.id) {
+      this.activity.clear('secrets-auth', shown);
+      this.shownGateId = '';
+      if (pending) this.emitter.emitSecretsAuth({ pending: false });
+    }
+    if (pending) {
+      this.activity.set(
+        'secrets-auth',
+        'awaiting-input',
+        'Needs your store password',
+        `${pending.origin}: ${pending.command}`,
+        pending.id
+      );
+      this.shownGateId = pending.id;
+    }
+    this.emitter.emitSecretsAuth({ pending: pending !== null });
   }
 
   /** The space's authorization gate, and the registry of which sessions may
@@ -285,6 +298,10 @@ export class SpaceCore {
 
   /** The engine's jobs, for the bridge's job ops (see LocalJobs). */
   localJobs: LocalJobs | null = null;
+
+  /** Set by the engine when this board's store lives with the ops user
+   *  (.specs/ops-user.md): `list` answers from there and `run` is refused. */
+  ops: { keyNames: () => Promise<SecretsKeyInfo[]> } | null = null;
 
   /** The session behind a bridge token, or a thrown refusal: only a session
    *  this runner spawned may call a job through the socket. */
@@ -379,6 +396,12 @@ export class SpaceCore {
             status(UNATTRIBUTED);
             return { code: 3, output: '' };
           }
+          // The store is the ops user's: a free command would run there with
+          // all of it in reach. Same "nothing ran" as a refusal above.
+          if (this.ops) {
+            status(OPS_FREE_COMMAND_REFUSED);
+            return { code: 3, output: '' };
+          }
           return authorizeAndRun({
             configDir: spaceKeyDir(spaceDir),
             spaceDir,
@@ -404,7 +427,7 @@ export class SpaceCore {
             sendLog: this.deployLog ?? undefined
           });
         },
-        list: () => this.secretsKeyInfo(),
+        list: () => (this.ops ? this.ops.keyNames() : this.secretsKeyInfo()),
         // `factiii-expose` asks for the runner's access token at the moment
         // it opens a tunnel: frps checks it (routers/frpAuth.ts on the
         // server). Only a session this runner spawned gets it, it is read
@@ -590,9 +613,21 @@ export class SpaceCore {
     );
   }
 
-  /** How this space runs commands. Memoized: spaceDir() creates the tree on
-   *  each call and this is reached for dozens of times per run. */
+  /** How this space runs commands: its sessions' target, which is the host's
+   *  own unless the runner moved sessions into the dev VM (sessionTarget).
+   *  Memoized: the VM's wraps the host's, and both keep state. */
   target(): ExecTarget {
+    this.sessionExecTarget ??= this.sessionTargetOf
+      ? this.sessionTargetOf(this.hostTarget())
+      : this.hostTarget();
+    return this.sessionExecTarget;
+  }
+
+  /** How this space runs commands ON THIS HOST, whatever target() is: for
+   *  what never moves into the dev VM (sign-ins, the simulator). Memoized:
+   *  spaceDir() creates the tree on each call and this is reached for dozens
+   *  of times per run. */
+  hostTarget(): ExecTarget {
     // The codex MCP entry stores the env var NAME, so the token has to be in
     // the environment at run time. Every var here must resolve the same on
     // every call: a spawn freezes what it is handed, and a tmux session keeps
@@ -659,9 +694,11 @@ export class SpaceCore {
   /** The space's persisted creds for one provider, read from its state dir. */
   private async probeLoggedIn(provider: AgentProvider): Promise<boolean> {
     if (this.loggedIn[provider]) return true;
+    // The host's: sign-ins live on this host (the dev VM's sessions are
+    // handed tokens, .specs/dev-vm.md), so a board's signed-in state is here.
     this.loggedIn[provider] = await loginCredentialsExist(
       provider,
-      this.target()
+      this.hostTarget()
     );
     return this.loggedIn[provider] ?? false;
   }
@@ -807,6 +844,8 @@ export class SpaceCore {
   sessionLinks: SessionLinks | null = null;
 
   private execTarget: ExecTarget | null = null;
+  private sessionExecTarget: ExecTarget | null = null;
+  private readonly sessionTargetOf?: (host: ExecTarget) => ExecTarget;
   private ready = false;
   private setupPromise: Promise<void> | null = null;
   /** In-flight git lane, so concurrent callers share one run. The fast path
@@ -1107,7 +1146,8 @@ export class SpaceCore {
     // (no plugin lane) runs it too: take out what an older runner wrote into
     // the person's default homes, where it reached every session they ran:
     // the plugin, the secrets allow rules and the OneDrive MCP entries.
-    await removeDefaultHomeLeftovers((cmd) => this.target().sh(cmd)).catch(
+    // The person's default homes are on this host, whatever target() is.
+    await removeDefaultHomeLeftovers((cmd) => this.hostTarget().sh(cmd)).catch(
       () => false
     );
     const root = this.hasBoardMcp()
@@ -1129,7 +1169,9 @@ export class SpaceCore {
       `codex plugin add ${PLUGIN_ID} >/dev/null 2>&1 || true`
     ].join('; ');
     try {
-      await this.target().sh(cmd);
+      // The runner's CLI homes are on this host. The dev VM gets a copy of
+      // the plugin from them (apps/runner/src/devVm), never a sign-in.
+      await this.hostTarget().sh(cmd);
     } catch {
       // Best-effort, like the MCP lane. Without it the terminal still works;
       // the status dot just falls back to "alive" and the skill is missing.
@@ -1145,7 +1187,8 @@ export class SpaceCore {
    *  Best-effort, like the plugin lane: without it the CLI asks first, or
    *  claude's classifier refuses. */
   private async provisionSecretsRuleLane(): Promise<void> {
-    const target = this.target();
+    // The runner's CLI homes, on this host (see the plugin lane).
+    const target = this.hostTarget();
     try {
       const { claude: claudeDir, codex: codexDir } = cliHomes();
       const { repo, workspace } = target.paths;
@@ -1177,7 +1220,8 @@ export class SpaceCore {
   private async provisionBinLane(): Promise<void> {
     const source = pluginRoot();
     if (!source) return;
-    const { bin } = this.target().paths;
+    // The host's bin: the dev VM sees it read-only, so it is staged here.
+    const { bin } = this.hostTarget().paths;
     for (const name of [SECRETS_BIN, BOARD_MCP_BIN]) {
       const from = path.join(source, 'factiii', 'bin', name);
       const to = path.join(bin, name);
@@ -1217,7 +1261,7 @@ export class SpaceCore {
       `codex mcp remove ${codexMcpName(oneDriveName)} >/dev/null 2>&1 || true`
     ].join('; ');
     try {
-      await this.target().sh(cmd);
+      await this.hostTarget().sh(cmd);
     } catch {
       // Best-effort: a failure just leaves the stale entries to the next ensure.
     }

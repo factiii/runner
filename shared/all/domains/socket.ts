@@ -16,7 +16,9 @@ import type {
   RunnerGrants,
   RunnerHealthAlert,
   RunnerJobInfo,
+  RunnerJobEndState,
   RunnerJobState,
+  RunnerJobTargetWait,
 } from "./electron";
 import type { IcePair } from "./iceLink";
 import type { Post } from "./posts";
@@ -164,17 +166,6 @@ export interface MemberAddedPayload {
   robohash: string | null;
   lastActive: Date | null;
   isActive: boolean;
-}
-
-// Sync room callback responses
-export interface CreateRoomResponse {
-  roomId?: string;
-  error?: string;
-}
-
-export interface JoinRoomResponse {
-  success?: boolean;
-  error?: string;
 }
 
 export type BoardScope = "factiiis" | "posts" | "all";
@@ -422,13 +413,6 @@ export interface ServerToClientEvents {
   postDeleted: (postId: string) => void;
   factiiiReordered: (factiiiId: number, pos: number) => void;
 
-  // WebRTC Device Sync
-  peerJoined: () => void;
-  peerLeft: () => void;
-  syncOffer: (offer: RTCSessionDescriptionInit) => void;
-  syncAnswer: (answer: RTCSessionDescriptionInit) => void;
-  syncIceCandidate: (candidate: RTCIceCandidateInit) => void;
-
   // Scrape Status
   scrapeStatusUpdate: (status: ScrapeStatusUpdate) => void;
 
@@ -660,6 +644,7 @@ type RunnerJobStatus = {
   state: RunnerJobState;
   exitCode: number | null;
   chunks: { seq: number; text: string }[];
+  wait?: RunnerJobTargetWait;
 };
 
 type RunnerSecretSubmit = {
@@ -675,9 +660,9 @@ type RunnerSecretSubmit = {
 type RunnerAuditQuery = BoardAgentActionMap["auditRead"]["payload"];
 type RunnerAuditResult = BoardAgentActionMap["auditRead"]["result"];
 
-/** The states a call can end in. Spelled out rather than extracted from
- *  RunnerJobState so 'cancelled' is checked here whatever electron.ts has. */
-export type RunnerJobEndState = "done" | "denied" | "failed" | "cancelled";
+/** The states a call can end in: defined once beside RunnerJobState in
+ *  electron.ts (RUNNER_JOB_END_STATES) and re-exported here. */
+export type { RunnerJobEndState };
 
 /** Runner -> server: the gate opened on a shared runner and waits for a
  *  password holder. The server turns it into a push to the space's
@@ -790,26 +775,6 @@ export interface ClientToServerEvents {
 
   // Messaging
   typing: (conversationId: string) => void;
-
-  // WebRTC Device Sync
-  createSyncRoom: (callback: (response: CreateRoomResponse) => void) => void;
-  joinSyncRoom: (
-    data: { roomId: string },
-    callback: (response: JoinRoomResponse) => void,
-  ) => void;
-  leaveSyncRoom: (data: { roomId: string }) => void;
-  syncOffer: (data: {
-    roomId: string;
-    offer: RTCSessionDescriptionInit;
-  }) => void;
-  syncAnswer: (data: {
-    roomId: string;
-    answer: RTCSessionDescriptionInit;
-  }) => void;
-  syncIceCandidate: (data: {
-    roomId: string;
-    candidate: RTCIceCandidateInit;
-  }) => void;
 
   // Scrape Updates
   joinScrapeUpdates: () => void;
@@ -984,10 +949,17 @@ export interface ClientToServerEvents {
   }) => void;
   // Runner -> server: a call changed phase before it ended (e.g. it now waits
   // on the secrets gate). The end arrives as `runner:job-end`. A secret
-  // update's submitId counts as a callId here and there.
+  // update's submitId counts as a callId here and there. `wait` comes with
+  // 'waiting-target', again each time the holder or the place in line moves.
   "runner:job-state": (data: {
     callId: string;
-    state: "queued" | "waiting-owner" | "waiting-auth" | "running";
+    state:
+      | "queued"
+      | "waiting-owner"
+      | "waiting-target"
+      | "waiting-auth"
+      | "running";
+    wait?: RunnerJobTargetWait;
   }) => void;
   // Runner -> server: the secrets gate opened on a shared runner. The server
   // pushes the space's approvers, at most once per requestId.
@@ -1000,7 +972,7 @@ export interface ClientToServerEvents {
   // Runner -> server: the level the owner gave each board member (Runner
   // Settings). Sent on connect and on every change. The server keeps the last
   // value per connected runner, shows the runner only to members with a
-  // level, and refuses a non-owner job call early below the API level; the
+  // level, and refuses a non-owner job call early below the Jobs level; the
   // runner enforces all of it too.
   // `vault`: the accounts the owner let into the runner's Vault.
   "runner:access-state": (data: {

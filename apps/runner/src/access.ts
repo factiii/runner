@@ -1,21 +1,23 @@
 import fs from 'fs';
 import path from 'path';
 
-import type {
-  RunnerGrants,
-  RunnerDangerousGrants
-} from '@shared/all/domains/electron';
+import type { RunnerAccessLevel, RunnerGrants } from '@shared/all/domains/electron';
 import {
+  levelAtLeast,
   parseRunnerGrants,
-  parseRunnerDangerousGrants
+  rawUseAllowed
 } from '@shared/all/helpers/board-agent-core/runner-access';
 
 // The level the owner gave each board member (.specs/runner-member-access.md),
 // stored runner-wide in `access.json` as
-// `{ grants: { <board>: { <userId>: level } } }`. Plain JSON, 0600 - they are
-// settings, not secrets. Beside them, `dangerous: { <board>: [userId] }` lists who
-// may run dangerous jobs; a file without it (every file from before the
-// permission) gives it to nobody.
+// `{ owner, grants: { <board>: { <userId>: level } } }`. Plain JSON, 0600 -
+// they are settings, not secrets.
+//
+// Upgrade from the four levels (before 2026-11): a stored api reads as jobs,
+// terminals and screens as shell (parseRunnerGrants), and the `dangerous: {
+// <board>: [userId] }` lists beside them are not read: the Shell level is
+// what runs a dangerous job at once now. The file takes the new shape the
+// next time the owner changes a level; until then it reads the same way.
 //
 // Upgrade: a runner from before the levels has `access.json` with the two old
 // switches, or `shared.json`, or nothing. None of them is converted: each
@@ -46,37 +48,30 @@ export function readRunnerGrants(
   }
 }
 
-/** Who may run dangerous jobs, from the same file and by the same rules:
- *  missing, malformed or another owner's is nobody. */
-export function readRunnerDangerousGrants(
-  configDir: string,
-  ownerUserId: string | null
-): RunnerDangerousGrants {
-  if (!ownerUserId) return {};
-  try {
-    const raw = JSON.parse(
-      fs.readFileSync(path.join(configDir, ACCESS_FILE), 'utf-8')
-    ) as { owner?: unknown } | null;
-    if (raw?.owner !== ownerUserId) return {};
-    return parseRunnerDangerousGrants(raw) ?? {};
-  } catch {
-    return {};
-  }
-}
-
 export function writeRunnerGrants(
   configDir: string,
   ownerUserId: string,
-  grants: RunnerGrants,
-  dangerous: RunnerDangerousGrants = {}
+  grants: RunnerGrants
 ): void {
   fs.mkdirSync(configDir, { recursive: true });
   const file = path.join(configDir, ACCESS_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(
-    tmp,
-    `${JSON.stringify({ owner: ownerUserId, grants, dangerous })}\n`,
-    { mode: 0o600 }
-  );
+  fs.writeFileSync(tmp, `${JSON.stringify({ owner: ownerUserId, grants })}\n`, {
+    mode: 0o600
+  });
   fs.renameSync(tmp, file);
+}
+
+/** What a member loses at once when the owner moves them from `before` to
+ *  `after` on one board (.specs/runner-member-access.md, "Changing a level"):
+ *  below Shell, their terminals and every AI session they started there;
+ *  below Jobs, the simulator's video stream too. */
+export function levelChangeCuts(
+  before: RunnerAccessLevel,
+  after: RunnerAccessLevel
+): { shells: boolean; stream: boolean } {
+  return {
+    shells: levelAtLeast(before, 'shell') && !levelAtLeast(after, 'shell'),
+    stream: rawUseAllowed(before, 'video') && !rawUseAllowed(after, 'video')
+  };
 }

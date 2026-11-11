@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-11-10
+
+Needed by the web and phone apps released the same day: the Vault key and unlock screens, the Dark Patterns screenshot suggestion (`aiPromptInfo`, images on `aiPrompt`), member access None / Jobs / Shell, the runner settings' Accounts / Software / Server tabs and the old-secrets-copy card all call actions only this version answers. Update factiii.com's server before this runner (member levels).
+
+### Added
+
+- **The factiii-ops user owns secrets, jobs and prod SSH** when Factiii Desktop sets it up (one admin prompt); a board's secrets move to it, an old copy left behind is reported (`oldSecretsCopy`) with Remove, and dangerous session jobs wait for the owner.
+- **Deploy jobs that share a target wait for each other across boards** (`target` in jobs.json, waiting-target, first in first out), saying who holds it; only the caller gets the start push.
+- **Dev VM:** a board's sessions can run in a Colima VM, behind an off-by-default setting.
+- **ffmpeg** is an Environment extra, for a preview server's screen-recording trim and HLS copy.
+- **An error a Software part would fix names that part,** so the apps offer its Install button.
+- **The Vault, encrypted at rest, under one Vault key.** A random 256-bit master key per Vault, never on disk in the clear: wrapped once (AES-256-GCM) under a key derived with scrypt (N = 2^17, r = 8, p = 1, salt and cost stored) from the owner's Vault key, a 160-bit key the runner generates at setup (8 groups of 4 Crockford base32 characters) for the owner's password manager. While unlocked the Vault's database runs in memory (PGlite); on disk is only `parts/vault/db.sealed`, an AES-256-GCM dump written atomically 5 s after the last write (at most 60 s), on lock and on shutdown, and skipped when Postgres' WAL position has not moved. Files are sealed in 64 KiB AES-256-GCM segments with sealed sidecars, so a range read opens only its segments. New owner-only actions, refused on the relay: `vaultKeyStatus`, `vaultKeySetupStart` and `vaultKeySetup` (the new key is shown first and must come back before anything is encrypted), `vaultUnlock` (the Vault key), `vaultLock`, `vaultKeySettings` (the idle lock, default 15 minutes), and `vaultKeyChangeStart` and `vaultKeyChange` (a new key, the master key re-wrapped, nothing re-encrypted; the old key stops working). While locked every Vault action answers `VAULT_LOCKED` (result `code: 'VAULT_LOCKED'`); Runner Storage named alone answers as before. An existing plaintext Vault is encrypted in place on setup: staged, verified by decrypting and loading, then put in place and the plaintext overwritten and removed, finished or undone at the next start after a crash. The web and mobile apps' unlock screens need this release.
+- **Images with a Factiii AI prompt.** `aiPrompt` takes optional `images` (PNG, JPEG, WEBP or GIF as base64, at most 2, 5 MB each). Claude reads them inline on its stdin; Codex as `--image` files in the run's own private temp folder, removed after; Ollama in `/api/chat`'s `images`, only on a model that can see (its `/api/show` capabilities, else a known vision name), else it refuses with "This Ollama model cannot read images". The new `aiPromptInfo` action says which engines read them, so the app offers this runner for the Dark Patterns screenshot suggestion. The app keeps a runner from before this off that feature, so it needs this release.
+
+### Changed
+
+- **Keep awake on Windows and Linux too,** not only macOS.
+- **The simulator check asks Xcode whether its first-launch setup is done** before calling simctl, so an Xcode update no longer stacks admin password prompts.
+- **Three member levels: None, Jobs and Shell.** Jobs is what API gave (jobs, their logs, the secrets prompt, encrypted secret updates) plus the simulator; Shell adds terminals, card AI sessions and file writes. A stored or sent `api` reads as Jobs, `terminals` and `screens` as Shell, so nobody's access moves on upgrade, and `access.json` takes the new shape on the owner's next change. Lowering Shell to Jobs closes the member's terminals and keeps the simulator.
+- **No Dangerous jobs permission.** A job marked `dangerous` runs at once for the owner and a member at Shell; a member at Jobs waits for the owner's approval of each call. The old per-member lists are not read, and an app that still sends `{ userId, dangerous }` is told to update. Update factiii.com's server before this runner: an older server reads `jobs` and `shell` as no level.
+
 ## [0.41.0] - 2026-11-09
 
 Needed by the web app released the same day: board Settings > General and the runner's Status > Git read and write the runner-root Git connections (`gitConnections`, `gitConnectionId` and the new-terminal default on `getConfig` / `setConfig`, plus `githubListRepos` / `githubListBranches` on a connection), and session rows show each terminal's Chat or Code kind and worktree, which only this version reports.

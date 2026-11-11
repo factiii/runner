@@ -23,8 +23,10 @@ import {
   serviceIo,
   serviceSpec
 } from './machine';
+import { registerDevVmCommands } from './devVm/cli';
 import { registerMigrateCommands } from './migrate';
 import { registerNukeCommand } from './nukeCli';
+import { registerOpsCommands } from './ops/cli';
 import { registerPartsCommands } from './partsCli';
 import { CONFIG_DIR, safeSlug, spaceDirPath } from './paths';
 import { promptPassword } from './promptPassword';
@@ -112,10 +114,15 @@ program
   .command('connect')
   .description('Pair this runner with a Factiii account via browser approval')
   .option('-s, --server <url>', 'API server URL', 'https://api.factiii.com')
-  .action(async (opts: { server: string }) => {
+  .option('--name <name>', "the runner's name (asked for when left out)")
+  .option('--json', 'Factiii Desktop: JSON lines (approve link, paired, error)')
+  .action(async (opts: { server: string; name?: string; json?: boolean }) => {
+    const say = (line: Record<string, unknown>) =>
+      process.stdout.write(`${JSON.stringify(line)}\n`);
     try {
       const { token, refreshToken, runnerName } = await pairWithBrowser(
-        opts.server
+        opts.server,
+        { name: opts.name, json: opts.json }
       );
       writeRunnerConfig({
         serverUrl: opts.server,
@@ -123,13 +130,16 @@ program
         runnerName,
         ...(refreshToken ? { refreshToken } : {})
       });
+      if (opts.json) {
+        say({ type: 'paired', runnerName });
+        return;
+      }
       console.log(`\nConnected. Config saved to ${CONFIG_DIR}/config.json`);
       console.log('Run "factiii-runner start" to begin accepting jobs.\n');
     } catch (err) {
-      console.error(
-        'Connect failed:',
-        err instanceof Error ? err.message : err
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      if (opts.json) say({ type: 'error', message });
+      else console.error('Connect failed:', message);
       process.exit(1);
     }
   });
@@ -316,9 +326,14 @@ service
 service
   .command('status')
   .description('Show whether the service is installed and running')
-  .action(async () => {
+  .option('--json', 'print it as JSON (Factiii Desktop reads this)')
+  .action(async (opts: { json?: boolean }) => {
     try {
       const status = await serviceStatus(requireServiceSpec(), serviceIo);
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(status)}\n`);
+        return;
+      }
       const installed = {
         yes: `yes (${status.file})`,
         no: 'no',
@@ -459,5 +474,9 @@ registerMigrateCommands(program);
 
 // Laptop CLI for a shared runner: login/logout, job, secret set, audit.
 registerRemoteCommands(program);
+
+// The dev VM's owner controls (.specs/dev-vm.md).
+registerDevVmCommands(program);
+registerOpsCommands(program);
 
 program.parse(process.argv);

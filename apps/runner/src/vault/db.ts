@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { ASK_CHAT_MIGRATIONS } from './askChats';
-import type { DbReply, DbRequest, DriverOp, Statement } from './dbProtocol';
+import type { DbLoad, DbReply, DbRequest, DriverOp, Statement } from './dbProtocol';
+import { ENGAGEMENT_MIGRATIONS } from './engagement';
 import { VAULT_MIGRATIONS } from './migrations.generated';
 
 // The daemon's side of the Vault's database (dbChild.ts). `openVaultDb` starts
@@ -21,6 +22,8 @@ export type VaultDb = {
   close(): Promise<void>;
   /** The database process is still there to answer. */
   alive(): boolean;
+  /** The data folder as a gzip tarball (sealedDb.ts encrypts it). */
+  dump(): Promise<Uint8Array>;
 };
 
 export type VaultDbOptions = {
@@ -28,6 +31,9 @@ export type VaultDbOptions = {
   dataDir: string;
   /** The folder PGlite was installed into (vaultEngine.ts). */
   engineDir: string;
+  /** With `memory://`: start from this dump (a sealed Vault's, decrypted),
+   *  or null for a new database. Absent: a plain database on `dataDir`. */
+  load?: Uint8Array | null;
 };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -51,7 +57,9 @@ export async function openVaultDb(options: VaultDbOptions): Promise<VaultDb> {
   }
   const child: ChildProcess = fork(
     childEntry(),
-    [options.dataDir, options.engineDir],
+    options.load === undefined
+      ? [options.dataDir, options.engineDir]
+      : [options.dataDir, options.engineDir, '--load'],
     {
       // tsx's loader when run from source; then the flag that keeps the
       // database's memory down (dbChild.ts).
@@ -81,6 +89,9 @@ export async function openVaultDb(options: VaultDbOptions): Promise<VaultDb> {
   // 'error' event; unheard, it would take the whole runner down with it.
   child.on('error', (err) => failAll(`The vault database failed: ${err.message}`));
 
+  if (options.load !== undefined) {
+    child.send({ op: 'load', data: options.load } satisfies DbLoad);
+  }
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       child.kill();
@@ -146,7 +157,11 @@ export async function openVaultDb(options: VaultDbOptions): Promise<VaultDb> {
       if (!child.connected) return;
       await send({ op: 'close' }).catch(() => undefined);
     },
-    alive: () => child.connected
+    alive: () => child.connected,
+    dump: async () => {
+      const reply = await send({ op: 'dump' });
+      return 'value' in reply ? (reply.value as Uint8Array) : new Uint8Array(0);
+    }
   };
 
   try {
@@ -160,7 +175,7 @@ export async function openVaultDb(options: VaultDbOptions): Promise<VaultDb> {
 
 /** Run every migration this database has not run, each in one transaction
  *  with its record: the generated ones, then the runner's own tables
- *  (askChats.ts). */
+ *  (askChats.ts, engagement.ts). */
 export async function migrate(db: VaultDb): Promise<string[]> {
   await db.batch([
     {
@@ -173,7 +188,7 @@ export async function migrate(db: VaultDb): Promise<string[]> {
     )
   );
   const ran: string[] = [];
-  for (const migration of [...VAULT_MIGRATIONS, ...ASK_CHAT_MIGRATIONS]) {
+  for (const migration of [...VAULT_MIGRATIONS, ...ASK_CHAT_MIGRATIONS, ...ENGAGEMENT_MIGRATIONS]) {
     if (done.has(migration.id)) continue;
     await db.batch([
       { sql: migration.sql, exec: true },
@@ -267,6 +282,7 @@ export function lazyVaultDb(
       if (closing) await (await closing.db.catch(() => null))?.close();
     },
     alive: () => true,
+    dump: () => use((db) => db.dump()),
     // For the tests: whether a database process is held now.
     isOpen: () => current !== null
   };

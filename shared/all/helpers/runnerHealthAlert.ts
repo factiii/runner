@@ -121,9 +121,9 @@ export function healthAlertLine(
 
 /** What the banner offers to do about it. */
 export const HEALTH_ALERT_HINT =
-  'Open Status, then Free up space, or stop a part you do not use.';
+  'Open the runner, then Free up space, or stop a part you do not use.';
 
 /** The banner's second line for a runner shared with you: its owner is the
  *  one who frees it up (and the only one pushed at critical). */
 export const HEALTH_ALERT_SHARED_HINT =
-  'Shared with you. Its owner can free up space from Status.';
+  'Shared with you. Its owner can free up space from its Overview.';

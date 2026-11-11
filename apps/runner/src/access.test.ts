@@ -4,11 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 
-import {
-  readRunnerGrants,
-  readRunnerDangerousGrants,
-  writeRunnerGrants
-} from './access';
+import { levelChangeCuts, readRunnerGrants, writeRunnerGrants } from './access';
 
 // The member levels on disk: what an upgraded runner reads from the files
 // the two switches left behind, and what a write keeps.
@@ -59,8 +55,8 @@ describe('runner access on disk', () => {
   it('keeps a level per board and user across a write', () => {
     const dir = tmp();
     const grants = {
-      alpha: { '12': 'terminals', '13': 'api' },
-      beta: { '12': 'screens' }
+      alpha: { '12': 'shell', '13': 'jobs' },
+      beta: { '12': 'jobs' }
     } as const;
     writeRunnerGrants(dir, '7', grants);
     assert.deepEqual(readRunnerGrants(dir, '7'), grants);
@@ -70,36 +66,83 @@ describe('runner access on disk', () => {
   it('replaces the old switches on the first grant', () => {
     const dir = tmp();
     put(dir, 'access.json', '{"apiAccess":true,"shareTerminals":true}\n');
-    writeRunnerGrants(dir, '7', { alpha: { '12': 'api' } });
+    writeRunnerGrants(dir, '7', { alpha: { '12': 'jobs' } });
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(dir, 'access.json'), 'utf-8')),
-      { owner: '7', grants: { alpha: { '12': 'api' } }, dangerous: {} }
+      { owner: '7', grants: { alpha: { '12': 'jobs' } } }
     );
   });
 
-  it('keeps the Dangerous jobs permission beside the levels', () => {
+  // Before 2026-11: four levels and a Dangerous jobs list. Read as the three
+  // levels, the list dropped, and written in the new shape on the next save.
+  it('reads a file from the four levels as the three, without its dangerous list', () => {
     const dir = tmp();
-    writeRunnerGrants(dir, '7', { alpha: { '12': 'api' } }, { alpha: ['12'] });
-    assert.deepEqual(readRunnerDangerousGrants(dir, '7'), { alpha: ['12'] });
-    assert.deepEqual(readRunnerGrants(dir, '7'), { alpha: { '12': 'api' } });
-    assert.deepEqual(readRunnerDangerousGrants(dir, '8'), {});
+    put(
+      dir,
+      'access.json',
+      '{"owner":"7","grants":{"alpha":{"12":"api","13":"terminals","14":"screens","15":"root"}},"dangerous":{"alpha":["12"]}}\n'
+    );
+    const grants = readRunnerGrants(dir, '7');
+    assert.deepEqual(grants, { alpha: { '12': 'jobs', '13': 'shell', '14': 'shell' } });
+    writeRunnerGrants(dir, '7', grants);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(dir, 'access.json'), 'utf-8')),
+      { owner: '7', grants: { alpha: { '12': 'jobs', '13': 'shell', '14': 'shell' } } }
+    );
   });
 
-  it('gives the permission to nobody from a file written before it', () => {
-    const dir = tmp();
-    put(dir, 'access.json', '{"owner":"7","grants":{"alpha":{"12":"api"}}}\n');
-    assert.deepEqual(readRunnerGrants(dir, '7'), { alpha: { '12': 'api' } });
-    assert.deepEqual(readRunnerDangerousGrants(dir, '7'), {});
+  it('reads a malformed dangerous list without failing', () => {
+    for (const dangerous of ['true', '"x"', '[1]', '{"alpha":"12"}', 'null']) {
+      const dir = tmp();
+      put(dir, 'access.json', `{"owner":"7","grants":{"alpha":{"12":"jobs"}},"dangerous":${dangerous}}`);
+      assert.deepEqual(readRunnerGrants(dir, '7'), { alpha: { '12': 'jobs' } });
+    }
   });
 
   // A runner paired again to another account keeps its config dir.
   it('gives nothing from a file written for another owner, or with no owner known', () => {
     const dir = tmp();
-    writeRunnerGrants(dir, '7', { alpha: { '12': 'screens' } });
+    writeRunnerGrants(dir, '7', { alpha: { '12': 'shell' } });
     assert.deepEqual(readRunnerGrants(dir, '8'), {});
     assert.deepEqual(readRunnerGrants(dir, null), {});
     assert.deepEqual(readRunnerGrants(dir, ''), {});
-    put(dir, 'access.json', '{"grants":{"alpha":{"12":"screens"}}}');
+    put(dir, 'access.json', '{"grants":{"alpha":{"12":"shell"}}}');
     assert.deepEqual(readRunnerGrants(dir, '7'), {});
+  });
+});
+
+// What setGrant (daemon.ts) cuts at once: below Shell the member's terminals
+// and AI sessions on that board (engine stopMemberSessions), below Jobs the
+// video stream too.
+describe('levelChangeCuts', () => {
+  it('Shell -> Jobs stops their sessions and keeps the stream', () => {
+    assert.deepEqual(levelChangeCuts('shell', 'jobs'), {
+      shells: true,
+      stream: false
+    });
+  });
+
+  it('-> None also takes the stream', () => {
+    assert.deepEqual(levelChangeCuts('shell', 'none'), {
+      shells: true,
+      stream: true
+    });
+    assert.deepEqual(levelChangeCuts('jobs', 'none'), {
+      shells: false,
+      stream: true
+    });
+  });
+
+  it('a raise cuts nothing', () => {
+    for (const [before, after] of [
+      ['none', 'jobs'],
+      ['none', 'shell'],
+      ['jobs', 'shell']
+    ] as const) {
+      assert.deepEqual(levelChangeCuts(before, after), {
+        shells: false,
+        stream: false
+      });
+    }
   });
 });

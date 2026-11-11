@@ -181,7 +181,7 @@ describe('pick, pull and remove', () => {
 
   it('fails a pull that did not finish, and one with no Ollama', async () => {
     await assert.rejects(pullModel(fakeOllama(mac(16), { failPull: true }).io, () => {}), /did not finish/);
-    await assert.rejects(pullModel(fakeOllama(mac(16), { bin: null }).io, () => {}), /Add Local AI first/);
+    await assert.rejects(pullModel(fakeOllama(mac(16), { bin: null }).io, () => {}), /Add the Local AI part in the runner's Software tab/);
   });
 
   it('removes only the models it pulled', async () => {

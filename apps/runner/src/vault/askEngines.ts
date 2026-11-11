@@ -8,6 +8,7 @@ import {
   type SpawnAgentOptions
 } from '@shared/all/helpers/board-agent-core/agent';
 import { type ExecTarget, hostTarget } from '@shared/all/helpers/board-agent-core/exec';
+import type { AskImage } from '@shared/all/domains/electron';
 import { killTree } from '@shared/all/helpers/board-agent-core/host-env';
 import { PROVIDERS } from '@shared/all/helpers/board-agent-core/providers';
 import {
@@ -90,6 +91,56 @@ export async function ollamaTakesTools(
     if (!res.ok) return false;
     const { capabilities } = (await res.json()) as { capabilities?: unknown };
     return Array.isArray(capabilities) && capabilities.includes('tools');
+  } catch {
+    return false;
+  }
+}
+
+/** Ollama vision families, by name, for an Ollama too old to list a
+ *  model's capabilities: a model named like one of these reads images. */
+const KNOWN_VISION_MODELS = [
+  'llava',
+  'bakllava',
+  'llama3.2-vision',
+  'llama4',
+  'qwen2.5vl',
+  'qwen2-vl',
+  'qwen3-vl',
+  'gemma3',
+  'minicpm-v',
+  'moondream',
+  'granite3.2-vision',
+  'mistral-small3.1',
+  'mistral-small3.2'
+];
+
+/** The model's name without its tag or namespace ("library/gemma3:4b" →
+ *  "gemma3"). */
+const ollamaFamily = (model: string) =>
+  (model.split('/').pop() ?? model).split(':')[0]?.toLowerCase() ?? '';
+
+/**
+ * Does `model` read images? Ollama's `/api/show` says so with "vision" in
+ * its capabilities. An Ollama too old to list them is answered by the
+ * model's name (KNOWN_VISION_MODELS); one that does not answer reads as no.
+ */
+export async function ollamaSeesImages(
+  baseUrl: string,
+  model: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<boolean> {
+  if (!model) return false;
+  const byName = KNOWN_VISION_MODELS.includes(ollamaFamily(model));
+  try {
+    const res = await fetchImpl(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
+    if (!res.ok) return false;
+    const { capabilities } = (await res.json()) as { capabilities?: unknown };
+    if (!Array.isArray(capabilities)) return byName;
+    return capabilities.includes('vision');
   } catch {
     return false;
   }
@@ -358,13 +409,19 @@ export async function cliAnswer(
  * and its built-ins disallowed, no MCP server; Codex with approvals `never`,
  * its own tools off, no web search and no MCP server. An empty folder, removed
  * after. `settings` are Account > Backend's model and effort.
+ *
+ * `images` (a screenshot): Claude takes them inline as image blocks on its
+ * stream-json stdin, so no file is written; Codex only takes files
+ * (`--image`), written into that same private folder (mkdtemp, owner-only)
+ * rather than the runner's shared drops folder, and removed with it.
  */
 export async function cliPlainAnswer(
   target: ExecTarget,
   engine: 'claude' | 'codex',
   prompt: string,
   settings?: CliAskSettings,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  images?: AskImage[]
 ): Promise<string> {
   if (!(await isSignedIn(target, engine))) {
     const { label } = PROVIDERS[engine];
@@ -376,9 +433,15 @@ export async function cliPlainAnswer(
   signal?.throwIfAborted();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'factiii-ai-'));
   try {
-    const { proc, result } = await spawnAgent(engine, target, {
+    // Codex's image files land in the run's own folder (spawnAgent writes
+    // them to the target's drops folder).
+    const runTarget: ExecTarget = images?.length
+      ? { ...target, paths: { ...target.paths, drops: cwd } }
+      : target;
+    const { proc, result } = await spawnAgent(engine, runTarget, {
       cwd,
       prompt,
+      ...(images?.length ? { images } : {}),
       allowedTools: '',
       disallowedTools: CLI_DISALLOWED_TOOLS,
       tools: '',
@@ -441,7 +504,11 @@ export function machineAskEngines(): AskEngines & AiPromptEngines {
     },
     cli: (engine, prompt, vault, onText, settings, signal) =>
       cliAnswer(target, engine, prompt, vault, onText, settings, signal),
-    cliPlain: (engine, prompt, settings, signal) =>
-      cliPlainAnswer(target, engine, prompt, settings, signal)
+    cliPlain: (engine, prompt, settings, signal, images) =>
+      cliPlainAnswer(target, engine, prompt, settings, signal, images),
+    ollamaSeesImages: async (model) => {
+      await serve();
+      return ollamaSeesImages(ollamaBaseUrl(), model);
+    }
   };
 }

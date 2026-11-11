@@ -53,10 +53,20 @@ const READING_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>
   'vaultNoteDelete'
 ]);
 
+/** The owner's viewing history and mood, from their own devices
+ *  (engagement.ts): nobody let into the Vault reads or adds to it. */
+const ENGAGEMENT_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>([
+  'engagementPush',
+  'engagementQuery'
+]);
+
 export function vaultActionAllowed(role: VaultRole, action: BoardAgentAction): boolean {
   if (role === 'owner') return true;
   return (
-    action !== 'vaultShareSet' && !CATEGORIZE_ACTIONS.has(action) && !READING_ACTIONS.has(action)
+    action !== 'vaultShareSet' &&
+    !CATEGORIZE_ACTIONS.has(action) &&
+    !READING_ACTIONS.has(action) &&
+    !ENGAGEMENT_ACTIONS.has(action)
   );
 }
 
@@ -64,6 +74,7 @@ export function vaultActionAllowed(role: VaultRole, action: BoardAgentAction): b
 export const vaultOwnerOnly = (action: BoardAgentAction): string => {
   if (CATEGORIZE_ACTIONS.has(action)) return CATEGORIZE_OWNER_ONLY;
   if (READING_ACTIONS.has(action)) return READING_OWNER_ONLY;
+  if (ENGAGEMENT_ACTIONS.has(action)) return ENGAGEMENT_OWNER_ONLY;
   return VAULT_OWNER_ONLY;
 };
 
@@ -71,6 +82,7 @@ export const VAULT_REFUSAL =
   'This vault is not shared with you. Its owner lets people in from their runner.';
 const VAULT_OWNER_ONLY = 'Only the owner of this vault can change who opens it.';
 const CATEGORIZE_OWNER_ONLY = 'Only the owner of this runner categorizes its files.';
+const ENGAGEMENT_OWNER_ONLY = 'Only the owner of this runner keeps their viewing history on it.';
 const READING_OWNER_ONLY =
   'Only the owner of this runner opens its files’ pages and keeps notes on it.';
 
@@ -84,8 +96,9 @@ export const askEngineAllowed = (role: VaultRole, engine: RunnerAskEngine): bool
 export const storeEngineAllowed = (store: RunnerStoreName, engine: RunnerAskEngine): boolean =>
   engine === 'ollama' || store === 'runner';
 
-export const VAULT_OLLAMA_ONLY =
-  'Your Vault is read by Local AI on this runner only, never by Claude or Codex. They read Runner Storage. Pick a Local AI model to ask about your Vault.';
+/** The refusal's words live in shared validators, so the app matches the
+ *  same string the runner throws (`isVaultOllamaOnly`). */
+export { VAULT_OLLAMA_ONLY } from '@shared/all/validators';
 
 export const NO_RUNNER_STORAGE =
   'This runner has no Runner Storage yet, so Claude and Codex have nothing to read. Add files to Runner Storage first.';

@@ -14,6 +14,8 @@ import type { LidBlock, LidHold } from './lidHold';
 // time or until turned off. `-i -s`: no idle sleep, and none on power; `-d`
 // keeps the screen on too. `-w <runner pid>` ends it with the runner, and
 // the state is saved so a restarted runner (an update) takes it back up.
+// Windows and Linux hold the same way with their own helper process (see
+// holderFor); the lid and `pmset` readings below are the Mac's only.
 // Lid closed is beyond caffeinate: that is `pmset disablesleep`, which needs
 // an admin. Factiii Desktop sets it by hand (serverReadiness.ts), and sets
 // up once the grant that lets the runner follow its own hold (`lid`,
@@ -50,8 +52,21 @@ export const LID_BATTERY_HYSTERESIS = 5;
 /** `pmset -g therm`: under thermal pressure (null: cannot tell). */
 export type ThermalReader = () => Promise<boolean | null>;
 
-/** Starts caffeinate with `args`; `onExit` when it ends. Returns a stop. */
-export type Caffeinate = (args: string[], onExit: () => void) => () => void;
+/** Starts a keep-awake helper `command` with `args`; `onExit` when it
+ *  ends, with the error when it could not start (the binary is missing).
+ *  Returns a stop. */
+export type SpawnHolder = (
+  command: string,
+  args: string[],
+  onExit: (error?: Error) => void
+) => () => void;
+
+/** Starts caffeinate with `args`; `onExit` when it ends. Returns a stop.
+ *  The Mac-only form of SpawnHolder, kept for callers that inject it. */
+export type Caffeinate = (
+  args: string[],
+  onExit: (error?: Error) => void
+) => () => void;
 
 /** The runner's work right now, for automatic mode: sessions working and
  *  jobs running. The daemon reads its own session summaries and jobs. */
@@ -93,18 +108,60 @@ const realPower: PowerReader = () =>
   });
 
 /** One platform's way to hold the machine awake. `seconds` null: until
- *  stopped. Returns a stop; `onExit` when it ends by itself. */
+ *  stopped. Returns a stop; `onExit` when it ends by itself (with the error
+ *  when its helper could not start). */
 type Holder = (
   spec: { display: boolean; seconds: number | null },
-  onExit: () => void
+  onExit: (error?: Error) => void
 ) => () => void;
 
-const realCaffeinate: Caffeinate = (args, onExit) => {
-  const child = spawn('caffeinate', args, { stdio: 'ignore' });
-  child.on('exit', onExit);
-  child.on('error', onExit);
-  return () => child.kill();
+const realSpawn: SpawnHolder = (command, args, onExit) => {
+  const child = spawn(command, args, { stdio: 'ignore', windowsHide: true });
+  // A missing binary emits 'error' (and maybe 'exit' too): end once.
+  let ended = false;
+  const end = (error?: Error) => {
+    if (ended) return;
+    ended = true;
+    onExit(error);
+  };
+  child.on('exit', () => end());
+  child.on('error', (error) => end(error));
+  return () => {
+    if (!ended) child.kill();
+  };
 };
+
+/** Windows' SetThreadExecutionState flags. */
+const ES_CONTINUOUS = 0x80000000;
+const ES_SYSTEM_REQUIRED = 0x1;
+const ES_DISPLAY_REQUIRED = 0x2;
+/** Windows' helper: how often it looks for the runner's pid. */
+const WIN_PID_POLL_SECONDS = 5;
+
+/** The PowerShell the Windows helper runs: set the flags on its one thread,
+ *  then stay alive until `seconds` pass (null: forever) or `pid` ends. */
+export function windowsHoldScript(
+  display: boolean,
+  seconds: number | null,
+  pid: number
+): string {
+  // Added, not OR'd: JS's `|` is signed, and 0x80000000 would go negative.
+  const flags =
+    ES_CONTINUOUS + ES_SYSTEM_REQUIRED + (display ? ES_DISPLAY_REQUIRED : 0);
+  const until =
+    seconds === null
+      ? ''
+      : `$end = (Get-Date).AddSeconds(${seconds}); `;
+  const timeUp = seconds === null ? '' : ' -and (Get-Date) -lt $end';
+  return (
+    `$k = Add-Type -Name Power -Namespace FactiiiKeepAwake -PassThru ` +
+    `-MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'; ` +
+    `[void]$k::SetThreadExecutionState([uint32]${flags}); ` +
+    until +
+    `while ((Get-Process -Id ${pid} -ErrorAction SilentlyContinue)${timeUp}) ` +
+    `{ Start-Sleep -Seconds ${WIN_PID_POLL_SECONDS} }`
+  );
+}
 
 const realEvery: Every = (fn, ms) => {
   const timer = setInterval(fn, ms);
@@ -113,29 +170,70 @@ const realEvery: Every = (fn, ms) => {
   return () => clearInterval(timer);
 };
 
-/** The holder for this platform, or null where none is built.
- *  TODO(card "Keep awake: Automatic mode that holds while terminals or jobs
- *  run, then lets the machine sleep"): Windows, SetThreadExecutionState
- *  (ES_CONTINUOUS | ES_SYSTEM_REQUIRED, + ES_DISPLAY_REQUIRED for display)
- *  held by a small helper process the runner spawns and kills, since the
- *  flag lives only as long as the thread that set it; Linux,
- *  `systemd-inhibit --what=idle:sleep --mode=block sleep infinity` (or
- *  `timeout <seconds>`), killed to let go. Each slots in here; the timed
- *  and automatic logic above them is the same. */
+/** The holder for this platform, or null where none is built. Each one is
+ *  a helper process `spawn` starts and the stop kills; it ends by itself
+ *  when its time is up or the runner's pid is gone. The timed and automatic
+ *  logic above them is the same.
+ *  - darwin: `caffeinate -i -s -w <pid>` (+ `-d` for display, `-t <s>`).
+ *  - win32: PowerShell calling kernel32 SetThreadExecutionState
+ *    (ES_CONTINUOUS | ES_SYSTEM_REQUIRED, + ES_DISPLAY_REQUIRED for
+ *    display), then staying alive (windowsHoldScript), since the flag lives
+ *    only as long as the thread that set it.
+ *  - linux: `systemd-inhibit --what=idle:sleep --mode=block` around
+ *    `tail --pid=<pid> -f /dev/null` (ends with the runner, as `-w`), under
+ *    `timeout <s>` when timed. `idle` already covers screen blanking on most
+ *    desktops, so display adds nothing. */
 function holderFor(
   platform: NodeJS.Platform,
-  caffeinate: Caffeinate
+  spawnHolder: SpawnHolder
 ): Holder | null {
-  if (platform !== 'darwin') return null;
-  return ({ display, seconds }, onExit) => {
-    const args = ['-i', '-s', '-w', String(process.pid)];
-    if (display) args.push('-d');
-    if (seconds !== null) args.push('-t', String(seconds));
-    return caffeinate(args, onExit);
-  };
+  const pid = process.pid;
+  if (platform === 'darwin') {
+    return ({ display, seconds }, onExit) => {
+      const args = ['-i', '-s', '-w', String(pid)];
+      if (display) args.push('-d');
+      if (seconds !== null) args.push('-t', String(seconds));
+      return spawnHolder('caffeinate', args, onExit);
+    };
+  }
+  if (platform === 'win32') {
+    return ({ display, seconds }, onExit) =>
+      spawnHolder(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          windowsHoldScript(display, seconds, pid)
+        ],
+        onExit
+      );
+  }
+  if (platform === 'linux') {
+    return ({ seconds }, onExit) => {
+      const wait = ['tail', `--pid=${pid}`, '-f', '/dev/null'];
+      return spawnHolder(
+        'systemd-inhibit',
+        [
+          '--what=idle:sleep',
+          '--mode=block',
+          '--who=factiii-runner',
+          '--why=Factiii Runner keep-awake',
+          ...(seconds === null ? wait : ['timeout', String(seconds), ...wait])
+        ],
+        onExit
+      );
+    };
+  }
+  return null;
 }
 
 export type KeepAwakeOptions = {
+  /** Starts the platform's helper (caffeinate, powershell, systemd-inhibit).
+   *  Tests inject it. */
+  spawn?: SpawnHolder;
+  /** The older, Mac-only injection: used for caffeinate when `spawn` is
+   *  absent. */
   caffeinate?: Caffeinate;
   now?: () => number;
   platform?: NodeJS.Platform;
@@ -153,6 +251,8 @@ export type KeepAwakeOptions = {
   lid?: LidHold;
   /** Read on each look while the lid is held. */
   thermal?: ThermalReader;
+  /** Where it says a helper could not start. Default: console, once. */
+  log?: (line: string) => void;
 };
 
 export class KeepAwake {
@@ -180,6 +280,9 @@ export class KeepAwake {
   private readonly readPower: PowerReader;
   private readonly onSleep: (reason: SleepReason) => void;
   private readonly onWake: () => void;
+  private readonly log: (line: string) => void;
+  /** A helper that could not start is said once, not every tick. */
+  private spawnFailSaid = false;
 
   constructor(
     private file: string,
@@ -192,9 +295,17 @@ export class KeepAwake {
     this.onSleep = options.onSleep ?? (() => {});
     this.onWake = options.onWake ?? (() => {});
     this.readThermal = options.thermal ?? (async () => null);
+    this.log = options.log ?? ((line) => console.log(`[keep-awake] ${line}`));
+    const spawnHolder = options.spawn ?? realSpawn;
+    const { caffeinate } = options;
     this.holder = holderFor(
       options.platform ?? process.platform,
-      options.caffeinate ?? realCaffeinate
+      caffeinate && !options.spawn
+        ? (command, args, onExit) =>
+            command === 'caffeinate'
+              ? caffeinate(args, onExit)
+              : spawnHolder(command, args, onExit)
+        : spawnHolder
     );
     this.lid = this.holder ? (options.lid ?? null) : null;
     // A disablesleep 1 left from a runner that died goes off before the
@@ -231,7 +342,7 @@ export class KeepAwake {
     ac?: boolean;
   }): RunnerKeepAwake {
     if (!this.holder) {
-      throw new Error('Keep-awake runs on a Mac runner.');
+      throw new Error('Keep-awake runs on a Mac, Windows or Linux runner.');
     }
     const { until } = payload;
     if (typeof payload.on !== 'boolean') throw new Error('Say on or off.');
@@ -410,7 +521,8 @@ export class KeepAwake {
     this.wake();
     const seconds =
       next.until === null ? null : Math.ceil((next.until - this.now()) / 1000);
-    const stop = this.holder!({ display: next.display, seconds }, () => {
+    const stop = this.holder!({ display: next.display, seconds }, (error) => {
+      if (error) this.spawnFailed(error);
       // Ended by itself (its time came, or it failed): off. A stop() of
       // ours has already moved on.
       if (this.stopCurrent !== stop) return;
@@ -455,11 +567,13 @@ export class KeepAwake {
     void this.look();
   }
 
-  /** Automatic's and While plugged in's hold. Ending by itself (caffeinate
-   *  died) leaves the mode on: the next tick that wants it takes it again. */
+  /** Automatic's and While plugged in's hold. Ending by itself (the helper
+   *  died, or could not start) leaves the mode on: the next tick that wants
+   *  it takes it again. */
   private hold(display: boolean): void {
     this.wake();
-    const stop = this.holder!({ display, seconds: null }, () => {
+    const stop = this.holder!({ display, seconds: null }, (error) => {
+      if (error) this.spawnFailed(error);
       if (this.stopCurrent !== stop) return;
       this.stopCurrent = null;
       if (this.current.work) {
@@ -473,6 +587,13 @@ export class KeepAwake {
       }
     });
     this.stopCurrent = stop;
+  }
+
+  /** The helper could not start (its binary is missing): said once. */
+  private spawnFailed(error: Error): void {
+    if (this.spawnFailSaid) return;
+    this.spawnFailSaid = true;
+    this.log(`Could not hold the machine awake: ${error.message}`);
   }
 
   private letGo(): void {

@@ -74,7 +74,13 @@ import type { RunnerVault, VaultCaller } from './service';
 // Vault included, and again where their turn would start its MCP server.
 
 type CliEngine = Exclude<RunnerAskEngine, 'ollama'>;
-export type AskMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+export type AskMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  /** Ollama's own field: base64 images the model reads with this message
+   *  (an `aiPrompt` with a screenshot, aiPrompt.ts). */
+  images?: string[];
+};
 
 /** The tools a turn's model may call (askTools.ts): as the models read them,
  *  and what runs one, answering in text as the cloud's tools do. */

@@ -518,9 +518,10 @@ export async function startTmuxSession(opts: {
     }
     argv.push('--', ...opts.argv);
 
-    const mine = await target.spawn(ptyArgv(argv, size), {
-      env: { TERM: 'xterm-256color' }
-    });
+    const ptyEnv = { env: { TERM: 'xterm-256color' } };
+    const mine = target.spawnPty
+      ? await target.spawnPty(argv, size, ptyEnv)
+      : await target.spawn(ptyArgv(argv, size), ptyEnv);
     proc = mine;
     // EPIPE on a dead client is an event, not a throw, and would go uncaught.
     mine.stdin?.on('error', () => {});

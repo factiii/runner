@@ -9,6 +9,18 @@ import type {
   VaultPresignedUpload
 } from '@shared/all/domains/vaultStore';
 
+import {
+  BLOB_KIND,
+  openBlob,
+  openSealedFile,
+  readSealedRange,
+  SealedFileWriter,
+  sealBlob,
+  sealFile,
+  streamPlainSize,
+  VaultCryptoError
+} from './crypto';
+
 // The Vault's file store: the R2 verbs (shared/all/domains/vaultStore.ts) on
 // the runner's own disk, `<runner dir>/vault/objects`.
 //
@@ -22,6 +34,15 @@ import type {
 // the process starts and never written down. A device redeems it over its
 // direct link (`vaultWrite`, `vaultRead`); nothing listens on a port. A
 // restart voids every ticket, as a presign's expiry would.
+//
+// Sealed (the encrypted Vault, .specs/vault.md "Encryption and the Vault key"):
+// with a `sealKey`, every object is written in crypto.ts's sealed-file format
+// (AES-256-GCM in 64 KiB segments, so a range opens only its segments) and
+// every sidecar is a sealed blob, so neither a file's bytes nor its name and
+// type are on disk in the clear. An upload is sealed as its ranges arrive:
+// the `.part` holds ciphertext only, its tail kept in memory between ranges
+// (a restart voids the ticket anyway). Runner Storage has no key and stays
+// as it was.
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -53,13 +74,33 @@ const unb64url = (text: string) => Buffer.from(text, 'base64url').toString();
 
 export class FsObjectStore implements VaultObjectStore {
   private readonly secret = randomBytes(32);
+  /** Sealed uploads in progress, by their part file. */
+  private readonly writers = new Map<string, SealedFileWriter>();
 
   constructor(
     private readonly root: string,
     private readonly now: () => number = Date.now,
     /** The tickets' scheme: the Vault's, or Runner Storage's. */
-    private readonly scheme: string = TICKET_SCHEME
+    private readonly scheme: string = TICKET_SCHEME,
+    /** The master key for a sealed store (or a throw while it is locked);
+     *  none stores plaintext. */
+    private readonly sealKey?: () => Buffer
   ) {}
+
+  /** A sidecar's JSON, opened if sealed. */
+  private parseMeta(bytes: Buffer): Meta {
+    const raw = this.sealKey ? openBlob(this.sealKey(), BLOB_KIND.meta, bytes) : bytes;
+    return JSON.parse(raw.toString('utf-8')) as Meta;
+  }
+
+  private writeMeta(key: string, meta: Meta): void {
+    const json = Buffer.from(JSON.stringify(meta));
+    fs.writeFileSync(
+      `${this.file(key)}.json`,
+      this.sealKey ? sealBlob(this.sealKey(), BLOB_KIND.meta, json) : json,
+      { mode: FILE_MODE }
+    );
+  }
 
   private file(key: string): string {
     return path.join(this.root, createHash('sha256').update(key).digest('hex'));
@@ -70,10 +111,19 @@ export class FsObjectStore implements VaultObjectStore {
   }
 
   private readMeta(key: string): Meta | null {
+    let bytes: Buffer;
     try {
-      const meta = JSON.parse(fs.readFileSync(`${this.file(key)}.json`, 'utf-8')) as Meta;
-      return meta.key === key && fs.existsSync(this.file(key)) ? meta : null;
+      bytes = fs.readFileSync(`${this.file(key)}.json`);
     } catch {
+      return null;
+    }
+    try {
+      const meta = this.parseMeta(bytes);
+      return meta.key === key && fs.existsSync(this.file(key)) ? meta : null;
+    } catch (err) {
+      // A sealed sidecar that does not open was changed, or the key is
+      // wrong: said, never read as a missing file. A locked key throws too.
+      if (err instanceof VaultCryptoError || this.sealKey) throw err;
       return null;
     }
   }
@@ -106,20 +156,54 @@ export class FsObjectStore implements VaultObjectStore {
       lastModified: new Date(this.now()).toISOString()
     };
     fs.renameSync(part, this.file(key));
-    fs.writeFileSync(`${this.file(key)}.json`, JSON.stringify(meta), { mode: FILE_MODE });
+    this.writeMeta(key, meta);
+    return this.toHead(meta);
+  }
+
+  /** Move a finished sealed part into place, with the size and hash its
+   *  writer counted. */
+  private commitSealed(
+    key: string,
+    part: string,
+    contentType: string,
+    sealed: { size: number; sha256: string }
+  ): VaultObjectHead {
+    const meta: Meta = {
+      key,
+      size: sealed.size,
+      contentType,
+      sha256: sealed.sha256,
+      lastModified: new Date(this.now()).toISOString()
+    };
+    fs.renameSync(part, this.file(key));
+    this.writeMeta(key, meta);
     return this.toHead(meta);
   }
 
   async put(key: string, bytes: Uint8Array, contentType: string): Promise<VaultObjectHead> {
     this.ensureRoot();
     const part = `${this.file(key)}.part`;
+    if (this.sealKey) {
+      return this.commitSealed(key, part, contentType, sealFile(this.sealKey(), part, bytes));
+    }
     fs.writeFileSync(part, bytes, { mode: FILE_MODE });
     return this.commit(key, part, contentType);
   }
 
   async get(key: string): Promise<Uint8Array> {
-    if (!this.readMeta(key)) throw new Error(`Object ${key} not found`);
+    const meta = this.readMeta(key);
+    if (!meta) throw new Error(`Object ${key} not found`);
+    if (this.sealKey) return this.checkedSealed(meta, () => openSealedFile(this.sealKey!(), this.file(key)));
     return fs.readFileSync(this.file(key));
+  }
+
+  /** A sealed object whose length is not the size its sidecar signs for
+   *  was cut or padded: refused, never read short. */
+  private checkedSealed(meta: Meta, read: () => Buffer): Buffer {
+    if (streamPlainSize(fs.statSync(this.file(meta.key)).size) !== meta.size) {
+      throw new VaultCryptoError();
+    }
+    return read();
   }
 
   async getRange(key: string, offset: number, length: number): Promise<Uint8Array> {
@@ -127,6 +211,11 @@ export class FsObjectStore implements VaultObjectStore {
     if (!meta) throw new Error(`Object ${key} not found`);
     if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0) {
       throw new Error('Bad range.');
+    }
+    if (this.sealKey) {
+      return this.checkedSealed(meta, () =>
+        readSealedRange(this.sealKey!(), this.file(key), offset, length)
+      );
     }
     const end = Math.min(meta.size, offset + length);
     const buffer = Buffer.alloc(Math.max(0, end - offset));
@@ -146,22 +235,27 @@ export class FsObjectStore implements VaultObjectStore {
   }
 
   async list(prefix: string): Promise<VaultObjectListing[]> {
+    // Locked: said, not answered as an empty store.
+    this.sealKey?.();
     if (!fs.existsSync(this.root)) return [];
     const out: VaultObjectListing[] = [];
     for (const name of fs.readdirSync(this.root)) {
       if (!name.endsWith('.json')) continue;
       try {
-        const meta = JSON.parse(fs.readFileSync(path.join(this.root, name), 'utf-8')) as Meta;
+        const meta = this.parseMeta(fs.readFileSync(path.join(this.root, name)));
         if (!meta.key.startsWith(prefix)) continue;
         out.push({ key: meta.key, size: meta.size, lastModified: new Date(meta.lastModified) });
       } catch {
-        // A sidecar cut short by a crash names nothing.
+        // A sidecar cut short by a crash names nothing; a sealed one that
+        // does not open is left out too (a read of it by key says why).
       }
     }
     return out.sort((a, b) => a.key.localeCompare(b.key));
   }
 
   async delete(key: string): Promise<boolean> {
+    this.writers.get(`${this.file(key)}.part`)?.close();
+    this.writers.delete(`${this.file(key)}.part`);
     try {
       for (const file of [this.file(key), `${this.file(key)}.json`, `${this.file(key)}.part`]) {
         fs.rmSync(file, { force: true });
@@ -270,6 +364,7 @@ export class FsObjectStore implements VaultObjectStore {
     if (ticket.op !== 'put') throw new Error('This file link is not for writing.');
     if (!mayWrite(ticket.key)) throw new Error('This file link is not yours.');
     const part = `${this.file(ticket.key)}.part`;
+    if (this.sealKey) return this.writeSealed(ticket, part, offset, bytes, last);
     const drop = (message: string): never => {
       fs.rmSync(part, { force: true });
       throw new Error(message);
@@ -291,6 +386,51 @@ export class FsObjectStore implements VaultObjectStore {
       received,
       head: this.commit(ticket.key, part, ticket.contentType)
     };
+  }
+
+  /** `writeSigned` into a sealed store: the same rules, the bytes sealed
+   *  as they come. */
+  private writeSealed(
+    ticket: Ticket & { op: 'put' },
+    part: string,
+    offset: number,
+    bytes: Uint8Array,
+    last: boolean
+  ): { key: string; received: number; head: VaultObjectHead | null } {
+    const drop = (message: string): never => {
+      this.writers.get(part)?.close();
+      this.writers.delete(part);
+      fs.rmSync(part, { force: true });
+      throw new Error(message);
+    };
+    if (offset === 0) {
+      if (this.now() > ticket.expires) throw new Error('This file link has expired.');
+      this.ensureRoot();
+      this.writers.get(part)?.close();
+      this.writers.set(part, new SealedFileWriter(this.sealKey!(), part));
+    }
+    const writer = this.writers.get(part);
+    if (!writer || writer.received !== offset) return drop('The upload lost its place. Start it again.');
+    if (offset + bytes.length > ticket.size) drop('The upload is bigger than it said.');
+    writer.write(bytes);
+    const received = writer.received;
+    if (!last) return { key: ticket.key, received, head: null };
+    if (received !== ticket.size) drop('The upload is smaller than it said.');
+    this.writers.delete(part);
+    return {
+      key: ticket.key,
+      received,
+      head: this.commitSealed(ticket.key, part, ticket.contentType, writer.finish())
+    };
+  }
+
+  /** Drop every sealed upload in progress (the Vault is locking). */
+  dropUploads(): void {
+    for (const [part, writer] of this.writers) {
+      writer.close();
+      fs.rmSync(part, { force: true });
+    }
+    this.writers.clear();
   }
 
   /** One range of the object a signed read names. */

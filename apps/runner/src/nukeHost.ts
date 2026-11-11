@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import type { RunnerAck } from '@shared/all/domains/socket';
@@ -9,6 +10,8 @@ import { LID_GRANT_FILE, lidPmsetArgs, SUDO_BIN } from '@shared/all/helpers/lidG
 import { io as connectSocket } from 'socket.io-client';
 
 import { readRunnerConfig } from './config';
+import { defaultOpsHome, readOpsSettings } from './ops/settings';
+import { appBundleOf, opsTeardownLeftBehind } from './ops/teardown';
 import { serviceIo, serviceSpec } from './machine';
 import type { NukeHost } from './nuke';
 import { removeService, serviceStatus } from './service';
@@ -233,8 +236,27 @@ export function machineNukeHost(opts: {
         exec: opts.exec
       }),
     releaseLid: () => releaseLidGrant({ platform: process.platform, exec: opts.exec }),
-    leftBehind: async () => lidGrantLeftBehind({ platform: process.platform })
+    leftBehind: async () => [
+      ...lidGrantLeftBehind({ platform: process.platform }),
+      ...opsLeftBehind(opts.dir)
+    ]
   };
+}
+
+/** With the ops user on: the root half setup made, for the teardown
+ *  (ops/teardown.ts). Off, or off macOS and Linux: nothing. */
+function opsLeftBehind(dir: string): string[] {
+  const settings = readOpsSettings(dir);
+  if (!settings.enabled) return [];
+  const desktop = process.env.FACTIII_BUNDLED_RUNNER === '1';
+  return opsTeardownLeftBehind({
+    platform: process.platform,
+    user: os.userInfo().username,
+    opsHome: defaultOpsHome(),
+    runDir: settings.runDir,
+    app: process.platform === 'darwin' ? (appBundleOf(process.execPath) ?? undefined) : undefined,
+    desktop
+  });
 }
 
 /** Unpair with the runner's own config, read from the folder; nothing to do

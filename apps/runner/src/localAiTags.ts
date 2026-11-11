@@ -9,6 +9,7 @@ import type {
 import { fitModelSize, type LocalAiMachine } from '@shared/all/helpers/localAiModels';
 import { ollamaTagKey, ollamaTitle } from '@shared/all/helpers/oakboxBackend';
 import { localAiActSchema, localAiSearchSchema } from '@shared/all/validators';
+import { missingPartMessage } from '@shared/all/helpers/runnerMissingPart';
 
 import { forgetPulledModel, type LocalAiModelIo, localAiState } from './localAiModel';
 import { checkRoom, DISK_CRITICAL_GB } from './machineHealth';
@@ -121,7 +122,7 @@ export class LocalAiTags {
     };
     busy();
     const bin = await this.io.model.resolveBin();
-    if (!bin) throw new Error('Ollama is not installed. Add Local AI first.');
+    if (!bin) throw new Error(missingPartMessage('local-ai', 'Ollama is not installed on the runner.'));
     const held = this.io.installed().map(ollamaTagKey).includes(ollamaTagKey(tag));
     if (action === 'remove' && !held) throw new Error(`${ollamaTitle(tag)} is not on this runner.`);
     if (action === 'pull') {

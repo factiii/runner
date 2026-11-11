@@ -1,6 +1,6 @@
 {
   "name": "@factiii/runner",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "Factiii Runner, run Board AI agents on a machine you control. Pairs with the Factiii web/mobile clients over WebRTC.",
   "license": "ISC",
   "homepage": "https://factiii.com",

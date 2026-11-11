@@ -200,7 +200,8 @@ describe('lazyVaultDb', () => {
       close: async () => {
         closes += 1;
       },
-      alive: () => opens === 1
+      alive: () => opens === 1,
+      dump: async () => new Uint8Array(0)
     };
     const lazy = lazyVaultDb(async () => {
       opens += 1;
@@ -233,7 +234,8 @@ describe('lazyVaultDb', () => {
         close: async () => {
           life.alive = false;
         },
-        alive: () => life.alive
+        alive: () => life.alive,
+        dump: async () => new Uint8Array(0)
       };
     };
     return { made, openFake };

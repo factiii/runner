@@ -101,7 +101,7 @@ export function registerRemoteCommands(program: Command): void {
 
   program
     .command('runners')
-    .description('List the runners open to you on a space: yours, and the ones whose owner gave you API access')
+    .description('List the runners open to you on a space: yours, and the ones whose owner gave you the Jobs level')
     .option('--space <slug>', SPACE_HELP)
     .option('-s, --server <url>', SERVER_HELP)
     .action((opts: { space?: string; server?: string }) =>

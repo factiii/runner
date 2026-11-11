@@ -2,11 +2,9 @@ import {
   type AgentState,
   type BoardAgentActionMap,
   type CardAISessionSummary,
-  RUNNER_ACCESS_LEVELS,
   type RunnerAccessLevel,
   type RunnerAccessState,
-  type RunnerGrants,
-  type RunnerDangerousGrants
+  type RunnerGrants
 } from '@shared/all/domains/electron';
 import type {
   ClientToServerEvents,
@@ -34,8 +32,8 @@ import {
   grantedLevel,
   levelAtLeast,
   ownerIdFromRunnerToken,
+  parseKnownAccessLevel,
   parseVouchedScope,
-  dangerousGranted,
   rawUseAllowed,
   RELAY_REFUSES_SECRETS,
   type RelayedCall,
@@ -47,9 +45,9 @@ import {
   RELAY_SIGNIN_REFUSAL,
   RUNNER_SIGNIN_ACTIONS,
   refusal,
+  runsDangerousJobs,
   type VouchedScope,
-  withGrant,
-  withDangerousGrant
+  withGrant
 } from '@shared/all/helpers/board-agent-core/runner-access';
 import {
   decideScreenUse,
@@ -62,11 +60,13 @@ import {
   makeChunkReassembler
 } from '@shared/all/helpers/wireChunk';
 import {
+  isVaultLocked,
   keepAwakeSetSchema,
   routineDueFrameSchema,
   RUNNER_NO_SUCH_JOB_CALL,
   RUNNER_SLEEP_MAX_SESSIONS,
-  type RunnerSleepSnapshot
+  type RunnerSleepSnapshot,
+  VAULT_LOCKED_CODE
 } from '@shared/all/validators';
 import { randomBytes } from 'crypto';
 import fs from 'fs';
@@ -110,8 +110,8 @@ import {
   writeRunnerConfig
 } from './config';
 import {
+  levelChangeCuts,
   readRunnerGrants,
-  readRunnerDangerousGrants,
   writeRunnerGrants
 } from './access';
 import { boardLabel, describeBoard, knownBoards, noteBoard, rekeyBoard } from './boardRegistry';
@@ -121,6 +121,8 @@ import { keepLogLimited } from './logLimit';
 import { machineNukeHost, stopTmuxSessionsIn, unpairOverSocket } from './nukeHost';
 import { watchProcessCount } from './processWatch';
 import { watchMachineHealth } from './healthWatch';
+import { daemonDevVm } from './devVm';
+import { daemonOps } from './ops';
 import { KeepAwake } from './keepAwake';
 import { LidHold, readThermal } from './lidHold';
 import { run } from './machine';
@@ -152,7 +154,7 @@ import {
   reconcileGitConnections
 } from './gitConnections';
 import { createLocalAiTags, createPartsManager } from './runnerParts';
-import { type AiPromptEngines, answerAiPrompt } from './vault/aiPrompt';
+import { type AiPromptEngines, aiPromptInfo, answerAiPrompt } from './vault/aiPrompt';
 import { machineAskEngines } from './vault/askEngines';
 import { machineCategorizeEngines } from './vault/categorizeEngine';
 import { createDaemonVault, type DaemonVault } from './vault/daemonVault';
@@ -483,21 +485,12 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   // runner-access.ts). The server never sets one. Every check reads this at
   // the moment of use, so a change counts for the member's next message.
   let grants: RunnerGrants = readRunnerGrants(CONFIG_DIR, ownerUserId);
-  // Who runs dangerous jobs without the owner's approval per call, from the
-  // same file.
-  let dangerousGrants: RunnerDangerousGrants = readRunnerDangerousGrants(
-    CONFIG_DIR,
-    ownerUserId
-  );
   const levelOn = (scope: ChannelScope, spaceSlug: unknown): ChannelLevel =>
     channelLevel(scope, grants, spaceSlug);
-  /** Owner, or a member of `spaceSlug` the owner let run dangerous jobs
+  /** Owner, or a member at Shell on `spaceSlug`: they run dangerous jobs
    *  without asking. Anyone else's call waits for the owner's approval. */
   const dangerousOn = (scope: ChannelScope, spaceSlug: unknown): boolean =>
-    scope.role === 'owner' ||
-    (typeof spaceSlug === 'string' &&
-      scope.spaceSlugs.includes(spaceSlug) &&
-      dangerousGranted(grants, dangerousGrants, spaceSlug, scope.userId));
+    runsDangerousJobs(levelOn(scope, spaceSlug));
   /** Owner, or a member with at least `needed` on some board they belong to.
    *  For traffic that names no board. */
   const reaches = (scope: ChannelScope, needed: RunnerAccessLevel): boolean =>
@@ -519,6 +512,21 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   });
 
   const engines = new Map<string, BoardAgentEngine>();
+  // The dev VM (.specs/dev-vm.md): when the runner setting is on (never by
+  // default, never off a Mac), every board's sessions run in it, and only
+  // what must stay here (sign-ins, the simulator, jobs) runs on this Mac.
+  const devVm = daemonDevVm();
+  if (devVm) {
+    console.log(`[devvm] sessions run in the dev VM (Colima profile "${devVm.vm.profile}")`);
+    void devVm.ready().catch((err: unknown) => {
+      console.error(`[devvm] not ready: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+  // The ops user (.specs/ops-user.md): when the runner setting is on (never
+  // by default), every board's store, jobs and gate are the factiii-ops
+  // user's, reached over its socket; nothing falls back to this process.
+  const ops = daemonOps();
+  if (ops) console.log('[ops] secrets and jobs are served by the ops user');
   // The board MCP's hypervisor tools (session-hypervisor.ts): every board
   // this runner serves, and what the person a session acts for may do on
   // each by hand: the owner everything, a member their level there, read
@@ -613,7 +621,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
    *  all: the server should not have relayed it, and the runner does not rely
    *  on that. */
   const mayConnect = (scope: ChannelScope): boolean =>
-    reaches(scope, 'api') ||
+    reaches(scope, 'jobs') ||
     (scope.role === 'member' && scope.vault === true && vault.isMember(scope.userId));
   void vault.load().catch((err: unknown) => {
     console.error(`[vault] could not read who is let in: ${err instanceof Error ? err.message : String(err)}`);
@@ -621,7 +629,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   /** One engine serves a space, but a track belongs to one peer, so frames fan
    *  out here. One peer gets them: the holder of the stream. The holder needs
-   *  the Screens level, and a second viewer gets no frames at all
+   *  the Jobs level, and a second viewer gets no frames at all
    *  (screen-holder.ts). */
   type SimulatorSink = VideoSink<ChannelScope> & {
     track: Track;
@@ -639,7 +647,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
    *  whether the holder is its own link, never which board they are on. */
   const tellScreenHolder = () => {
     for (const [dc, scope] of channelScopes) {
-      if (!reaches(scope, 'screens')) continue;
+      if (!reaches(scope, 'jobs')) continue;
       const frame = JSON.stringify({
         type: 'runner-screen-holder',
         holder: screenHolderView(screenHold, scope)
@@ -663,7 +671,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     tellScreenHolder();
   };
 
-  /** The hold ends with the holder's link, and with their Screens level. */
+  /** The hold ends with the holder's link, and with their Jobs level. */
   const releaseScreenIfGone = (gone?: ChannelScope) => {
     if (!screenHold) return;
     const lost = !rawUseAllowed(
@@ -733,7 +741,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   });
 
   // Look up a card's exec target, but only across boards this channel has the
-  // Terminals level on - so a member can't attach a shell to a board where
+  // Shell level on - so a member can't attach a shell to a board where
   // the owner gave them less, or to another board's workspace.
   const findCardTargetInScope = (
     scope: ChannelScope,
@@ -805,7 +813,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   const broadcastToAll = (msg: string) => {
     const frames = chunkWire(msg);
     for (const [dc, scope] of channelScopes) {
-      if (!reaches(scope, 'api')) continue;
+      if (!reaches(scope, 'jobs')) continue;
       for (const frame of frames) {
         try {
           dc.sendMessage(frame);
@@ -1026,11 +1034,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       `[boards] ${boardName(spaceSlug)} was ${renamed.from}. Its folder and member levels moved with it.`
     );
     const nextGrants = rekeyBoard(grants, renamed);
-    const nextDangerous = rekeyBoard(dangerousGrants, renamed);
-    if (!ownerUserId || (nextGrants === grants && nextDangerous === dangerousGrants)) return;
-    writeRunnerGrants(CONFIG_DIR, ownerUserId, nextGrants, nextDangerous);
+    if (!ownerUserId || nextGrants === grants) return;
+    writeRunnerGrants(CONFIG_DIR, ownerUserId, nextGrants);
     grants = nextGrants;
-    dangerousGrants = nextDangerous;
     if (socket.connected) socket.emit('runner:access-state', { grants, vault: vault.members() });
   }
 
@@ -1118,11 +1124,12 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         },
         // Phases of a call the server relayed, so its row can say "waiting
         // for approval". Calls from a channel or a session here have no row.
-        onJobState: (callId, state, via) => {
+        // A wait on a target carries who holds it, for the caller's line.
+        onJobState: (callId, state, via, wait) => {
           if (state === 'running') runningJobCalls.add(callId);
           else runningJobCalls.delete(callId);
           if (via === 'api' && socket.connected) {
-            socket.emit('runner:job-state', { callId, state });
+            socket.emit('runner:job-state', wait ? { callId, state, wait } : { callId, state });
           }
         },
         onJobEnd: (callId, state, exitCode) => {
@@ -1134,6 +1141,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         // A session on this runner that calls a job acts as the owner.
         ownerActor: () => ownerActor,
         hypervisor,
+        sessionTarget: devVm?.sessionTarget(safeSlug(spaceSlug)),
+        opsLink: ops?.linkFor(safeSlug(spaceSlug)),
         // Only this id may approve a member's dangerous job call.
         runnerOwnerId: ownerUserId,
         // A member's dangerous job call waits on the owner: ask the server
@@ -1252,8 +1261,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   }
 
   /** Give one member a level on one board, audit it there, and cut that
-   *  member off anything they lose: their open terminals and the video stream
-   *  go now, not at reconnect. Only that member on that board moves. */
+   *  member off anything they lose: their open terminals, the AI sessions
+   *  they started there and the video stream go now, not at reconnect. Only
+   *  that member on that board moves. */
   const setGrant = (
     spaceSlug: string,
     payload: unknown,
@@ -1267,106 +1277,71 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     const change = (payload ?? {}) as {
       userId?: unknown;
       level?: unknown;
-      dangerous?: unknown;
     };
     const userId = typeof change.userId === 'string' ? change.userId : '';
-    const level = RUNNER_ACCESS_LEVELS.find((l) => l === change.level);
-    const dangerous = typeof change.dangerous === 'boolean' ? change.dangerous : undefined;
-    // An older app sends the two switches. Nothing in them names a member, so
-    // nothing changes.
-    if (
-      !userId ||
-      (!level && dangerous === undefined) ||
-      typeof spaceSlug !== 'string' ||
-      !spaceSlug
-    ) {
+    // An app from before the three levels sends api, terminals or screens,
+    // each read as its new level.
+    const level = parseKnownAccessLevel(change.level);
+    // An older app sends the two switches, or (before 2026-11) the Dangerous
+    // jobs permission alone. Neither names a level, so nothing changes.
+    if (!userId || !level || typeof spaceSlug !== 'string' || !spaceSlug) {
       throw new Error(
-        'This runner gives access one member at a time. Update the app to change it.'
+        'This runner gives access one member at a time, by level. Update the app to change it.'
       );
     }
     if (userId === ownerUserId) {
       throw new Error('The owner of this runner already has everything.');
     }
-    if (!level) {
-      setDangerousGrant(spaceSlug, userId, dangerous === true, ctx);
-      return;
-    }
     const before = grantedLevel(grants, spaceSlug, userId);
     if (before === level) return;
     const next = withGrant(grants, spaceSlug, userId, level);
-    // None takes the Dangerous jobs permission with it: it counts only with
-    // the API level, and a member given a level again starts without it.
-    const dropsDangerous = level === 'none' && dangerousListed(spaceSlug, userId);
-    const nextDangerous = dropsDangerous
-      ? withDangerousGrant(dangerousGrants, spaceSlug, userId, false)
-      : dangerousGrants;
-    writeRunnerGrants(CONFIG_DIR, ownerUserId, next, nextDangerous);
+    writeRunnerGrants(CONFIG_DIR, ownerUserId, next);
     grants = next;
-    dangerousGrants = nextDangerous;
     // The server refuses a job call and a link early by this; the runner
     // still checks on its own (relayedCallRefusal, channelLevel).
     if (socket.connected) socket.emit('runner:access-state', { grants, vault: vault.members() });
-    const detail = `user ${userId} on ${boardName(spaceSlug)}: ${before} -> ${level}${
-      dropsDangerous ? '; dangerous jobs on -> off' : ''
-    }`;
-    console.log(`[access] ${detail}.`);
-    void getEngine(spaceSlug).auditRunnerEvent('shared-change', detail, ctx);
+    const detail = `user ${userId} on ${boardName(spaceSlug)}: ${before} -> ${level}`;
+    const cuts = levelChangeCuts(before, level);
+    // Below Shell, every AI session they started on this board stops too (a
+    // shell as the runner user each). No engine yet: nothing of theirs runs.
+    // The audit line names what stopped, so it waits for the stop.
+    const stopping =
+      cuts.shells && engines.has(spaceSlug)
+        ? getEngine(spaceSlug)
+            .stopMemberSessions(userId)
+            .catch((err: unknown) => {
+              console.error(`[access] Could not stop sessions of user ${userId}:`, err);
+              return [] as string[];
+            })
+        : Promise.resolve([] as string[]);
+    void stopping.then((stopped) => {
+      const line = stopped.length
+        ? `${detail}; stopped ${stopped.length} session${stopped.length === 1 ? '' : 's'}: ${stopped.join(', ')}`
+        : detail;
+      console.log(`[access] ${line}.`);
+      return getEngine(spaceSlug).auditRunnerEvent('shared-change', line, ctx);
+    });
 
     for (const [dc, scope] of channelScopes) {
       if (scope.role === 'owner' || scope.userId !== userId) continue;
       // A terminal names no board once it is open, so a member who lost the
-      // Terminals level here loses every terminal on this link. One on a
-      // board where they still have the level can be opened again.
-      if (
-        levelAtLeast(before, 'terminals') &&
-        !levelAtLeast(level, 'terminals')
-      ) {
+      // Shell level here loses every terminal on this link. One on a board
+      // where they still have the level can be opened again.
+      if (cuts.shells) {
         terminalByChannel.get(dc)?.destroyAll();
       }
     }
     tellMemberAccess(userId, spaceSlug);
-    releaseScreenIfGone();
+    // The video stream needs Jobs: Shell -> Jobs keeps it, None takes it.
+    if (cuts.stream) releaseScreenIfGone();
     // No level left on any board: the link itself goes.
     for (const [scope, close] of [...linkClosers]) {
       if (scope.role !== 'owner' && scope.userId === userId && !mayConnect(scope)) {
         close();
       }
     }
-    // Someone who just got Screens learns who has the stream.
+    // Someone who just got Jobs learns who has the stream.
     tellScreenHolder();
-  };
-
-  /** Whether `userId` is on the Dangerous jobs list of `spaceSlug`, by the
-   *  list alone (the level is not looked at). */
-  const dangerousListed = (spaceSlug: string, userId: string): boolean =>
-    Object.hasOwn(dangerousGrants, spaceSlug) &&
-    dangerousGrants[spaceSlug].includes(userId);
-
-  /** Turn one member's Dangerous jobs permission on one board on or off,
-   *  and audit it there. Nothing else moves: their level, terminals and
-   *  video stay as they are. */
-  const setDangerousGrant = (
-    spaceSlug: string,
-    userId: string,
-    allowed: boolean,
-    ctx: ActionContext
-  ): void => {
-    if (!ownerUserId) return;
-    if (allowed && !levelAtLeast(grantedLevel(grants, spaceSlug, userId), 'api')) {
-      throw new Error(
-        'Give this member the API level first: dangerous jobs are API calls.'
-      );
-    }
-    if (dangerousListed(spaceSlug, userId) === allowed) return;
-    const next = withDangerousGrant(dangerousGrants, spaceSlug, userId, allowed);
-    writeRunnerGrants(CONFIG_DIR, ownerUserId, grants, next);
-    dangerousGrants = next;
-    const detail = `user ${userId} on ${boardName(spaceSlug)}: dangerous jobs ${
-      allowed ? 'off -> on' : 'on -> off'
-    }`;
-    console.log(`[access] ${detail}.`);
-    void getEngine(spaceSlug).auditRunnerEvent('shared-change', detail, ctx);
-    tellMemberAccess(userId, spaceSlug);
   };
 
   /** The member's app learns its new access on this board without asking. */
@@ -1395,21 +1370,11 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   ): RunnerAccessState => {
     if (scope.role !== 'owner') {
       const level = levelOn(scope, spaceSlug);
-      return {
-        level: level === 'owner' ? 'none' : level,
-        grants: {},
-        dangerousGrants: []
-      };
+      return { level: level === 'owner' ? 'none' : level, grants: {} };
     }
     return {
-      level: 'screens',
-      grants: Object.hasOwn(grants, spaceSlug) ? { ...grants[spaceSlug] } : {},
-      // Only members who still have a level: None already dropped the rest.
-      dangerousGrants: Object.hasOwn(dangerousGrants, spaceSlug)
-        ? dangerousGrants[spaceSlug].filter((id) =>
-            dangerousGranted(grants, dangerousGrants, spaceSlug, id)
-          )
-        : []
+      level: 'shell',
+      grants: Object.hasOwn(grants, spaceSlug) ? { ...grants[spaceSlug] } : {}
     };
   };
 
@@ -1468,7 +1433,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       ? { userId: String(actor.userId) }
       : undefined;
   };
-  /** Below the API level on that board = owner only; the audit log is always
+  /** Below the Jobs level on that board = owner only; the audit log is always
    *  owner only. Throws the refusal, so every handler's catch acks it. */
   const assertRelayed = (
     call: RelayedCall,
@@ -1487,9 +1452,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   const ackError = (err: unknown) => ({
     error: err instanceof Error ? err.message : String(err)
   });
-  /** `spaceSlug` names the board a job call runs on, for the Dangerous
-   *  jobs permission there; without it a member's dangerous job call waits
-   *  for the owner. */
+  /** `spaceSlug` names the board a job call runs on, for the member's level
+   *  there (Shell runs a dangerous job at once); without it a member's
+   *  dangerous job call waits for the owner. */
   const apiContext = (
     actor: { userId: string; name: string },
     spaceSlug?: string
@@ -1502,7 +1467,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         : 'member',
     dangerous:
       spaceSlug !== undefined &&
-      dangerousGranted(grants, dangerousGrants, spaceSlug, String(actor.userId))
+      runsDangerousJobs(grantedLevel(grants, spaceSlug, String(actor.userId)))
   });
 
   // Cancel by call id: the starter or the owner only (the engine checks).
@@ -1853,7 +1818,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       }
 
       // Who has the video stream, for a panel that opens later.
-      if (reaches(scope, 'screens')) {
+      if (reaches(scope, 'jobs')) {
         sendToChannel(
           JSON.stringify({
             type: 'runner-screen-holder',
@@ -1917,10 +1882,10 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         };
         if (parsed.type === 'terminal') {
           // A terminal is a shell as the runner user: owner-only unless
-          // the owner gave this member the Terminals level, whatever the
+          // the owner gave this member the Shell level, whatever the
           // client offers to show. Which board is checked when it opens
           // (findCardTargetInScope).
-          if (!reaches(scope, 'terminals')) return;
+          if (!reaches(scope, 'shell')) return;
           const mgr = terminalByChannel.get(dc);
           if (mgr) {
             mgr.handle(
@@ -2353,6 +2318,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       engine.destroy();
     }
     embedder.stop();
+    // Closes the narrow path; the Codex copy-back it starts is best effort
+    // here, since the process exits next (the 5-minute sync is the real one).
+    void devVm?.stop();
     // Lid closed off before exiting: the setting outlives the process.
     keepAwake.shutdown();
     clearInterval(heartbeatTimer);
@@ -2442,8 +2410,19 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     }
     status('restarting');
     cleanup();
+    await closeVault();
     process.exit(RESTART_FOR_UPDATE);
   };
+
+  /** An unlocked Vault's last encrypted dump before the process goes
+   *  (vault/sealedDb.ts): its writes since the last flush. Bounded, so a
+   *  stuck database cannot hold the exit. */
+  async function closeVault(): Promise<void> {
+    await Promise.race([
+      vault.close().catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 15_000).unref())
+    ]);
+  }
 
   // Disconnected from Settings. Stop every job and exit; the supervisor only
   // relaunches on RESTART_FOR_UPDATE, so this stays down.
@@ -2454,18 +2433,18 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       '\nThis runner was disconnected from your Factiii account. Stopping all jobs...'
     );
     cleanup();
-    process.exit(0);
+    void closeVault().finally(() => process.exit(0));
   });
 
   process.on('SIGINT', () => {
     console.log('\nShutting down...');
     cleanup();
-    process.exit(0);
+    void closeVault().finally(() => process.exit(0));
   });
 
   process.on('SIGTERM', () => {
     cleanup();
-    process.exit(0);
+    void closeVault().finally(() => process.exit(0));
   });
 
   // Block forever: the supervisor exits when this resolves. Real exits go
@@ -2569,7 +2548,13 @@ async function handleDataChannelMessage(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[${ts()}] ✗ ${action} FAILED: ${message}`);
-      sendResult({ type: 'result', requestId, error: message });
+      sendResult({
+        type: 'result',
+        requestId,
+        error: message,
+        // A locked Vault says so in a code the app acts on (Unlock).
+        ...(isVaultLocked(message) ? { code: VAULT_LOCKED_CODE } : {})
+      });
     }
     return;
   }
@@ -2640,7 +2625,11 @@ async function handleDataChannelMessage(
       if (scope.role !== 'owner') {
         throw new Error('Only the owner of this runner can run AI on it.');
       }
-      const result = await answerAiPrompt(aiEngines, payload);
+      // aiPromptInfo: which engines read images, before an image is sent.
+      const result =
+        action === 'aiPromptInfo'
+          ? await aiPromptInfo(aiEngines, payload)
+          : await answerAiPrompt(aiEngines, payload);
       sendResult({ type: 'result', requestId, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2806,6 +2795,10 @@ async function handleDataChannelMessage(
     sendResult({ type: 'result', requestId, error: refusal(action) });
     return;
   }
+
+  // With the ops user on, the store's files are not this user's to read: the
+  // engine sends the Secrets tab's actions to the ops half instead (shared
+  // ops-store-actions.ts), so nothing is refused here.
 
   // The levels are the runner's, not an engine's: answered here.
   if (action === 'runnerAccessGet' || action === 'runnerAccessSet') {

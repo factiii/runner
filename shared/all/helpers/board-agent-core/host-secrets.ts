@@ -10,6 +10,7 @@ import type {
   SecretsBackupImportPlan
 } from '../../domains/electron';
 import { maskedSecret } from '../../domains/secretsBackup';
+import { missingPartMessage } from '../runnerMissingPart';
 import {
   type EnvFile,
   envFileKeys,
@@ -70,7 +71,7 @@ async function assertBinaries(): Promise<void> {
   for (const bin of ['sops', 'age-keygen']) {
     if (!(await binaryAvailable(bin))) {
       throw new Error(
-        `The secrets store needs the "${bin}" binary on the runner machine. Install sops and age with your platform's package manager (brew, apt, choco...).`
+        missingPartMessage('secrets', `The secrets store needs ${bin === 'sops' ? 'sops' : 'age'} on the runner.`)
       );
     }
   }

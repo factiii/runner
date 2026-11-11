@@ -989,6 +989,20 @@ export class ClaudeModeEngine implements ModeEngine {
     this.emitter.emitSessionUpdate(session);
   }
 
+  /** Stop the headless agent as handoff does, but settle in `error` with
+   *  `reason`: nobody takes over. The worktree and thread stay for whoever
+   *  looks next (the owner's End removes them). */
+  async halt(postId: string, reason: string): Promise<void> {
+    const session = this.sessions.get(String(postId));
+    if (!session) return;
+    await this.handoff(postId);
+    session.phase = 'error';
+    session.error = reason;
+    this.syncCard(session);
+    this.emitter.addLog(session, 'error', reason);
+    this.emitter.emitSessionUpdate(session);
+  }
+
   async kill(postId: string): Promise<void> {
     let session = this.sessions.get(postId);
     if (!session) {

@@ -58,6 +58,15 @@ export type ExecTarget = {
   step(cmd: string, opts?: StepOpts): Promise<StepExecResult>;
   /** Spawn a long-lived process for streaming stdio (the agent CLIs). */
   spawn(argv: string[], opts?: ExecOpts): Promise<ChildProcess>;
+  /** Spawn argv on a terminal of `size`, for a tmux client. Absent: the
+   *  caller wraps argv in `script(1)` for this host and uses `spawn`. A target
+   *  that runs somewhere else (the dev VM, apps/runner/src/devVm) has its own
+   *  way to get a terminal, and a different `script(1)` from this host's. */
+  spawnPty?(
+    argv: string[],
+    size: { cols: number; rows: number },
+    opts?: ExecOpts
+  ): Promise<ChildProcess>;
 };
 
 const MAX_BUFFER = 10 * 1024 * 1024;
