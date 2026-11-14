@@ -8,7 +8,7 @@ import type { RunnerVaultFile } from '@shared/all/domains/electron';
 import SuperJSON from 'superjson';
 
 import { openVaultDb, type VaultDb } from './db';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 import { loadVaultClient, RunnerVaultRouter } from './vaultRouter';
 import { vaultIpcAdapter } from './prismaIpc';
@@ -30,7 +30,11 @@ before(async () => {
   db = await openVaultDb({ dataDir: 'memory://', engineDir: ENGINE });
   const store = new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-vault-rpc-')));
   const router = new RunnerVaultRouter(db, store, null, () => loadVaultClient(ENGINE));
-  vault = new RunnerVault(db, store, '1', () => undefined, null, null, null, () => router);
+  // Runner Cloud, where a member is let in (the Vault never is, vault.md
+  // rule 2); the router is the same code on either store.
+  vault = new RunnerVault(db, store, '1', () => undefined, null, null, null, () => router, {
+    storeName: 'runner'
+  });
 });
 after(async () => {
   await db.close();

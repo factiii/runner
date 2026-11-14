@@ -12,7 +12,12 @@
     "skipLibCheck": true,
     "paths": {
       "superjson": ["../../node_modules/superjson"],
-      "superjson/dist": ["../../node_modules/superjson/dist"]
+      "superjson/dist": ["../../node_modules/superjson/dist"],
+      // Server files type-checked here import file-type 22 and unpdf 2, which
+      // publish types only through an `exports` map that `moduleResolution:
+      // "node"` never reads (apps/server itself resolves them with `bundler`).
+      "file-type": ["../../node_modules/file-type/source/index.d.ts"],
+      "unpdf": ["../../node_modules/unpdf/dist/index.d.mts"]
     }
   },
   "include": [

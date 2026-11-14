@@ -94,13 +94,13 @@ export function runnerVaultWriteRefusal(
   maxBytes = RUNNER_VAULT_BACKUP_MAX_BYTES
 ): string | null {
   if (!Number.isInteger(storedBytes) || storedBytes < 0) {
-    return 'Invalid vault backup offset.';
+    return 'Invalid Authenticator backup offset.';
   }
   if (!Number.isInteger(chunkBytes) || chunkBytes <= 0) {
-    return 'A vault backup chunk cannot be empty.';
+    return 'An Authenticator backup chunk cannot be empty.';
   }
   if (storedBytes + chunkBytes > maxBytes) {
-    return `This vault backup is larger than the ${Math.floor(maxBytes / (1024 * 1024))} MB a runner stores.`;
+    return `This Authenticator backup is larger than the ${Math.floor(maxBytes / (1024 * 1024))} MB a runner stores.`;
   }
   return null;
 }
@@ -133,4 +133,17 @@ export function runnerVaultBackupsToPrune(
 export function isRunnerVaultBackupUnsupported(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '');
   return message.includes(RUNNER_UNKNOWN_ACTION_PREFIX);
+}
+
+/**
+ * Moving the cloud backup to a runner (.specs/mobile-vault.md "Moving the
+ * cloud backup to a runner"): the cloud copy is deleted only once the runner
+ * lists the package under the name it answered, at exactly the size sent.
+ */
+export function cloudMoveConfirmed(
+  listed: readonly { name: string; size: number }[],
+  storedName: string,
+  size: number
+): boolean {
+  return listed.some((item) => item.name === storedName && item.size === size);
 }

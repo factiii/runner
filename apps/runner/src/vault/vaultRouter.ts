@@ -2,35 +2,31 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import type { VaultRpcPath } from '@shared/all/validators';
-import {
-  createVaultRouter,
-  type VaultCaller,
-  type VaultPorts
-} from '@shared/vault-router';
+import { createVaultRouter, type VaultCaller, type VaultPorts } from '@shared/vault-core';
 import {
   type PrismaVaultTypes,
   prismaVaultDb,
   type VaultScope,
   type VaultSqlTag
-} from '@shared/vault-router/prismaDb';
+} from '@shared/vault-core/prismaDb';
 import SuperJSON from 'superjson';
 
 import type { VaultDb } from './db';
 import type { Embedder } from './embedder';
 import { VAULT_CLIENT_FILE } from './engine';
-import type { FsObjectStore } from './objectStore';
+import type { FsObjectStore } from '@shared/vault-core/objectStore';
 import { vaultIpcAdapter } from './prismaIpc';
 
-// The runner's adapter for the shared vault router (@shared/vault-router,
+// The runner's adapter for the shared vault router (@shared/vault-core,
 // .specs/vault-router.md → What is in the router). Its ports are the same Prisma
 // queries the server runs (prismaDb.ts), on the Vault's own database through
 // the driver adapter in its database process (prismaIpc.ts → dbChild.ts), the
 // bytes in its own store, and query vectors from its own embedder: nothing
 // leaves the machine. The `vaultRpc` action answers through it.
 
-/** The generated vault-only client module (shared/vault-router/generated). */
+/** The generated vault-only client module (shared/vault-core/generated). */
 type ClientModule = Pick<
-  typeof import('@shared/vault-router/generated/client'),
+  typeof import('@shared/vault-core/generated/client'),
   'PrismaClient' | 'Prisma'
 >;
 
@@ -42,7 +38,7 @@ type ClientModule = Pick<
  */
 export function loadVaultClient(engineDir: string): ClientModule {
   if (__filename.endsWith('.ts')) {
-    const generated = path.resolve(__dirname, '../../../../shared/vault-router/generated/client.ts');
+    const generated = path.resolve(__dirname, '../../../../shared/vault-core/generated/client.ts');
     return require(generated) as ClientModule;
   }
   return createRequire(path.join(engineDir, 'package.json'))(

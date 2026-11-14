@@ -16,7 +16,9 @@ factiii-expose <port> <name>   # e.g. factiii-expose 3000 app
 ```
 
 It prints the public URL and returns straight away - the tunnel runs in the
-background and lives until the session ends or you stop it.
+background and keeps running after the session ends, renewing its own
+credential, until you stop it with `factiii-unexpose <name>` or the machine
+restarts.
 
 - `<name>` may hold letters, numbers and dashes only.
 - Re-running it with the same name replaces that tunnel rather than opening a
@@ -43,11 +45,14 @@ Two more `.env` values matter once the app has logins, and both fail silently:
 - `COOKIE_DOMAIN` — the two tunnels are different hostnames under one parent, so
   a host-only cookie set on the web host is never sent to the api host. Every
   authenticated call 401s while the UI looks signed in.
-- `NEXT_PUBLIC_COOKIE_PREFIX` — must differ from production's. A preview under
-  `*.dev.factiii.com` also receives cookies scoped to `.factiii.com`, so anyone
-  logged into the real site sends a same-named cookie that shadows the
-  preview's, and signing in simply does not stick. `.env.example` already ships
-  a distinct value; keep it distinct.
+- `COOKIE_DOMAIN=.factiii.org` — previews are `https://<name>.factiii.org`
+  (2026-11-11). It is not under factiii.com, so a preview never receives a
+  visitor's real Factiii cookies. An older runner prints `*.dev.factiii.com`
+  links: use the same name on `factiii.org` instead (it reaches the same
+  tunnel). Every link and `COOKIE_DOMAIN` must be on one domain, or the sign-in
+  cookie is dropped as third-party and the app shows you signed out.
+- `NEXT_PUBLIC_COOKIE_PREFIX` — keep it different from production's.
+  `.env.example` already ships a distinct value.
 
 ## Stop sharing
 

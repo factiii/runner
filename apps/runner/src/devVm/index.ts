@@ -1,5 +1,4 @@
 import { agentHomes } from '@shared/all/helpers/board-agent-core/agent-homes';
-import { spaceSecret } from '@shared/all/helpers/board-agent-core/exec';
 
 import { listConfiguredSlugs, localConfigProvider } from '../agent-adapter';
 import { CONFIG_DIR, safeSlug, spaceDirPath } from '../paths';
@@ -22,8 +21,7 @@ export function devVmSpaces(): DevVmSpace[] {
         } catch {
           return '';
         }
-      },
-      spaceToken: () => spaceSecret(spaceDir)
+      }
     };
   });
 }

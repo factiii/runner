@@ -40,6 +40,10 @@ export interface ClaudeStreamCallbacks {
    *  thread.started), before the run ends: the chat reads a new
    *  conversation's file while its first turn runs (chatRun.ts). */
   onSessionId?: (id: string) => void;
+  /** The model the CLI runs, as its `init` event names it
+   *  ("claude-sonnet-4-5-20250929"): what an alias like "sonnet" resolved
+   *  to. Factiii names the model on what it answered (vault/aiPrompt.ts). */
+  onModel?: (model: string) => void;
 }
 
 // ── Formatting helpers ──
@@ -121,6 +125,7 @@ function processLine(
   // ── system ──
   if (e.type === RoleEnum.System) {
     if (e.subtype === 'init') {
+      if (e.model) cb.onModel?.(e.model);
       cb.onLog?.({
         type: 'system',
         content: `Claude ${e.claude_code_version ?? ''} (${e.model ?? 'unknown'})`

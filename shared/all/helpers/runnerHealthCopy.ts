@@ -195,12 +195,20 @@ export const servicesEmpty = (services: RunnerService[] | undefined): string =>
     ? 'Update the runner to see the servers and containers running on it.'
     : 'Nothing is running: no pm2 processes, no containers and no servers listening.';
 
-/** The row's one line: fine, low, or almost gone. */
-export function healthHeadline(health: RunnerMachineHealth): string {
-  const low = health.disks.reduce<RunnerDiskHealth | null>(
+/** The disk with the least free, which the Storage card's bar shows. */
+export const lowestDisk = (
+  health: RunnerMachineHealth
+): RunnerDiskHealth | null =>
+  health.disks.reduce<RunnerDiskHealth | null>(
     (min, d) => (!min || d.freeGb < min.freeGb ? d : min),
     null
   );
+
+/** The machine in one sentence: fine, low, or almost gone. The CLI and
+ *  doctor print it; the Storage card's status chip carries it as its
+ *  tooltip. */
+export function healthHeadline(health: RunnerMachineHealth): string {
+  const low = lowestDisk(health);
   const diskLevel = low?.level ?? 'ok';
   if (low && diskLevel === 'critical') {
     return `Disk space is almost gone: ${gb(low.freeGb)} free. Adds and uploads stop below ${gb(health.criticalGb)}.`;
@@ -217,14 +225,51 @@ export function healthHeadline(health: RunnerMachineHealth): string {
     : 'Disk and memory are fine.';
 }
 
+/** Machine Storage's status chip, beside its title: a few words at the
+ *  level they read at. A low disk first, then what is keeping the machine
+ *  busy (processes near the cap, memory pressure). */
+export function machineStorageStatus(health: RunnerMachineHealth): {
+  label: string;
+  level: RunnerHealthLevel;
+} {
+  const disk = lowestDisk(health);
+  if (disk?.level === 'critical') {
+    return { label: 'Almost full', level: 'critical' };
+  }
+  if (disk?.level === 'warn') return { label: 'Low on space', level: 'warn' };
+  if (health.level === 'ok') return { label: 'Fine', level: 'ok' };
+  if (health.processes && health.processes.level !== 'ok') {
+    return { label: 'Too many processes', level: health.processes.level };
+  }
+  if (health.memory === 'critical') {
+    return { label: 'Memory almost full', level: 'critical' };
+  }
+  if (health.memory === 'warn') return { label: 'Memory busy', level: 'warn' };
+  return { label: 'Busy', level: health.level };
+}
+
+/** Machine Storage's line under its bar, about the disk the bar shows: "14
+ *  GB free of 494 GB.", with how many disks when there are more, and where
+ *  adds stop once it is low. */
+export function machineStorageLine(health: RunnerMachineHealth): string {
+  const disk = lowestDisk(health);
+  if (!disk) return 'The runner reads no disk here.';
+  const disks = health.disks.length;
+  const of = disks > 1 ? `, the fullest of ${disks} disks` : '';
+  const room = `${gb(disk.freeGb)} free of ${gb(disk.totalGb)}${of}.`;
+  return disk.level === 'ok'
+    ? room
+    : `${room} Adds and uploads stop below ${gb(health.criticalGb)}.`;
+}
+
 /** What Free up space does, and what it never touches. */
 export const CLEANUP_SAFE_NOTE =
-  'It removes what the runner made and can make again, and clears tools’ caches with their own commands. It never touches your vault, its search models, your secrets, the model in use, a board’s clone, workspace or worktrees, or anything else you keep.';
+  'It removes what the runner made and can make again, and clears tools’ caches with their own commands. It never touches your Vault or Runner Cloud, their search models, your secrets, the model in use, a board’s clone, workspace or worktrees, or anything else you keep.';
 
 type CleanupItem = RunnerCleanup['items'][number];
 
 /** "about 2.1 GB", or "up to about 7.4 GB" when a prune is among them. */
-const freesLabel = (items: CleanupItem[]): string => {
+export const freesLabel = (items: CleanupItem[]): string => {
   const bytes = items.reduce((sum, i) => sum + i.bytes, 0);
   return `${items.some((i) => i.upTo) ? 'up to about' : 'about'} ${bytesLabel(bytes)}`;
 };
@@ -275,4 +320,4 @@ export const DISK_USE_READING =
   'Weighing every folder. On a full disk this takes up to a minute.';
 export const DISK_USE_EMPTY = 'No folder holds more than 500 MB.';
 export const DISK_USE_NOTE =
-  'A reading only. Free up space never removes these by their path; what in them is safe to clear is listed under Free up space.';
+  'Nothing here is removed by its path. A folder’s Free up clears only what in it Free up space lists as safe to clear, after your yes.';

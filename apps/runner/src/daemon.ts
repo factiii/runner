@@ -4,7 +4,8 @@ import {
   type CardAISessionSummary,
   type RunnerAccessLevel,
   type RunnerAccessState,
-  type RunnerGrants
+  type RunnerGrants,
+  type RunnerHealthAlert
 } from '@shared/all/domains/electron';
 import type {
   ClientToServerEvents,
@@ -16,11 +17,18 @@ import type {
 } from '@shared/all/domains/socket';
 import { agentSettledPhase } from '@shared/all/domains/socket';
 import {
+  parseHello,
+  type ProtocolHello,
+  runnerInfoFrame
+} from '@shared/all/domains/runnerProtocol';
+import type { RunnerOffers } from '@shared/all/domains/sessionRelay';
+import {
   type ActionContext,
   BoardAgentEngine,
   createEventSink,
 } from '@shared/all/helpers/board-agent-core';
 import {
+  answerSessionOp,
   type HypervisorHost,
   MCP_SESSION_CAP
 } from '@shared/all/helpers/board-agent-core/session-hypervisor';
@@ -41,6 +49,7 @@ import {
   relaySecretsRefusal,
   VAULT_ACTIONS,
   LOCAL_AI_ACTIONS,
+  RUNNER_ACTIVITY_ACTIONS,
   RUNNER_AI_ACTIONS,
   RELAY_SIGNIN_REFUSAL,
   RUNNER_SIGNIN_ACTIONS,
@@ -60,15 +69,18 @@ import {
   makeChunkReassembler
 } from '@shared/all/helpers/wireChunk';
 import {
+  autoUpdateSetSchema,
   isVaultLocked,
   keepAwakeSetSchema,
   routineDueFrameSchema,
+  sessionOpSchema,
   RUNNER_NO_SUCH_JOB_CALL,
   RUNNER_SLEEP_MAX_SESSIONS,
   type RunnerSleepSnapshot,
   VAULT_LOCKED_CODE
 } from '@shared/all/validators';
 import { randomBytes } from 'crypto';
+import { hostname } from 'os';
 import fs from 'fs';
 import {
   type DataChannel as NDCDataChannel,
@@ -85,6 +97,7 @@ import {
   negotiatedH264PayloadType,
   negotiatedMid
 } from '@shared/all/helpers/board-agent-core/rtp-h264';
+import os from 'os';
 import path from 'path';
 import { io, type Socket } from 'socket.io-client';
 
@@ -114,8 +127,15 @@ import {
   readRunnerGrants,
   writeRunnerGrants
 } from './access';
+import {
+  type ActivityHost,
+  createActivityHost,
+  readOllamaService
+} from './activity/daemonActivity';
+import type { JobStart } from './activity/registry';
 import { boardLabel, describeBoard, knownBoards, noteBoard, rekeyBoard } from './boardRegistry';
 import { removeDesktopViewLeftovers } from './cleanup';
+import { defaultScanDeps, scanMachine } from './machineScan';
 import { createDaemonNuke, type DaemonNuke } from './daemonNuke';
 import { keepLogLimited } from './logLimit';
 import { machineNukeHost, stopTmuxSessionsIn, unpairOverSocket } from './nukeHost';
@@ -125,26 +145,55 @@ import { daemonDevVm } from './devVm';
 import { daemonOps } from './ops';
 import { KeepAwake } from './keepAwake';
 import { LidHold, readThermal } from './lidHold';
-import { run } from './machine';
-import { machineHealth, runningServices } from './machineHealthIo';
+import { localAiMachine, run } from './machine';
+import { runningServices } from './machineHealthIo';
 import { createRunnerConnections, personOf, type RunnerConnectionsHost } from './runnerConnections';
+import { writeRunnerOnline } from '@shared/all/helpers/runnerOnline';
 import { CONFIG_DIR, safeSlug } from './paths';
 import { serverReadiness } from './serverReadinessIo';
 import { startStatusHeartbeat } from './statusPage';
 import { promptPassword } from './promptPassword';
 import { watchRoutineSession } from './routineWatch';
 import {
+  createRelayRemote,
+  sessionFilesConfig,
+  createSessionsReporter,
+  probeRunnerOffers,
+  RELAY_ACK_TIMEOUT_MS,
+  sessionsReport
+} from './sessionRelay';
+import { createOnboardingStarter, watchOnboardingRequest } from './onboarding';
+import {
+  createServerPeer,
+  runnerHello,
+  SERVER_HELLO_TIMEOUT_MS,
+  SERVER_NO_SESSION_RELAY
+} from './serverPeer';
+import {
   createTokenKeeper,
   heartbeatIntervalMs,
   RUNNER_TOKEN_REFRESH_ACK_TIMEOUT_MS,
+  RUNNER_TUNNEL_TOKEN_ACK_TIMEOUT_MS,
+  tunnelCredential,
   takeRefreshToken
 } from './runnerToken';
 import {
   currentVersion,
   installLatest,
   isRelaunchAfterUpdate,
+  latestAvailable,
   RESTART_FOR_UPDATE
 } from './selfUpdate';
+import { startAutoUpdate } from './autoUpdate';
+import {
+  HEALTHY_AFTER_MS,
+  hasFailed,
+  markUpdateHealthy,
+  readAutoUpdateState,
+  readUpdateSettings,
+  recordLastUpdate,
+  setAutoUpdate
+} from './updateSafety';
 import type { LocalAiTags } from './localAiTags';
 import type { PartsManager } from './partsManager';
 import { type CliSignins, machineCliSignins } from './cliSignins';
@@ -155,9 +204,11 @@ import {
 } from './gitConnections';
 import { createLocalAiTags, createPartsManager } from './runnerParts';
 import { type AiPromptEngines, aiPromptInfo, answerAiPrompt } from './vault/aiPrompt';
-import { machineAskEngines } from './vault/askEngines';
+import { machineAskEngines, ollamaBaseUrl } from './vault/askEngines';
 import { machineCategorizeEngines } from './vault/categorizeEngine';
 import { createDaemonVault, type DaemonVault } from './vault/daemonVault';
+import { FindingsJob } from './vault/findingsJob';
+import { createApi } from './remote/api';
 import { vaultEmbedder } from './vault/embedder';
 import { runnerServiceHost } from './runnerService';
 import { serviceLogFile } from './service';
@@ -362,6 +413,9 @@ const SIMULATOR_SSRC = 0x5157_4d31;
 type RunnerIceCandidateData = {
   fromSocketId: string;
   candidate: RTCIceCandidateInit;
+  // The offer's link id, from a client that tags its candidates. Absent from
+  // older clients: then every candidate from the socket is the offer's.
+  linkId?: string;
 };
 
 
@@ -510,6 +564,15 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     },
     autoConnect: false
   });
+  // What the server supports (serverPeer.ts, .specs/versioning.md
+  // "Protocol"): asked on every connect, forgotten on every drop.
+  const serverPeer = createServerPeer({
+    hello: () =>
+      socket
+        .timeout(SERVER_HELLO_TIMEOUT_MS)
+        .emitWithAck('runner:hello', runnerHello(currentVersion())),
+    log: (line) => console.log(line)
+  });
 
   const engines = new Map<string, BoardAgentEngine>();
   // The dev VM (.specs/dev-vm.md): when the runner setting is on (never by
@@ -531,6 +594,13 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   // this runner serves, and what the person a session acts for may do on
   // each by hand: the owner everything, a member their level there, read
   // from the grants at each call.
+  // Other runners and the desktop app are reached through the server
+  // (sessionRelay.ts): over this socket, never a connection of their own.
+  // What this runner offers is probed once, for list_runners.
+  let offers: RunnerOffers = { os: `${process.platform} ${os.arch()}`, tart: false, simulator: false, gpu: false };
+  void probeRunnerOffers().then((probed) => {
+    offers = probed;
+  });
   const hypervisor: HypervisorHost = {
     runner: config.runnerName,
     owner: () => ({ ...ownerActor, role: 'owner' }),
@@ -539,8 +609,43 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     level: (starter, slug) =>
       starter.role === 'owner'
         ? 'owner'
-        : grantedLevel(grants, slug, starter.userId)
+        : grantedLevel(grants, slug, starter.userId),
+    offers: () => offers,
+    // Files between sessions: the cap, and never the Vault (sessionRelay.ts).
+    files: sessionFilesConfig(CONFIG_DIR),
+    // Read lazily: Activity, which keeps the setting, is set up below.
+    allowRemoteStarts: () => activity.allowRemoteStarts(),
+    remote: createRelayRemote(async (req) => {
+      if (!socket.connected) {
+        return { error: 'This runner is not connected to Factiii right now, so other runners cannot be reached.' };
+      }
+      // A server without the relay never acks: say so now, not in 60 s.
+      if (!serverPeer.has('sessionRelay')) return { error: SERVER_NO_SESSION_RELAY };
+      return socket.timeout(RELAY_ACK_TIMEOUT_MS).emitWithAck('runner:session-relay', req);
+    })
   };
+  // The first AI session after Factiii Desktop's setup (onboarding.ts):
+  // started on the owner's profile board as soon as the Desktop asks and the
+  // runner is connected (on connect, and when the request file appears).
+  const startOnboarding = createOnboardingStarter({
+    runnerDir: CONFIG_DIR,
+    profileBoard: async () => {
+      if (!socket.connected) return null;
+      try {
+        const reply = await socket
+          .timeout(BOARD_NAMES_ACK_TIMEOUT_MS)
+          .emitWithAck('runner:profile-board', {});
+        return 'error' in reply ? null : { id: reply.id, slug: reply.slug };
+      } catch {
+        // No answer: an older server, or the socket dropped.
+        return null;
+      }
+    },
+    board: (ref) => getEngine(ref.slug, ref.id).hypervisorBoard(),
+    owner: () => hypervisor.owner(),
+    log: (line) => console.log(line)
+  });
+  watchOnboardingRequest(CONFIG_DIR, () => void startOnboarding());
   // One always-on service per runner, whichever board's engine is asked.
   const runnerService = runnerServiceHost();
   // The runner's parts, likewise runner-wide; their installs run in this
@@ -572,8 +677,68 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     }
   });
   const runnerParts = createPartsManager(() => serverReadiness(run, keepAwake));
+  // The runner's Activity (activity/daemonActivity.ts, .specs/runner.md
+  // "Activity"): every piece of AI work registers in its job registry, and a
+  // finished one goes to History, purged daily after the owner's setting.
+  // Read lazily: the boards, grants and names below are set up after it.
+  const ownerPerson = () => personOf({ ...ownerActor, role: 'owner' });
+  const activity: ActivityHost = createActivityHost({
+    dir: path.join(CONFIG_DIR, 'activity'),
+    grants: () => grants,
+    owner: () => ownerActor,
+    boardName: (slug) => boardName(slug),
+    boards: () => engines.entries(),
+    ollama: () =>
+      readOllamaService(ollamaBaseUrl(), async () =>
+        Boolean(await localAiMachine(hostTarget(CONFIG_DIR)).model.resolveBin())
+      ),
+    // The directory says at once whether other runners may start here.
+    onRemoteStartsChanged: () => sessionsReporter.now(),
+    onStopped: (job) => {
+      // The starter hears it through the server, on every device they have
+      // open (`runner:job-stopped` -> `runnerJobStopped`). Offline: the row
+      // in History says it.
+      const starter = job.startedBy;
+      const userId = starter?.userId ?? (ownerUserId ? Number(ownerUserId) : null);
+      if (!socket.connected || userId === null || !Number.isFinite(userId)) return;
+      if (!serverPeer.has('jobStopped')) return;
+      socket.emit('runner:job-stopped', {
+        userId,
+        jobId: job.id,
+        title: job.title,
+        stoppedBy: job.stoppedBy ?? 'Someone'
+      });
+    }
+  });
+  const stopActivityPurge = activity.startPurge();
+  // The server's session directory (.specs/card-sessions.md "Across
+  // runners"): this runner's sessions per board, what it offers and the
+  // owner's setting; sent on connect, and when it changed.
+  const sessionsReporter = createSessionsReporter({
+    report: () =>
+      sessionsReport(
+        hypervisor,
+        offers,
+        activity.allowRemoteStarts(),
+        // Where work runs, so the server keeps its watchers linked (busy).
+        activity.registry.running()
+      ),
+    // A server without the directory has nothing to keep it in.
+    send: (report) => {
+      if (serverPeer.has('sessionRelay')) socket.emit('runner:sessions', report);
+    },
+    connected: () => socket.connected
+  });
+  /** A Vault part's job, with the owner's name where it named the owner. */
+  const startVaultJob = (input: JobStart) =>
+    activity.start({
+      ...input,
+      startedBy: input.startedBy?.role === 'owner' ? ownerPerson() : input.startedBy
+    });
   // Oakbox > Account > Backend's models, runner-wide like the parts.
-  const localAiTags = createLocalAiTags();
+  const localAiTags = createLocalAiTags((input) =>
+    activity.start({ ...input, startedBy: ownerPerson() })
+  );
   // The Vault's embedder (vault/embedder.ts): started on the first call,
   // stopped after ten quiet minutes. The Vault's ingest uses it.
   const embedder = vaultEmbedder(CONFIG_DIR, 10 * 60_000);
@@ -602,11 +767,43 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     },
     embedder,
     askEngines,
-    machineCategorizeEngines(askEngines)
+    machineCategorizeEngines(askEngines),
+    {
+      onEngagementPush: () => findingsJob.pushed(),
+      startJob: startVaultJob,
+      // The public feed, asked with no token: the same answer for everyone,
+      // so asking says nothing of whose runner this is or what they read.
+      fetchTagChanges: (after) =>
+        createApi({ serverUrl: config.serverUrl }).query('autoTag.changes', { after })
+    }
   );
+  // Findings, a scheduled job on this runner over the owner's viewing data in
+  // the Vault (vault/findingsJob.ts): after a push brings rows, and daily.
+  // Its row shows in every board's Running jobs, and it is a `findings` job
+  // in the runner's Activity: a Vault job, so metadata only.
+  let findingsActivity: ReturnType<ActivityHost['start']> | null = null;
+  const findingsJob = new FindingsJob({
+    run: () => vault.findings(),
+    onActivity: ({ state, detail }) => {
+      for (const engine of engines.values()) {
+        if (state) engine.activity.set('findings', state, 'Findings', detail);
+        else engine.activity.clear('findings');
+      }
+      if (state === 'working') {
+        findingsActivity ??= activity.start({ type: 'findings', vault: true, startedBy: null });
+      } else if (findingsActivity) {
+        findingsActivity.end(state === 'error' ? 'failed' : 'done');
+        findingsActivity = null;
+      }
+    }
+  });
+  findingsJob.start();
   // Board events fan out only to channels scoped to that board, so a shared
   // member never receives another board's activity.
   const channelScopes = new Map<Wire, ChannelScope>();
+  /** What each link's app said it supports (`client-hello`, .specs/
+   *  versioning.md "Protocol"). Absent: an app from before the handshake. */
+  const clientHellos = new WeakMap<Wire, ProtocolHello>();
   /** Each open link's opaque id, transport and when it opened, for the
    *  owner's Remote connections (runnerConnections.ts). Set and cleared with
    *  channelScopes. */
@@ -1061,6 +1258,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
             JSON.stringify({ ...msg, payload: forOwner })
           );
           reportSettledSession(spaceSlug, data);
+          activity.syncSessions();
         } else {
           broadcastToBoard(spaceSlug, JSON.stringify(msg));
         }
@@ -1107,8 +1305,20 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         },
         // Read at each use: the token is refreshed while the engine lives. No
         // session gets a copy: the board MCP is relayed by the engine over the
-        // secrets socket, and a tunnel asks for it over that same socket.
+        // secrets socket.
         runnerToken: () => config.authToken,
+        // What a tunnel's frpc is given instead (runnerToken.ts
+        // tunnelCredential): a frp-only credential the server mints.
+        tunnelCredential: () =>
+          tunnelCredential({
+            connected: () => socket.connected,
+            serverLacks: () => serverPeer.lacks('tunnelToken'),
+            ask: () =>
+              socket
+                .timeout(RUNNER_TUNNEL_TOKEN_ACK_TIMEOUT_MS)
+                .emitWithAck('runner:tunnel-token', {}),
+            accessToken: () => config.authToken
+          }),
         // Board MCP is server-hosted: the engine's relay posts to this base URL.
         serverUrl: config.serverUrl,
         // Disconnecting GitHub revokes the token at GitHub through the server,
@@ -1573,6 +1783,25 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     })();
   });
 
+  // A session on another runner reads, messages or starts a session here,
+  // through the server (.specs/card-sessions.md "Across runners"). The
+  // server checked that the person may use both runners on those boards;
+  // answerSessionOp checks this runner's own levels again, and the owner's
+  // "Allow sessions to be started from other runners" for a start. The
+  // board is found the way every relayed call finds it (knownEngine).
+  socket.on('runner:session-op', (raw, ack) => {
+    void (async () => {
+      try {
+        const op = sessionOpSchema.parse(raw);
+        knownEngine(op.spaceSlug, op.spaceId);
+        ack(await answerSessionOp(hypervisor, op));
+        if (op.op === 'start') sessionsReporter.now();
+      } catch (err) {
+        ack(ackError(err));
+      }
+    })();
+  });
+
   // A Routine is due (.todos/routines.md): open a Chat session on its board
   // with the prompt, acting for the owner, the way start_session does
   // (session-hypervisor.ts). The server sends it only to the routine owner's
@@ -1634,12 +1863,22 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   // Disk and memory, for the owner's low-space banner and push
   // (healthWatch.ts). A change while offline is said on the next connect.
+  // A new level also goes to status.factiii.com at once (statusPage.ts),
+  // not at its next 2 minute beat; set once the beat starts, below.
+  let statusBeatNow = (): void => {};
+  let beatLevel: RunnerHealthAlert['level'] | null = null;
   const healthWatch = watchMachineHealth((alert) => {
     if (socket.connected) socket.emit('runner:health', alert);
+    if (alert.level !== beatLevel) {
+      beatLevel = alert.level;
+      statusBeatNow();
+    }
   });
 
   socket.on('connect', () => {
     console.log(`Connected. Runner "${config.runnerName}" is online.`);
+    // Factiii Desktop's "Runner online" reads this, never the log above.
+    writeRunnerOnline(CONFIG_DIR, { pid: process.pid, online: true, runnerName: config.runnerName });
     console.log('Waiting for connections from UI clients...\n');
     reportConnections();
     // The server keeps the last report per connection, so every (re)connect
@@ -1649,8 +1888,18 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     const health = healthWatch.current();
     if (health) socket.emit('runner:health', health);
     sendHeartbeat();
+    // Connected: an update that brought this version stays (updateSafety.ts).
+    if (markUpdateHealthy(CONFIG_DIR, currentVersion())) {
+      console.log(`[update] ${currentVersion()} is up; the update stays.`);
+    }
+    // The session directory (sessionRelay.ts), kept per connection too: said
+    // once the server answered the hello, so it is sent only to a server
+    // that keeps it. Its held messages come to this runner with it.
+    void serverPeer.greet().then(() => sessionsReporter.now());
     void refreshToken(false);
     void askBoardNames();
+    // A first session the Desktop asked for while this runner was offline.
+    void startOnboarding();
   });
 
   // A space's name, and so its slug, changed on the server.
@@ -1660,6 +1909,10 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   socket.on('disconnect', (reason: string) => {
     console.log(`Disconnected: ${reason}. Reconnecting...`);
+    serverPeer.reset();
+    // The next connection has no directory report yet.
+    sessionsReporter.reset();
+    writeRunnerOnline(CONFIG_DIR, { pid: process.pid, online: false, runnerName: config.runnerName });
     // The server drops every relayed link with the socket, and a client dials
     // a fresh one once it sees this runner come back.
     for (const link of socketLinks.values()) link.close();
@@ -1669,8 +1922,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     console.error(`Connection error: ${err.message}`);
     // What the server says to an access token it cannot accept or refresh: a
     // bad signature, a refresh token left unused past its idle limit, a
-    // legacy token on a runner that already holds a refresh token, or a token
-    // chain the server ended because a replaced refresh token was used.
+    // legacy token (no `exp`, refused on every runner), or a token chain the
+    // server ended because a replaced refresh token was used.
     if (err.message === 'invalid runner token') {
       console.error(
         'The server no longer accepts this runner\'s token. Pair it again with "factiii-runner connect".'
@@ -1681,10 +1934,11 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   // ── Heartbeat and token refresh (.specs/runner-link.md, "Runner token") ──
   // The heartbeat tells the server this runner's version and that it is here;
   // the server stores both on the runner's row. A server from before the event
-  // ignores it.
+  // ignores it. It carries the handshake's features too (runnerHello), so a
+  // server that missed the hello still knows them.
   const sendHeartbeat = (): void => {
     if (socket.connected) {
-      socket.emit('runner:heartbeat', { version: currentVersion() });
+      socket.emit('runner:heartbeat', runnerHello(currentVersion()));
     }
   };
 
@@ -1732,12 +1986,13 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     void refreshToken(false);
   }, heartbeatIntervalMs());
   // status.factiii.com, apart from Factiii's servers: off until the owner
-  // sets it (statusPage.ts).
-  const stopStatusBeat = startStatusHeartbeat({
+  // sets it (statusPage.ts). The level is the health watch's, read every 30 s.
+  const statusBeat = startStatusHeartbeat({
     runnerName: () => config.runnerName,
     version: currentVersion(),
-    level: async () => (await machineHealth(run)).level
+    level: () => healthWatch.current()?.level ?? null
   });
+  statusBeatNow = statusBeat.now;
 
   /** Serve one client link: scope it, replay state on open, and dispatch what
    *  it sends. Shared by both transports — a WebRTC data channel and a link
@@ -1801,10 +2056,10 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     // fires on phase changes, so a mid-session refresh would see nothing.
     dc.onOpen(() => {
       // Tell the client which version this runner is on, so the board can
-      // compare against npm's latest and offer an update if it's behind.
-      sendToChannel(
-        JSON.stringify({ type: 'runner-info', version: currentVersion() })
-      );
+      // compare against npm's latest and offer an update if it's behind, and
+      // what it supports (.specs/versioning.md "Protocol"), so a newer app
+      // turns off what this runner lacks instead of sending it.
+      sendToChannel(JSON.stringify(runnerInfoFrame(currentVersion())));
       // And, to its owner, how its connection storage is doing - the same
       // frame an unlock broadcasts. It is how the app learns, with no settings
       // panel open, that this runner is waiting for its old password.
@@ -1880,6 +2135,14 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           event?: string;
           payload?: unknown;
         };
+        // The app's half of the handshake: kept for this link. Nothing on the
+        // runner turns on or off by it yet (CLIENT_FEATURES is empty); an app
+        // that sends none is from before it.
+        if (parsed.type === 'client-hello') {
+          const hello = parseHello(parsed);
+          if (hello) clientHellos.set(dc, hello);
+          return;
+        }
         if (parsed.type === 'terminal') {
           // A terminal is a shell as the runner user: owner-only unless
           // the owner gave this member the Shell level, whatever the
@@ -1955,7 +2218,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         {
           connections: () => runnerConnections.connections(linkId),
           logs: (payload) => runnerConnections.logs(payload)
-        }
+        },
+        activity
       );
     });
 
@@ -2059,6 +2323,14 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   socket.on('runnerOffer', (data: RunnerOfferData) => {
     console.log(`Received WebRTC offer from ${data.fromSocketId}`);
+    // Step timings for this link, from the offer's arrival: answer sent, ICE
+    // connected, channel open. Logged on one line once the channel opens
+    // (.specs/runner-link.md "Step timings"); the client logs its own half
+    // under the same link id.
+    const offerAt = Date.now();
+    const steps: string[] = [];
+    const step = (name: string) => steps.push(`${name}=${Date.now() - offerAt}ms`);
+    const linkTag = data.linkId ? ` link=${data.linkId}` : '';
 
     // Access this connection gets, vouched by the server. Owner = all boards;
     // a shared member = only the boards on the offer's scope.
@@ -2162,6 +2434,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       };
 
       const iceCandidateHandler = (msg: RunnerIceCandidateData) => {
+        // Two dials from one client can be in flight at once (a link and its
+        // upgrade try): a candidate tagged for another link is not this one's.
+        if (msg.linkId && data.linkId && msg.linkId !== data.linkId) return;
         if (msg.fromSocketId === data.fromSocketId) {
           console.log(`[webrtc] remote ICE candidate: ${msg.candidate.candidate.slice(0, 60)}...`);
           view.remote.add(candidateType(msg.candidate.candidate));
@@ -2183,7 +2458,10 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       peer.onStateChange((state: string) => {
         console.log(`[webrtc] peer state: ${state}`);
         view.ice = state;
-        if (state === 'connected') report('connected');
+        if (state === 'connected') {
+          step('connected');
+          report('connected');
+        }
         if (
           state === 'failed' ||
           state === 'closed' ||
@@ -2214,7 +2492,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           // rejecting every candidate we send and stranding the link at
           // checking. sdpMid identifies the m-line on its own, so the index is
           // redundant here anyway.
-          candidate: { candidate, sdpMid: mid, sdpMLineIndex: 0 }
+          candidate: { candidate, sdpMid: mid, sdpMLineIndex: 0 },
+          ...(data.linkId ? { linkId: data.linkId } : {})
         });
       });
 
@@ -2234,9 +2513,11 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         const mid = negotiatedMid(sdp);
         if (mid) simulatorSink?.packetizer.setMidExtension(mid.id, mid.mid);
         console.log(`Sending answer to ${data.fromSocketId}`);
+        step('answer');
         socket.emit('runnerAnswer', {
           targetSocketId: data.fromSocketId,
-          answer: { sdp, type: 'answer' as const }
+          answer: { sdp, type: 'answer' as const },
+          ...(data.linkId ? { linkId: data.linkId } : {})
         });
       });
 
@@ -2244,6 +2525,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
         console.log(
           `Data channel "${dc.getLabel()}" opened with ${data.fromSocketId}`
         );
+        step('channel');
+        console.log(`[webrtc] timings${linkTag}: ${steps.join(' ')}`);
         attachChannel(
           dc,
           scope,
@@ -2324,7 +2607,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     // Lid closed off before exiting: the setting outlives the process.
     keepAwake.shutdown();
     clearInterval(heartbeatTimer);
-    stopStatusBeat();
+    autoUpdate.stop();
+    statusBeat.stop();
     socket.disconnect();
   };
 
@@ -2389,10 +2673,16 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     exit: () => setTimeout(() => process.exit(0), 1500)
   });
 
-  // Update approved: install, tell clients, then exit RESTART_FOR_UPDATE so
-  // the supervisor relaunches on the new code. A failed install stays up.
-  const applyUpdateAndRestart = async () => {
-    console.log('[update] update approved by a client — installing latest...');
+  // Update approved (or automatic, autoUpdate.ts): install, tell clients,
+  // then exit RESTART_FOR_UPDATE so the supervisor relaunches on the new
+  // code. A failed install stays up. The automatic one goes ahead only with a
+  // copy of this version to roll back to (installLatest requireRollback).
+  const applyUpdateAndRestart = async (auto = false) => {
+    console.log(
+      auto
+        ? '[update] installing the new release automatically...'
+        : '[update] update approved by a client — installing latest...'
+    );
     const status = (state: 'installing' | 'restarting' | 'failed') =>
       broadcastToAll(JSON.stringify({ type: 'runner-update', state }));
 
@@ -2404,7 +2694,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       return;
     }
     status('installing');
-    if (!(await installLatest())) {
+    if (!(await installLatest({ runnerDir: CONFIG_DIR, requireRollback: auto }))) {
       status('failed');
       return;
     }
@@ -2414,10 +2704,53 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     process.exit(RESTART_FOR_UPDATE);
   };
 
+  // Up for a while without crashing: an update that brought this version
+  // stays, even with the server unreachable (updateSafety.ts).
+  setTimeout(() => markUpdateHealthy(CONFIG_DIR, currentVersion()), HEALTHY_AFTER_MS).unref();
+  // The automatic update: on unless the owner turned it off (`factiii-runner
+  // update auto off`), never while work an update would cut is running, and
+  // never in the runner Factiii Desktop carries (it updates with the app).
+  const autoUpdate = startAutoUpdate({
+    enabled: () =>
+      process.env.FACTIII_BUNDLED_RUNNER !== '1' && readUpdateSettings(CONFIG_DIR).auto,
+    busy: () => {
+      const work = runnerWork();
+      return (
+        nuke.running() ||
+        work.sessions > 0 ||
+        work.jobs > 0 ||
+        activity.registry.running().length > 0
+      );
+    },
+    latest: latestAvailable,
+    failed: (version) => hasFailed(CONFIG_DIR, version),
+    // A successful install exits for the relaunch, so coming back here
+    // means it did not go through.
+    apply: async (version) => {
+      await applyUpdateAndRestart(true);
+      recordLastUpdate(CONFIG_DIR, {
+        kind: 'skipped',
+        version,
+        reason: 'install-failed',
+        at: Date.now()
+      });
+    },
+    log: (line) => console.log(line),
+    // The Software tab's last-outcome line (updateSafety.ts).
+    record: (result) => recordLastUpdate(CONFIG_DIR, result)
+  });
+  // A release went out (the server heard it from the release workflow): look
+  // within the minute rather than at the daily check. The look reads npm and
+  // GitHub itself; the event's version is not trusted for anything.
+  socket.on('runner:release', () => autoUpdate.soon());
+
   /** An unlocked Vault's last encrypted dump before the process goes
-   *  (vault/sealedDb.ts): its writes since the last flush. Bounded, so a
+   *  (shared/vault-core/sealedDb.ts): its writes since the last flush. Bounded, so a
    *  stuck database cannot hold the exit. */
   async function closeVault(): Promise<void> {
+    findingsJob.stop();
+    stopActivityPurge();
+    sessionsReporter.stop();
     await Promise.race([
       vault.close().catch(() => undefined),
       new Promise((resolve) => setTimeout(resolve, 15_000).unref())
@@ -2486,6 +2819,92 @@ function ownerSessionView(
   );
 }
 
+const JOB_ENGINES = new Set(['claude', 'codex', 'ollama'] as const);
+const asJobEngine = (raw: unknown) =>
+  JOB_ENGINES.has(raw as 'claude') ? (raw as 'claude' | 'codex' | 'ollama') : null;
+
+/** One `aiPrompt`, as an `ai-request` job in the runner's Activity: the
+ *  prompt and the answer are its log, and Stop aborts it. */
+async function trackedAiPrompt(
+  engines: AiPromptEngines,
+  payload: unknown,
+  scope: ChannelScope,
+  activity: ActivityHost
+): Promise<Awaited<ReturnType<typeof answerAiPrompt>>> {
+  const asked = (payload ?? {}) as { prompt?: unknown; engine?: unknown };
+  const controller = new AbortController();
+  const job = activity.start({
+    type: 'ai-request',
+    engine: asJobEngine(asked.engine),
+    startedBy: personOf(scope),
+    log: true,
+    stop: () => controller.abort()
+  });
+  if (typeof asked.prompt === 'string') job.log(`Prompt:\n${asked.prompt}\n\n`);
+  try {
+    const answer = await answerAiPrompt(engines, payload, controller.signal);
+    job.setEngine(answer.engine);
+    job.log(`Answer (${answer.engine}):\n${answer.text}\n`);
+    job.end('done');
+    return answer;
+  } catch (err) {
+    job.end('failed', err instanceof Error ? err.message : String(err));
+    throw err;
+  }
+}
+
+/** What an Ask log entry adds to its job's log: the answer as it streams
+ *  (Claude's `text-append` pieces; a whole `text` only from an engine that
+ *  streams none, as Codex), and tools and errors on their own lines.
+ *  Thinking and system lines are left out. */
+function askLogLine(): (entry: { type: string; content: string }) => string {
+  let streamed = false;
+  return ({ type, content }) => {
+    if (type === 'text-append') {
+      streamed = true;
+      return content;
+    }
+    if (type === 'text') return streamed ? '' : `${content}\n`;
+    if (type === 'tool' || type === 'error') return `\n[${type}] ${content}\n`;
+    return '';
+  };
+}
+
+/** Ask Board's turn, as an `ask` job ("Ask AI · <board>"). */
+function startAskJob(
+  activity: ActivityHost,
+  engine: BoardAgentEngine,
+  spaceSlug: string,
+  payload: unknown,
+  scope: ChannelScope
+) {
+  const asked = (payload ?? {}) as { question?: unknown; provider?: unknown; conversationId?: unknown };
+  const conversationId = typeof asked.conversationId === 'string' ? asked.conversationId : undefined;
+  const boardName = boardLabel(knownBoards(CONFIG_DIR).find((b) => b.slug === spaceSlug), spaceSlug);
+  const job = activity.start({
+    type: 'ask',
+    engine: asJobEngine(asked.provider),
+    title: `Ask AI · ${boardName}`,
+    board: spaceSlug,
+    boardName,
+    startedBy: personOf(scope),
+    log: true,
+    // An older client names no conversation, and its turn cannot be told
+    // from the board's other Asks (the engine takes the current one when it
+    // starts): stopping them all would end other people's, so it has no Stop.
+    stop: conversationId === undefined ? undefined : () => engine.askStop(conversationId)
+  });
+  // No provider asked for: the row shows the board's.
+  if (!asJobEngine(asked.provider)) {
+    void engine
+      .getConfig()
+      .then((config) => job.setEngine(asJobEngine(config.provider)))
+      .catch(() => undefined);
+  }
+  if (typeof asked.question === 'string') job.log(`Question:\n${asked.question}\n\nAnswer:\n`);
+  return job;
+}
+
 async function handleDataChannelMessage(
   raw: string,
   scope: ChannelScope,
@@ -2508,7 +2927,9 @@ async function handleDataChannelMessage(
   connections: {
     connections: () => ReturnType<RunnerConnectionsHost['connections']>;
     logs: RunnerConnectionsHost['logs'];
-  }
+  },
+  /** The runner's Activity (activity/daemonActivity.ts). */
+  activity: ActivityHost
 ): Promise<void> {
   let msg: DispatchMessage;
   try {
@@ -2539,7 +2960,7 @@ async function handleDataChannelMessage(
     return;
   }
 
-  // The Vault is runner-wide and has its own members (vault/access.ts), so it
+  // The Vault is runner-wide and has its own members (shared/vault-core/access.ts), so it
   // is answered before the per-board gate: a vault member may have no board.
   if (VAULT_ACTIONS.has(action)) {
     try {
@@ -2575,6 +2996,25 @@ async function handleDataChannelMessage(
     return;
   }
 
+  // Scan this computer (machineScan.ts): runner-wide, the owner's alone, on a
+  // direct link (the relay was refused above). Read-only; the report goes back
+  // to the app and nowhere else.
+  if (action === 'machineScan') {
+    try {
+      if (scope.role !== 'owner') {
+        throw new Error('Only the owner of this runner can scan its computer.');
+      }
+      const result = await scanMachine(defaultScanDeps(hostname()));
+      console.log(`[${ts()}] ✓ machineScan for ${scope.name}`);
+      sendResult({ type: 'result', requestId, result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${ts()}] ✗ ${action} FAILED: ${message}`);
+      sendResult({ type: 'result', requestId, error: message });
+    }
+    return;
+  }
+
   // Keep-awake: the machine's sleep, so runner-wide and the owner's alone,
   // whichever board asks.
   if (action === 'keepAwakeSet') {
@@ -2587,6 +3027,34 @@ async function handleDataChannelMessage(
         throw new Error('Keep-awake needs on, and until (a time, or null).');
       }
       const result = keepAwake.set(parsed.data);
+      sendResult({ type: 'result', requestId, result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${ts()}] ✗ ${action} FAILED: ${message}`);
+      sendResult({ type: 'result', requestId, error: message });
+    }
+    return;
+  }
+
+  // Software > "Update automatically": the runner's own automatic update,
+  // so runner-wide and the owner's alone, whichever board asks. The same
+  // setting `factiii-runner update auto on|off` writes (updateSafety.ts).
+  if (action === 'autoUpdateGet' || action === 'autoUpdateSet') {
+    try {
+      if (scope.role !== 'owner') {
+        throw new Error('Only the owner of this runner can change how it updates.');
+      }
+      let result;
+      if (action === 'autoUpdateSet') {
+        const parsed = autoUpdateSetSchema.safeParse(payload ?? {});
+        if (!parsed.success) throw new Error('Say auto: true or false.');
+        result = setAutoUpdate(CONFIG_DIR, parsed.data.auto);
+        console.log(
+          `[update] automatic updates ${parsed.data.auto ? 'on' : 'off'} (by ${scope.name})`
+        );
+      } else {
+        result = readAutoUpdateState(CONFIG_DIR);
+      }
       sendResult({ type: 'result', requestId, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2629,7 +3097,7 @@ async function handleDataChannelMessage(
       const result =
         action === 'aiPromptInfo'
           ? await aiPromptInfo(aiEngines, payload)
-          : await answerAiPrompt(aiEngines, payload);
+          : await trackedAiPrompt(aiEngines, payload, scope, activity);
       sendResult({ type: 'result', requestId, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2650,6 +3118,22 @@ async function handleDataChannelMessage(
       }
       const result =
         action === 'partsAct' ? await runnerParts.act(payload) : await runnerParts.list();
+      sendResult({ type: 'result', requestId, result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${ts()}] ✗ ${action} FAILED: ${message}`);
+      sendResult({ type: 'result', requestId, error: message });
+    }
+    return;
+  }
+
+  // The runner's Activity (activity/): its AI jobs, logs, Stop and History.
+  // Runner-wide whether or not a board is named: the owner sees every job, a
+  // member at Shell their boards' (activity/access.ts). A log is refused on
+  // the relay above (relaySecretsRefusal).
+  if (RUNNER_ACTIVITY_ACTIONS.has(action)) {
+    try {
+      const result = await activity.handle(action, payload, scope);
       sendResult({ type: 'result', requestId, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2882,13 +3366,26 @@ async function handleDataChannelMessage(
     broadcastToBoard(msg.spaceSlug, JSON.stringify(event));
   };
 
+  // Ask Board is an `ask` job in the runner's Activity: its question and
+  // streamed answer are its log, and Stop ends its CLI.
+  const askJob = action === 'ask' ? startAskJob(activity, engine, msg.spaceSlug, payload, scope) : null;
+  const askJobLog = askJob ? askLogLine() : null;
+  const logSender =
+    askJob && askJobLog
+      ? (entry: { type: string; content: string }) => {
+          askJob.log(askJobLog(entry));
+          askLogSender(entry);
+        }
+      : askLogSender;
+
   try {
     const result = await engine.dispatch(
       action,
       payload as BoardAgentActionMap[typeof action]['payload'],
-      askLogSender,
+      logSender,
       channelContext(scope, access.dangerous(scope, msg.spaceSlug))
     );
+    askJob?.end('done');
     console.log(`[${ts()}] → ${action} OK`);
     const response: ResultMessage = {
       type: 'result',
@@ -2899,6 +3396,7 @@ async function handleDataChannelMessage(
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error(`[${ts()}] ✗ ${action} FAILED: ${errorMsg}`);
+    askJob?.end('failed', errorMsg);
     if (screenRequest?.use === 'attach') {
       access.screenFailed(scope, screenRequest.kind);
     }

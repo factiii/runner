@@ -19,8 +19,9 @@ export type { PendingSecretsAuth };
 export type SecretsAuthResult =
   | {
       password: string;
-      /** Minutes the answer asks the runner to stay unlocked for jobs.
-       *  Absent = the caller's default (see secrets-window.ts). */
+      /** Minutes the answer asks the runner to stay unlocked: for jobs, or
+       *  on a free command for that session and its keys. Absent = the
+       *  caller's default (see secrets-window.ts). */
       unlockFor?: number;
       /** Who answered, server-vouched, for the window and the audit log. */
       by?: { userId: string; name: string };
@@ -58,9 +59,13 @@ export const DEPLOY_ORIGIN = 'Deploy run';
 export const UNATTRIBUTED =
   'This runner did not start the session that asked, so the request was refused. `factiii-secrets` only works inside a session the runner spawned.';
 
+/** Who holds a token: the label the owner sees on a prompt, and which session
+ *  it is, for the audit log (`run:<session>`, `deploy`, ...). */
+export type SecretsCaller = { origin: string; session: string };
+
 export class SecretsGate {
-  /** token -> origin label. Lives as long as the session that holds it. */
-  private tokens = new Map<string, string>();
+  /** token -> its holder. Lives as long as the session that holds it. */
+  private tokens = new Map<string, SecretsCaller>();
   private waiting: Waiting | null = null;
   /** Queued requests (jobs, inbox writes) waiting for the slot, oldest first. */
   private deferred: Waiting[] = [];
@@ -83,28 +88,36 @@ export class SecretsGate {
   // ── Who is asking ──
 
   /** Mint a token for one session, labelled with what the owner should see on
-   *  the prompt - the label is most of the decision, so name the session. */
-  issueToken(origin: string): string {
+   *  the prompt - the label is most of the decision, so name the session.
+   *  `session` says which one it is in the audit log. */
+  issueToken(origin: string, session = ''): string {
     const token = crypto.randomBytes(24).toString('hex');
-    this.tokens.set(token, origin);
+    this.tokens.set(token, { origin, session });
     return token;
   }
 
-  /** Register a durable token the caller already holds, instead of minting a
-   *  fresh one. For the space token: terminals outlive this process, so a
-   *  minted one leaves them unattributed after a restart. Idempotent. */
-  adoptToken(token: string, origin: string): string {
-    this.tokens.set(token, origin);
-    return token;
+  private revokeListeners = new Set<(token: string) => void>();
+
+  /** Told when a token is revoked, so what was scoped to that session (a
+   *  session window) ends with it. */
+  onRevoke(listener: (token: string) => void): () => void {
+    this.revokeListeners.add(listener);
+    return () => this.revokeListeners.delete(listener);
   }
 
   /** Drop a session's token when it ends, so a leaked one stops working. */
   revokeToken(token: string): void {
     this.tokens.delete(token);
+    for (const listener of this.revokeListeners) listener(token);
   }
 
   /** The origin for a token, or null when this runner never issued it. */
   originFor(token: string): string | null {
+    return this.tokens.get(token)?.origin ?? null;
+  }
+
+  /** The holder of a token, or null when this runner never issued it. */
+  callerFor(token: string): SecretsCaller | null {
     return this.tokens.get(token) ?? null;
   }
 
@@ -129,6 +142,7 @@ export class SecretsGate {
     caller?: { userId: string; name: string };
     job?: string;
     inbox?: PendingSecretsAuth['inbox'];
+    sessionWindow?: boolean;
     queued?: boolean;
     tag?: string;
   }): Promise<SecretsAuthResult> {
@@ -143,7 +157,8 @@ export class SecretsGate {
           requestedAt: Date.now(),
           ...(opts.caller ? { caller: opts.caller } : {}),
           ...(opts.job ? { job: opts.job } : {}),
-          ...(opts.inbox ? { inbox: opts.inbox } : {})
+          ...(opts.inbox ? { inbox: opts.inbox } : {}),
+          ...(opts.sessionWindow ? { sessionWindow: true } : {})
         },
         resolve,
         queued: opts.queued ?? false,
@@ -264,5 +279,6 @@ export class SecretsGate {
     this.cancel();
     this.tokens.clear();
     this.listeners.clear();
+    this.revokeListeners.clear();
   }
 }

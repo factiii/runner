@@ -71,7 +71,7 @@ export function runnerDocNote(post: RunnerVaultFilePost): string | null {
 }
 
 export const RUNNER_FILE_UNREAD =
-  'Not read yet. Your runner reads a file before it can show its text, search it or categorize it. Reading needs Vault search, which runs on a Mac with Apple silicon or on Linux.';
+  'Not read yet. Your runner reads a file before it can show its text, search it or categorize it. Reading needs the runner’s search by meaning, which runs on a Mac with Apple silicon or on Linux.';
 
 /** The meta line under the title: where it is, how it was read, how much. */
 export function runnerDocMeta(

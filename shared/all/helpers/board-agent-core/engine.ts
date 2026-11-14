@@ -8,9 +8,9 @@ import type {
   PendingDangerousApproval,
   RunnerCleanup,
   RunnerJobEndState,
+  RunnerJobTargetWait,
   RunnerPartsState,
   RunnerServiceOutcome,
-  RunnerJobTargetWait,
   RunnerServiceState,
   SecureStoreStatus
 } from '../../domains/electron';
@@ -20,6 +20,12 @@ import {
   SETUP_EXTRA_PREFIX,
   SETUP_LOG_PREFIX
 } from '../../domains/electron';
+import type { RelaySession, SessionOpAck } from '../../domains/sessionRelay';
+import {
+  CODEX_NOTICE_ACTIONS,
+  CODEX_NOTICE_REQUIRED
+} from '../../validators/codexNotice';
+import { sessionOpSchema } from '../../validators/sessionRelay';
 import {
   isWorktreeSession,
   orphanWorkspaceFromPanes,
@@ -29,7 +35,7 @@ import {
 import { ClaudeModeEngine } from '../card-ai/claude-mode';
 import { listConversations } from '../terminal-ai/chatHistory';
 import { ChatRuns } from '../terminal-ai/chatRun';
-import { terminalInterrupt } from '../terminal-ai/chatTerminal';
+import { pasteIntoAgent, terminalInterrupt } from '../terminal-ai/chatTerminal';
 import {
   readChatTranscript,
   readWorkPath,
@@ -92,11 +98,6 @@ import {
   startSkillRun
 } from './host-run';
 import {
-  checkMergedSkill,
-  prepareSkillUpdate,
-  type SkillLibraryUpdate
-} from './host-skill-update';
-import {
   adoptRunnerKey,
   changeSpacePassword,
   initSecrets,
@@ -116,6 +117,11 @@ import {
   unsetSecretFile,
   unsetSecretFileEnvKey
 } from './host-secrets';
+import {
+  checkMergedSkill,
+  prepareSkillUpdate,
+  type SkillLibraryUpdate
+} from './host-skill-update';
 import {
   deleteGlobalSkill,
   listSkills,
@@ -174,7 +180,12 @@ import type {
   SessionStarter,
   SessionSummary
 } from './session';
-import type { HypervisorBoard, HypervisorSession } from './session-hypervisor';
+import {
+  answerSessionOp,
+  type HypervisorBoard,
+  type HypervisorSession
+} from './session-hypervisor';
+import { type InboxDelivery, SessionInbox } from './session-inbox';
 import { SimulatorStore } from './simulator-store';
 import { SpaceCore, type SpaceCoreOptions } from './space-core';
 import {
@@ -423,6 +434,9 @@ export class BoardAgentEngine {
   private terminal: TerminalModeEngine;
   /** Each terminal session's chat: its own headless Claude (chatRun.ts). */
   private chatRuns: ChatRuns;
+  /** message_session's inbox per session (session-inbox.ts): a message
+   *  waits there until it can go in without cutting a turn short. */
+  private sessionInbox: SessionInbox;
   private workPathTimer: ReturnType<typeof setInterval>;
   private followingWorkPaths = false;
   private emitter: AgentEventSink;
@@ -450,6 +464,9 @@ export class BoardAgentEngine {
    *  startup prune must be told they are live. */
   private reservingPorts = new Set<string>();
   private runnerOwnerId: string | null;
+  /** On an installed runner (the daemon lends its hypervisor), not the
+   *  desktop app: the desktop-only relay actions are refused here. */
+  private onRunner: boolean;
   /** Board AI questions being answered right now, across conversations. */
   private asksInFlight = 0;
 
@@ -510,6 +527,9 @@ export class BoardAgentEngine {
       // The session's CLI: its chat runs that one (chatCli.ts).
       provider: (id) => this.terminal.get(id)?.provider
     });
+    this.sessionInbox = new SessionInbox({
+      deliver: (id, text) => this.deliverInbox(id, text)
+    });
     this.scratchpad = new ScratchpadStore(
       () => this.core.target(),
       (payload) => this.emitter.emitScratchpad(payload)
@@ -527,6 +547,7 @@ export class BoardAgentEngine {
     this.onSigninChanged = options.onSigninChanged;
     this.onJobState = options.onJobState;
     this.runnerOwnerId = options.runnerOwnerId || null;
+    this.onRunner = Boolean(options.hypervisor);
     this.revokeGithubToken = options.revokeGithubToken;
     this.runnerService = options.runnerService;
     this.runnerParts = options.runnerParts;
@@ -629,7 +650,8 @@ export class BoardAgentEngine {
     if (this.opsLink) return this.opsLink.gateState();
     return {
       pending: this.gate.pending(),
-      unlocked: this.core.window.state()
+      unlocked: this.core.window.state(),
+      sessionWindows: this.core.sessionWindows.state()
     };
   }
 
@@ -658,15 +680,20 @@ export class BoardAgentEngine {
     );
   }
 
-  /** End the unlock window now. Anyone who may answer the gate may lock it:
-   *  locking only ever takes access away. */
+  /** End the unlock window and every session window now. Anyone who may
+   *  answer the gate may lock it: locking only ever takes access away. */
   async secretsLock(ctx: ActionContext = OWNER_CONTEXT): Promise<{
     success: boolean;
   }> {
     // The ops half locks and writes the audit line itself.
     if (this.opsLink) return this.opsLink.lock(ctx.actor, ctx.via);
     const holder = this.core.window.holder();
-    if (this.core.window.lock()) {
+    const sessions = this.core.sessionWindows.state();
+    // Both kinds, and one line for what was open: `detail` counts the
+    // session windows so the log says what Lock now ended.
+    const jobWindowWasOpen = this.core.window.lock();
+    const sessionsWereOpen = this.core.sessionWindows.lockAll();
+    if (jobWindowWasOpen || sessionsWereOpen) {
       await this.core.audit.append({
         actor: ctx.actor,
         via: ctx.via,
@@ -675,7 +702,12 @@ export class BoardAgentEngine {
         keys: [],
         exitCode: null,
         durationMs: null,
-        unlockedBy: holder?.name ?? null
+        unlockedBy: holder?.name ?? sessions[0]?.byName ?? null,
+        ...(sessions.length
+          ? {
+              detail: `${jobWindowWasOpen ? 'jobs window and ' : ''}${sessions.length} session window${sessions.length === 1 ? '' : 's'} (${sessions.map((w) => w.session || w.origin).join(', ')})`
+            }
+          : {})
       });
     }
     return { success: true };
@@ -731,10 +763,14 @@ export class BoardAgentEngine {
     } catch (err) {
       // Past the password check the key may already be replaced, and the
       // window's copy opens nothing; a wrong guess changed nothing.
-      if (!isFailedPasswordAttempt(err)) this.core.window.lock();
+      if (!isFailedPasswordAttempt(err)) {
+        this.core.window.lock();
+        this.core.sessionWindows.lockAll();
+      }
       throw err;
     }
     this.core.window.lock();
+    this.core.sessionWindows.lockAll();
     await this.core.audit.append({
       actor: ctx.actor,
       via: ctx.via,
@@ -1079,7 +1115,9 @@ export class BoardAgentEngine {
     if (!this.isRunnerOwner(ctx))
       throw new Error(DANGEROUS_APPROVAL_OWNER_ONLY);
     return {
-      pending: this.opsLink ? this.opsLink.approvals() : this.approvals.pending()
+      pending: this.opsLink
+        ? this.opsLink.approvals()
+        : this.approvals.pending()
     };
   }
 
@@ -1445,6 +1483,51 @@ export class BoardAgentEngine {
   /** How much Codex may do in this board's sessions (codex-permissions.ts). */
   codexAccess() {
     return this.core.codexAccess();
+  }
+  /** Who the one-time Codex notice is recorded for: the person acting, or
+   *  the runner's owner on the owner's own channel (no id there). */
+  private codexNoticeUser(ctx: ActionContext): string {
+    return String(ctx.actor.userId) || this.runnerOwnerId || 'owner';
+  }
+  /** Whether `action` waits for its person to continue past the one-time
+   *  Codex notice (validators/codexNotice.ts; Jon 2026-11-11, q43): a Codex
+   *  run with no sandbox and no approval prompts, which is card AI, board
+   *  chat, a release and a skill run on Codex, owner and members alike, and
+   *  a session's chat on Codex on a board set to Full access. Never on a
+   *  host with no notice store (desktop), and never again for someone who
+   *  has seen it here. */
+  private async codexNoticeNeeded(
+    action: keyof BoardAgentActionMap,
+    payload: unknown,
+    ctx: ActionContext
+  ): Promise<boolean> {
+    const store = this.core.configProvider.codexNotice;
+    if (!store || store.seen(this.codexNoticeUser(ctx))) return false;
+    if (action === 'deployRunStart' || action === 'skillRunStart') {
+      // A void payload arrives as null over the wire.
+      const picked = (payload as { provider?: AgentProvider } | null)?.provider;
+      // As deployCreatorOpts picks it: the run's own, else the board's.
+      const provider = picked
+        ? resolveProvider(picked)
+        : this.core.agentProvider();
+      return provider === 'codex';
+    }
+    if (action === 'cardExecute') {
+      const p = payload as BoardAgentActionMap['cardExecute']['payload'];
+      return p.mode === 'claude' && this.cardProvider(p) === 'codex';
+    }
+    if (action === 'ask') {
+      const p = payload as BoardAgentActionMap['ask']['payload'];
+      return (await this.claude.askProvider(p)) === 'codex';
+    }
+    if (action === 'bareChatSend') {
+      const p = payload as BoardAgentActionMap['bareChatSend']['payload'];
+      return (
+        this.chatRuns.cli(String(p.postId)).id === 'codex' &&
+        this.core.codexAccess() === 'full'
+      );
+    }
+    return false;
   }
   setConfig(partial: Parameters<SpaceCore['setConfig']>[0]) {
     const result = this.core.setConfig(partial);
@@ -3163,14 +3246,42 @@ export class BoardAgentEngine {
   simulatorInput(p: BoardAgentActionMap['simulatorInput']['payload']) {
     return this.simulator.input(p);
   }
+  simulatorBoot(p: BoardAgentActionMap['simulatorBoot']['payload']) {
+    return this.simulator.boot(p);
+  }
+  simulatorCatalog() {
+    return this.simulator.catalog();
+  }
+  simulatorCreate(p: BoardAgentActionMap['simulatorCreate']['payload']) {
+    return this.simulator.create(p);
+  }
 
   // ── Cross-mode coordinators ──
+
+  /** The CLI a session started with `payload` runs: per job, defaulting to
+   *  the space config. A synthetic terminal has no agent but the chat's
+   *  Claude, whatever the default. */
+  private cardProvider(
+    payload: Pick<
+      BoardAgentActionMap['cardExecute']['payload'],
+      'postId' | 'provider'
+    >
+  ): AgentProvider {
+    return sessionProvider(
+      String(payload.postId),
+      payload.provider ?? resolveProvider(this.core.readConfig().provider)
+    );
+  }
 
   /** `origin`: who the session acts for (the channel's actor), and the
    *  session that started it when an agent did (start_session). */
   async cardExecute(
     payload: BoardAgentActionMap['cardExecute']['payload'],
-    origin: { startedBy?: SessionStarter; startedVia?: string } = {}
+    origin: {
+      startedBy?: SessionStarter;
+      startedVia?: string;
+      startedByRunner?: string;
+    } = {}
   ): Promise<{ taskId: string; postId: string }> {
     const {
       postId: rawPostId,
@@ -3188,13 +3299,7 @@ export class BoardAgentEngine {
       throw new Error('A session is already running for this card.');
     }
 
-    // Per-job provider, defaulting to the space config. A synthetic terminal
-    // has no agent but the chat's Claude, whatever the default.
-    const config = this.core.readConfig();
-    const provider = sessionProvider(
-      postId,
-      payload.provider ?? resolveProvider(config.provider)
-    );
+    const provider = this.cardProvider(payload);
 
     // Silent replace: drop the stale session, but do NOT emit
     // session-removed - the new session's emitSessionUpdate supersedes it.
@@ -3236,7 +3341,8 @@ export class BoardAgentEngine {
       // Filled in by the git claude pipeline once its worktree is created.
       workspacePath: '',
       startedBy: origin.startedBy,
-      startedVia: origin.startedVia
+      startedVia: origin.startedVia,
+      startedByRunner: origin.startedByRunner
     };
 
     await this.reserveSessionPorts(postId);
@@ -3435,6 +3541,12 @@ export class BoardAgentEngine {
     return this.owner(String(postId))?.get(String(postId))?.startedBy;
   }
 
+  /** The runner whose session started this one through the server's relay
+   *  (BaseSession.startedByRunner), for Activity's "started by <runner>". */
+  sessionStartedByRunner(postId: string): string | undefined {
+    return this.owner(String(postId))?.get(String(postId))?.startedByRunner;
+  }
+
   /** This board's terminals with who started each, for the runner owner's
    *  Remote connections (apps/runner runnerConnections.ts). */
   terminalSessions(): {
@@ -3615,7 +3727,8 @@ export class BoardAgentEngine {
         cardId: sessionCardId(s),
         worktree: code ? s.workspacePath : '',
         startedBy: s.startedBy,
-        startedVia: s.startedVia
+        startedVia: s.startedVia,
+        startedByRunner: s.startedByRunner
       };
     };
     return {
@@ -3646,13 +3759,19 @@ export class BoardAgentEngine {
             mode: 'bare',
             worktree: args.code
           },
-          { startedBy: args.startedBy, startedVia: args.startedVia }
+          {
+            startedBy: args.startedBy,
+            startedVia: args.startedVia,
+            startedByRunner: args.startedByRunner
+          }
         );
         if (args.cardId) this.terminal.setCardId(postId, args.cardId);
         void this.sendWhenReady(postId, args.message);
         return postId;
       },
-      send: (id, text) => this.chatRuns.send(id, text),
+      message: (id, text, messageId) =>
+        this.sessionInbox.add(id, text, messageId),
+      waiting: (id) => this.sessionInbox.pending(id).length,
       transcript: async (id) =>
         (
           await this.bareChatTranscript({
@@ -3677,6 +3796,19 @@ export class BoardAgentEngine {
       },
       end: (id, { deleteBranch }) =>
         this.endSession(id, { keepBranch: !deleteBranch }),
+      // Files between sessions (session-files.ts): a session's own workspace
+      // first, then the board's folders an agent hands things over in.
+      fileRoots: (id) => {
+        const { paths } = this.core.target();
+        const own = this.terminal.get(id)?.workspacePath;
+        return [
+          ...(own ? [own] : []),
+          paths.drops,
+          paths.scratchpad,
+          paths.builds
+        ];
+      },
+      dropsDir: () => this.core.target().paths.drops,
       audit: (entry) =>
         this.core.audit.append({
           actor: { userId: entry.actor.userId, name: entry.actor.name },
@@ -3690,6 +3822,97 @@ export class BoardAgentEngine {
           detail: entry.detail
         })
     };
+  }
+
+  /** The desktop app's sessions on this board, for the server's session
+   *  directory (.specs/card-sessions.md "Across runners"). Titles and
+   *  states only. A runner reports its own over its socket instead. */
+  private localRelaySessions(): RelaySession[] {
+    if (this.onRunner) {
+      throw new Error('A runner reports its sessions over its own socket.');
+    }
+    return this.hypervisorBoard()
+      .sessions()
+      .map((s) => ({
+        id: s.id,
+        title: s.title.slice(0, 200),
+        state: s.state,
+        mode: s.mode,
+        card: s.cardId
+      }));
+  }
+
+  /** A read or a message the server relayed to one of the desktop app's
+   *  sessions, from a session on its person's runner (the server sends the
+   *  desktop app only its own person's). Under the same rules as a runner's
+   *  (answerSessionOp), as the desktop's owner, and never a start: the
+   *  desktop app has no "Allow sessions to be started from other runners". */
+  private async localSessionOp(raw: unknown): Promise<SessionOpAck> {
+    if (this.onRunner) {
+      throw new Error('A runner answers relayed calls over its own socket.');
+    }
+    const op = sessionOpSchema.parse(raw);
+    if (op.spaceSlug !== this.core.spaceSlug) {
+      return {
+        error: `This desktop app's agent for ${this.core.spaceSlug} does not hold ${op.spaceSlug}.`
+      };
+    }
+    const board = this.hypervisorBoard();
+    const owner: SessionStarter = {
+      userId: op.actor.userId,
+      name: op.actor.name,
+      role: 'owner'
+    };
+    return answerSessionOp(
+      {
+        runner: 'desktop app',
+        owner: () => owner,
+        boards: () => [this.core.spaceSlug],
+        board: (slug) => (slug === this.core.spaceSlug ? board : null),
+        level: () => 'owner',
+        allowRemoteStarts: () => false
+      },
+      op
+    );
+  }
+
+  /** One try at an inbox message (session-inbox.ts), never over a turn:
+   *  - a chat turn running: queued behind it, as a second chat message is
+   *    (the chat holds the conversation, so no terminal CLI is closed);
+   *  - the CLI open in a tab: pasted in as its next prompt once its hooks
+   *    say idle; busy while it works or waits on a permission;
+   *  - neither: a chat turn, as the chat's own Send.
+   *  The chat's own send would close a CLI open in the terminal to take the
+   *  conversation (chatRun.ts drive), which is what closed the target's
+   *  Claude mid-turn before the inbox. */
+  private async deliverInbox(
+    postId: string,
+    text: string
+  ): Promise<InboxDelivery> {
+    const session = this.terminal.get(postId);
+    if (!session || session.phase === 'error') return 'gone';
+    if (session.phase !== 'bare-active') return 'busy';
+    if (this.chatRuns.running(postId)) {
+      this.chatRuns.send(postId, text);
+      return 'delivered';
+    }
+    const target = this.getCardTarget(postId);
+    if (!target) return 'gone';
+    if (session.agentState === 'working' || session.agentState === 'blocked') {
+      return 'busy';
+    }
+    const pane = await this.chatRuns.cli(postId).findPane(target, postId);
+    if (pane) {
+      // Unknown (no hooks reported yet) is not idle: it waits.
+      if (session.agentState !== 'idle') return 'busy';
+      await pasteIntoAgent(target, pane.paneId, text);
+      return 'delivered';
+    }
+    // A CLI in a tab the runner cannot find (no session record) while the
+    // hooks say one is there: never run a second CLI beside it.
+    if (session.agentLive && session.agentState !== 'idle') return 'busy';
+    this.chatRuns.send(postId, text);
+    return 'delivered';
   }
 
   /** start_session's opening message: into the chat once the session's
@@ -3902,21 +4125,41 @@ export class BoardAgentEngine {
    *  For a member who lost the Shell level (.specs/runner-member-access.md,
    *  "Changing a level"). Resolves with the titles (or ids) it stopped. */
   async stopMemberSessions(userId: string): Promise<string[]> {
-    const target = this.core.target();
-    const reason = 'Stopped: the runner owner took this member\'s Shell access.';
+    const reason = "Stopped: the runner owner took this member's Shell access.";
     const stopped: string[] = [];
     for (const mode of [this.claude, this.terminal] as const) {
       for (const postId of Object.keys(mode.listSummaries())) {
         const session = mode.get(postId);
         const by = session?.startedBy;
         if (!session || by?.role !== 'member' || by.userId !== userId) continue;
-        if (mode === this.claude) await this.claude.halt(postId, reason);
-        else this.chatRuns.stop(postId);
-        await killTerminalSessions(target, postId).catch(() => {});
+        await this.stopSession(postId, reason);
         stopped.push(session.taskTitle || postId);
       }
     }
     return stopped;
+  }
+
+  /** Stop one session: a card AI run settles in error with `reason`; a
+   *  terminal's chat stops and every shell in it ends. It keeps its
+   *  worktree, branch and record for the owner to look at or End. For a
+   *  member who lost Shell (stopMemberSessions) and for Stop in the runner's
+   *  Activity (apps/runner/src/activity/). False when there is no such
+   *  session. */
+  async stopSession(postId: string, reason: string): Promise<boolean> {
+    const id = String(postId);
+    const target = this.core.target();
+    if (this.claude.has(id)) await this.claude.halt(id, reason);
+    else if (this.terminal.has(id)) this.chatRuns.stop(id);
+    else return false;
+    await killTerminalSessions(target, id).catch(() => {});
+    return true;
+  }
+
+  /** Stop the Ask Board answer running for a conversation (Stop in the
+   *  runner's Activity, which always names one), or every one when none is
+   *  named. */
+  askStop(conversationId?: string): void {
+    this.claude.stopAsks(conversationId);
   }
 
   /** Stop a card's headless agent so a terminal can take over its thread
@@ -3955,6 +4198,7 @@ export class BoardAgentEngine {
     this.jobRunner?.destroy();
     this.opsLink?.close();
     this.inbox?.destroy();
+    this.sessionInbox.close();
     void this.claudeLogin?.cancel();
     void this.codexLogin?.cancel();
     for (const timer of this.signinExpiry.values()) clearTimeout(timer);
@@ -4014,7 +4258,20 @@ export class BoardAgentEngine {
       | undefined,
     ctx: ActionContext
   ): Promise<BoardAgentActionMap[A]['result']> {
+    // Before anything starts: the app asks, records the answer
+    // (codexNoticeAcknowledge) and sends the action again.
+    if (
+      CODEX_NOTICE_ACTIONS.has(action) &&
+      (await this.codexNoticeNeeded(action, payload, ctx))
+    ) {
+      throw new Error(CODEX_NOTICE_REQUIRED);
+    }
     switch (action) {
+      case 'codexNoticeAcknowledge':
+        this.core.configProvider.codexNotice?.markSeen(
+          this.codexNoticeUser(ctx)
+        );
+        return { success: true } as BoardAgentActionMap[A]['result'];
       case 'getConfig': {
         const config = await this.getConfig();
         // The runner's Git connections are its owner's GitHub accounts: a
@@ -4615,6 +4872,17 @@ export class BoardAgentEngine {
           payload as BoardAgentActionMap['simulatorInput']['payload']
         );
         return undefined as BoardAgentActionMap[A]['result'];
+      case 'simulatorBoot':
+        await this.simulatorBoot(
+          payload as BoardAgentActionMap['simulatorBoot']['payload']
+        );
+        return undefined as BoardAgentActionMap[A]['result'];
+      case 'simulatorCatalog':
+        return (await this.simulatorCatalog()) as BoardAgentActionMap[A]['result'];
+      case 'simulatorCreate':
+        return (await this.simulatorCreate(
+          payload as BoardAgentActionMap['simulatorCreate']['payload']
+        )) as BoardAgentActionMap[A]['result'];
       case 'secureStatus':
         return this.secureStatus() as BoardAgentActionMap[A]['result'];
       case 'runnerConnections':
@@ -4624,6 +4892,22 @@ export class BoardAgentEngine {
         throw new Error(
           'Only an installed runner (factiii-runner) can show its connections.'
         );
+      case 'runnerActivity':
+      case 'runnerJobHistory':
+      case 'runnerJobLog':
+      case 'runnerJobStop':
+      case 'runnerActivitySettings':
+        // Runner-wide, answered by the installed runner's daemon before any
+        // engine (apps/runner/src/activity/).
+        throw new Error(
+          'Only an installed runner (factiii-runner) keeps an Activity.'
+        );
+      case 'localRelaySessions':
+        return this.localRelaySessions() as BoardAgentActionMap[A]['result'];
+      case 'localSessionOp':
+        return (await this.localSessionOp(
+          payload as BoardAgentActionMap['localSessionOp']['payload']
+        )) as BoardAgentActionMap[A]['result'];
       case 'runnerNuke':
         // The installed runner's daemon answers a nuke before any engine
         // (apps/runner daemonNuke.ts). An engine that hears it is the desktop

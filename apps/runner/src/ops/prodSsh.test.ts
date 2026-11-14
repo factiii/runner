@@ -145,6 +145,30 @@ describe('deploy-lib.sh prod ssh options', { skip: NO_SCRIPTS }, () => {
     assert.deepEqual(r.opts, []);
   });
 
+  it('hands prod the job call, in plain characters, as the ops user only', () => {
+    writeKey();
+    writePin();
+    const job = {
+      FACTIII_JOB: 'health-prod',
+      FACTIII_JOB_CALL: 'c-1',
+      FACTIII_JOB_CALLER: 'Jon Snyder',
+      FACTIII_JOB_CALLER_ID: '7',
+      FACTIII_JOB_VIA: 'owner-terminal'
+    };
+    const opts = (user: string) =>
+      spawnSync('bash', ['-c', `source scripts/deploy-lib.sh && deploy_ssh_opts prod && printf '%s\\n' "\${SSH_OPTS[@]}"`], {
+        cwd: REPO,
+        env: env(user, job),
+        encoding: 'utf8'
+      }).stdout.split('\n');
+    const setenv = opts('factiii-ops').find((o) => o.startsWith('SetEnv='));
+    assert.match(
+      setenv ?? '',
+      /^SetEnv=FACTIII_JOB=health-prod FACTIII_JOB_CALL=c-1 FACTIII_JOB_CALLER=Jon_Snyder FACTIII_JOB_CALLER_ID=7 FACTIII_JOB_VIA=owner-terminal FACTIII_JOB_HOST=\S+$/
+    );
+    assert.equal(opts('jon').find((o) => o.startsWith('SetEnv=')), undefined);
+  });
+
   it('leaves the Mini to its key blob', () => {
     const r = sshOpts('factiii-ops', 'mini');
     assert.notEqual(r.code, 0);
@@ -210,10 +234,17 @@ describe('prod-ops-key.sh authorize', { skip: NO_SCRIPTS }, () => {
     fs.writeFileSync(path.join(prodHome, '.ssh', 'authorized_keys'), `ssh-ed25519 ${KEY_BLOB} old-line\nssh-ed25519 OTHERKEY owner\n`);
     const r = run('factiii-ops', { KEY_LEG_ANSWER: 'ops-key-ok' });
     assert.equal(r.status, 0, r.stderr);
+    const forced = path.join(prodHome, '.ssh', 'factiii-ops-command');
     assert.equal(
       authorized(),
-      `ssh-ed25519 OTHERKEY owner\nfrom="100.77.190.87",restrict ssh-ed25519 ${KEY_BLOB} factiii-ops\n`
+      `ssh-ed25519 OTHERKEY owner\nfrom="100.77.190.87",restrict,command="${forced}" ssh-ed25519 ${KEY_BLOB} factiii-ops\n`
     );
+    // The alerting forced command is the repo's, private to the deploy user.
+    assert.equal(
+      fs.readFileSync(forced, 'utf8'),
+      fs.readFileSync(path.join(REPO, 'scripts/prod-ops-command.sh'), 'utf8').replace(/\n$/, '')
+    );
+    assert.equal(fs.statSync(forced).mode & 0o777, 0o700);
     assert.equal(fs.readFileSync(pinFile(), 'utf8'), `[100.85.155.18]:2222 ssh-ed25519 ${HOST_BLOB}\n`);
     assert.equal(fs.statSync(pinFile()).mode & 0o777, 0o600);
     const [tailscale, key] = sshCalls();
@@ -241,6 +272,78 @@ describe('prod-ops-key.sh authorize', { skip: NO_SCRIPTS }, () => {
     assert.equal(r.status, 1);
     assert.match(r.stderr, /differs/);
     assert.equal(fs.readFileSync(pinFile(), 'utf8'), '[100.85.155.18]:2222 ssh-ed25519 AAAAdifferent\n');
+  });
+});
+
+// The key's forced command on prod (scripts/prod-ops-command.sh, card
+// ab928ef5): a fake docker and logger record their argv; timeout just runs.
+describe('prod-ops-command.sh, the prod key alert', { skip: NO_SCRIPTS }, () => {
+  const dockerLog = () => path.join(dir, 'docker.log');
+  const loggerLog = () => path.join(dir, 'logger.log');
+  const lines = (file: string) =>
+    fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+  beforeEach(() => {
+    fs.writeFileSync(path.join(bin, 'docker'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\n[ "$2" = exec ] && exit "\${DOCKER_EXEC_EXIT:-0}"\nexit "\${DOCKER_RUN_EXIT:-0}"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'logger'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LOGGER_LOG"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+  });
+  const login = (extra: Record<string, string>, input = '') =>
+    spawnSync('bash', [path.join(REPO, 'scripts/prod-ops-command.sh')], {
+      cwd: prodHome,
+      input,
+      encoding: 'utf8',
+      env: {
+        PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        HOME: prodHome,
+        DOCKER_LOG: dockerLog(),
+        LOGGER_LOG: loggerLog(),
+        SSH_CLIENT: '100.77.190.87 51000 2222',
+        ...extra
+      }
+    });
+  const job = {
+    FACTIII_JOB: 'deploy-prod-server',
+    FACTIII_JOB_CALL: 'call-1',
+    FACTIII_JOB_CALLER: 'Jon_Snyder',
+    FACTIII_JOB_CALLER_ID: '7',
+    FACTIII_JOB_VIA: 'owner-terminal',
+    FACTIII_JOB_HOST: 'mini'
+  };
+
+  it('alerts once per job call, logs every login, and runs the command with its stdin', () => {
+    const first = login({ ...job, SSH_ORIGINAL_COMMAND: 'cat' }, 'compose file');
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(first.stdout, 'compose file');
+    assert.deepEqual(lines(dockerLog()), [
+      'compose exec -T prodFactiii node dist/prodKeyAlert.js --job=deploy-prod-server --call=call-1 --caller=Jon_Snyder --caller-id=7 --via=owner-terminal --host=mini --from=100.77.190.87'
+    ]);
+    const second = login({ ...job, SSH_ORIGINAL_COMMAND: 'echo again' });
+    assert.equal(second.stdout, 'again\n');
+    assert.equal(lines(dockerLog()).length, 1);
+    assert.equal(lines(loggerLog()).filter((l) => l.includes('ops key login: job=deploy-prod-server')).length, 2);
+  });
+
+  it('alerts on every login that names no call, with odd values made plain', () => {
+    login({ FACTIII_JOB: 'x; rm -rf /', FACTIII_JOB_CALLER_ID: '7; id', SSH_ORIGINAL_COMMAND: 'true' });
+    login({ SSH_ORIGINAL_COMMAND: 'true' });
+    const calls = lines(dockerLog());
+    assert.equal(calls.length, 2);
+    assert.match(calls[0] ?? '', /--job=x__rm_-rf__ --call= --caller= --caller-id= /);
+  });
+
+  it('falls back to a one-off container, and still runs the command when no alert goes out', () => {
+    let r = login({ ...job, DOCKER_EXEC_EXIT: '1', SSH_ORIGINAL_COMMAND: 'echo ran' });
+    assert.equal(r.stdout, 'ran\n');
+    assert.match(lines(dockerLog())[1] ?? '', /^compose run --rm --no-deps -T prodFactiii node dist\/prodKeyAlert\.js --job=deploy-prod-server/);
+    r = login({ ...job, FACTIII_JOB_CALL: 'call-2', DOCKER_EXEC_EXIT: '1', DOCKER_RUN_EXIT: '1', SSH_ORIGINAL_COMMAND: 'echo ran' });
+    assert.equal(r.stdout, 'ran\n');
+    assert.ok(lines(loggerLog()).some((l) => l.includes('alert NOT sent for call=call-2')));
+  });
+
+  it('refuses a login with no command', () => {
+    const r = login(job);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /commands only/);
   });
 });
 

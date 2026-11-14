@@ -111,13 +111,18 @@ this step actually need", which the name alone often does not say. A key with
 no description is simply one nobody has described yet; ask the owner rather
 than inferring a purpose from the name.
 
-## Every command asks, even when the runner is "unlocked"
+## When a command asks
 
 A shared runner can be unlocked for a while (the app shows "Unlocked by …
 until …"). That window lets the runner's **jobs** run without a new prompt. It
-does not cover you: every `factiii-secrets run` from a terminal or a card
-session still asks a password holder, every time. Do not wait for, rely on,
-or ask anyone to open a window to avoid the prompt.
+does not cover you. What can: when a password holder approves your command,
+they may keep it open for this session for a while (a **session window**).
+Then your later `factiii-secrets run` commands that name only keys from that
+approval run without a prompt; one that names any other key asks again, and
+so does every other session. It ends when it expires, when someone presses
+Lock now, when your session ends, or when the runner restarts. Do not wait
+for, rely on, or ask anyone to open a window to avoid the prompt: name the
+same keys each time the step needs them, and expect a prompt.
 
 **A job does ride the window.** Before a free command, check
 `factiii-runner job --list`: if a job does the same thing (a deploy, a GitHub

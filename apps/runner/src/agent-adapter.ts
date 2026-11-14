@@ -9,6 +9,7 @@ import path from 'path';
 
 import { resolveBoardGit } from '@shared/all/helpers/board-agent-core/git-connections';
 
+import { codexNoticeStore } from './codexNotice';
 import {
   type BoardFiles,
   gitConnectionChoices,
@@ -568,6 +569,10 @@ export const localConfigProvider: ConfigProvider = {
 
   gitConnectionChoices,
   gitConnectionToken,
+
+  // Who has seen the one-time Codex notice: runner wide, beside access.json
+  // (codexNotice.ts).
+  codexNotice: codexNoticeStore(CONFIG_DIR),
 
   // No unencrypted mode exists any more, so this is true whenever the store
   // works at all; secureStore() carries the detail.

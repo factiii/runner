@@ -91,13 +91,25 @@ export type SecretsBridgeHandlers = {
   }) => Promise<SecretsRunResult>;
   /** Key NAMES and their status. Never values - nothing here can return one. */
   list: () => Promise<SecretsKeyInfo[]>;
+  /** Resolves when `token` is a live session's, throws when it is not. For a
+   *  front of this socket that serves an op of its own (the dev VM's narrow
+   *  path) and must check the token first. Answers yes or a refusal, nothing
+   *  else. Absent = every token is refused. */
+  whoami?: (token: string) => Promise<void>;
   /** The runner's access token as it is now, for `factiii-expose`: frpc
    *  presents it to frps when it opens a tunnel, and nothing on disk holds it
    *  any more (.specs/runner-link.md, "Runner credential service"). Carries the
    *  session token; the handler refuses one this runner did not issue. The
    *  answer is that one token and nothing from the secrets store. Absent or
-   *  throwing = this host opens no tunnels (desktop). */
-  tunnelToken?: (token: string) => Promise<string>;
+   *  throwing = this host opens no tunnels (desktop).
+   *  `tunnel`: the name `factiii-expose` is opening, which also gets a
+   *  renewal handle for that tunnel's keeper (`renew` in the answer).
+   *  `renew`: that handle instead of a session token, for the keeper's
+   *  renewals (.specs/runner-link.md "Tunnel credential"). */
+  tunnelToken?: (
+    token: string,
+    ask: { tunnel?: string; renew?: string }
+  ) => Promise<{ token: string; renew?: string }>;
   /** The board's GitHub token as it is now, for git's credential helper in a
    *  session (`factiii-secrets git-credential`). Carries the session token;
    *  the handler refuses one this runner did not issue, and throws when the
@@ -148,6 +160,36 @@ export type SecretsBridgeHandlers = {
 
 export type SecretsBridge = { close: () => Promise<void> };
 
+const IS_WINDOWS = process.platform === 'win32';
+const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_SOCKET_MODE = 0o600;
+/** Any group or other permission bit. */
+const GROUP_OTHER_BITS = 0o077;
+/** The rwx bits of a mode, without the file-type bits. */
+const PERMISSION_BITS = 0o777;
+
+/**
+ * Make the socket owner-only and check it took. Throws when the chmod fails
+ * or the node still has a group/other bit. Windows has no such file modes, so
+ * it is skipped there.
+ */
+export async function ensureOwnerOnlySocket(socketPath: string): Promise<void> {
+  if (IS_WINDOWS) return;
+  try {
+    await fs.chmod(socketPath, PRIVATE_SOCKET_MODE);
+  } catch (err) {
+    throw new Error(
+      `could not make ${socketPath} owner-only: ${errorText(err)}`
+    );
+  }
+  const { mode } = await fs.stat(socketPath);
+  if (mode & GROUP_OTHER_BITS) {
+    throw new Error(
+      `${socketPath} is still reachable by other accounts (mode ${(mode & PERMISSION_BITS).toString(8)})`
+    );
+  }
+}
+
 /** Where the CLI looks for us: under the space's own `state` dir, so its
  *  walk-up search finds it from anywhere in the tree. */
 export function secretsSocketPath(spaceDir: string): string {
@@ -176,6 +218,9 @@ export function redactor(values: string[]): (text: string) => string {
     return out;
   };
 }
+
+/** The `whoami` answer on a socket that checks no tokens. */
+const UNKNOWN_CALLER = 'This socket does not know that caller.';
 
 /** Thrown at a `tunnel-token` caller on a host with no runner token. */
 export const NO_TUNNELS = 'This host opens no public tunnels.';
@@ -271,7 +316,18 @@ export async function startSecretsBridge(opts: {
   handlers: SecretsBridgeHandlers;
 }): Promise<SecretsBridge> {
   const socketPath = secretsSocketPath(opts.spaceDir);
-  await fs.mkdir(path.dirname(socketPath), { recursive: true });
+  const stateDir = path.dirname(socketPath);
+  // Owner-only folder: a socket inside a 0700 folder is out of every other
+  // account's reach whatever its own mode. The host's setup may already have
+  // made `state/` with the default mode, so tighten an existing one too.
+  await fs.mkdir(stateDir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (!IS_WINDOWS) {
+    await fs.chmod(stateDir, PRIVATE_DIR_MODE).catch((err: unknown) => {
+      console.error(
+        `[secrets-bridge] could not make ${stateDir} owner-only: ${errorText(err)}`
+      );
+    });
+  }
   // A crashed runner leaves the node behind, and listen() on an existing path
   // fails with EADDRINUSE. Nothing else owns this name.
   await fs.rm(socketPath, { force: true });
@@ -281,7 +337,14 @@ export async function startSecretsBridge(opts: {
   let queueDepth = 0;
 
   const live = new Set<net.Socket>();
+  // False until the socket is chmod'ed owner-only and checked: a caller that
+  // connects in the gap after listen() is dropped, never served.
+  let ready = false;
   const server = net.createServer((conn) => {
+    if (!ready) {
+      conn.destroy();
+      return;
+    }
     live.add(conn);
     conn.on('close', () => live.delete(conn));
     const reply = replier(conn);
@@ -328,6 +391,18 @@ export async function startSecretsBridge(opts: {
         return;
       }
 
+      // Not in the run queue: nothing is asked of the owner.
+      if (request.op === 'whoami') {
+        const whoami = handlers.whoami;
+        void (whoami ? whoami(tokenOf(request)) : Promise.reject(new Error(UNKNOWN_CALLER)))
+          .then(() => reply({ type: 'whoami' }))
+          .catch((err: unknown) =>
+            reply({ type: 'error', message: errorText(err) })
+          )
+          .finally(() => conn.end());
+        return;
+      }
+
       // The board MCP for one agent. Not in the run queue, and the connection
       // stays open: what follows the first line is the stream.
       if (request.op === 'board-mcp') {
@@ -356,8 +431,15 @@ export async function startSecretsBridge(opts: {
           conn.end();
           return;
         }
-        void tunnelToken(tokenOf(request))
-          .then((token) => reply({ type: 'tunnel-token', token }))
+        void tunnelToken(tokenOf(request), {
+          ...(typeof request.tunnel === 'string'
+            ? { tunnel: request.tunnel }
+            : {}),
+          ...(typeof request.renew === 'string' ? { renew: request.renew } : {})
+        })
+          .then(({ token, renew }) =>
+            reply({ type: 'tunnel-token', token, ...(renew ? { renew } : {}) })
+          )
           .catch((err: unknown) =>
             reply({ type: 'error', message: errorText(err) })
           )
@@ -446,8 +528,18 @@ export async function startSecretsBridge(opts: {
 
   // Owner-only. It buys little on a host where the agent runs as this same
   // user, but it keeps the socket off-limits to every OTHER account on a
-  // shared machine, which is exactly who the file mode can still stop.
-  await fs.chmod(socketPath, 0o600).catch(() => undefined);
+  // shared machine, which is exactly who the file mode can still stop. A
+  // failed chmod is not shrugged off: a socket other accounts can reach is
+  // not served at all.
+  try {
+    await ensureOwnerOnlySocket(socketPath);
+  } catch (err) {
+    console.error(`[secrets-bridge] not serving: ${errorText(err)}`);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(socketPath, { force: true });
+    throw err;
+  }
+  ready = true;
 
   return {
     close: async () => {

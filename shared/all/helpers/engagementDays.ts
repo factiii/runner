@@ -9,6 +9,10 @@ const MS_PER_MINUTE = 60_000;
 const MS_PER_HOUR = 3_600_000;
 const MS_PER_DAY = 86_400_000;
 const HALF_DAY_MS = MS_PER_DAY / 2;
+const NOON_UTC_HOUR = 12;
+const DAYS_PER_WEEK = 7;
+/** ISO 8601: the week holding the year's first Thursday is week 1. */
+const ISO_THURSDAY = 4;
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
@@ -87,7 +91,11 @@ export const splitByLocalDay = (
   let from = startedAt;
   while (from < endedAt) {
     const to = Math.min(endedAt, nextLocalMidnight(from, timeZone));
-    parts.push({ dayKey: localDayKey(from, timeZone), ms: to - from, endsAt: to });
+    parts.push({
+      dayKey: localDayKey(from, timeZone),
+      ms: to - from,
+      endsAt: to
+    });
     from = to;
   }
   return parts;
@@ -113,24 +121,40 @@ export const factiiiDayTotals = (
 }[] => {
   const totals = new Map<
     string,
-    { dayKey: string; factiiiId: number; factiiiName: string; ms: number; viewedAt: number }
+    {
+      dayKey: string;
+      factiiiId: number;
+      factiiiName: string;
+      ms: number;
+      viewedAt: number;
+    }
   >();
   for (const interval of intervals) {
     if (interval.factiiiIds.length === 0) continue;
-    for (const part of splitByLocalDay(interval.startedAt, interval.endedAt, timeZone)) {
+    for (const part of splitByLocalDay(
+      interval.startedAt,
+      interval.endedAt,
+      timeZone
+    )) {
+      // The part's last moment, inside its day: a part cut at midnight ends
+      // exactly at the next day's first moment, which a chart would bin on
+      // the next day.
+      const lastMoment = part.endsAt - 1;
       for (const factiiiId of interval.factiiiIds) {
         const key = `${part.dayKey}:${factiiiId}`;
         const current = totals.get(key);
         if (current) {
           current.ms += part.ms;
-          current.viewedAt = Math.max(current.viewedAt, part.endsAt);
+          current.viewedAt = Math.max(current.viewedAt, lastMoment);
         } else {
           totals.set(key, {
             dayKey: part.dayKey,
             factiiiId,
-            factiiiName: interval.factiiiNames[String(factiiiId)] ?? `Factiii ${factiiiId}`,
+            factiiiName:
+              interval.factiiiNames[String(factiiiId)] ??
+              `Factiii ${factiiiId}`,
             ms: part.ms,
-            viewedAt: part.endsAt
+            viewedAt: lastMoment
           });
         }
       }
@@ -140,4 +164,43 @@ export const factiiiDayTotals = (
     ...total,
     duration: Math.round(ms / MS_PER_SECOND)
   }));
+};
+
+// ── Calendar arithmetic on day keys ──
+
+/** Noon UTC of a day key: a stable instant for calendar arithmetic on the
+ *  key itself, unaffected by any zone's DST. */
+export const dayKeyToUtcNoon = (dayKey: string): number => {
+  const [y, m, d] = dayKey.split('-').map(Number);
+  return Date.UTC(y!, m! - 1, d!, NOON_UTC_HOUR);
+};
+
+const utcToDayKey = (ms: number): string => {
+  const date = new Date(ms);
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+/** The day key `days` calendar days after `dayKey` (negative for before). */
+export const addDays = (dayKey: string, days: number): string =>
+  utcToDayKey(dayKeyToUtcNoon(dayKey) + days * MS_PER_DAY);
+
+/** Whole calendar days from `a` to `b`. */
+export const daysBetween = (a: string, b: string): number =>
+  Math.round((dayKeyToUtcNoon(b) - dayKeyToUtcNoon(a)) / MS_PER_DAY);
+
+/** The ISO week of a day key, as `YYYY-Www` (`2026-W45`). */
+export const isoWeekKey = (dayKey: string): string => {
+  const date = new Date(dayKeyToUtcNoon(dayKey));
+  // Monday = 1 … Sunday = 7
+  const weekday = date.getUTCDay() || DAYS_PER_WEEK;
+  // The Thursday of this week decides its year.
+  date.setUTCDate(date.getUTCDate() + ISO_THURSDAY - weekday);
+  const year = date.getUTCFullYear();
+  const jan1 = Date.UTC(year, 0, 1, NOON_UTC_HOUR);
+  const week =
+    Math.floor((date.getTime() - jan1) / MS_PER_DAY / DAYS_PER_WEEK) + 1;
+  return `${year}-W${String(week).padStart(2, '0')}`;
 };

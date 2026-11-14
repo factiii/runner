@@ -217,7 +217,7 @@ export async function startSkillRun(opts: {
   // Its own token, so a command this run authorizes says "Deploy run" on the
   // prompt instead of the space's generic session label. Revoked when the run
   // ends: the release is the only thing that should ever wear it.
-  const deployToken = opts.gate.issueToken(runOrigin(skill));
+  const deployToken = opts.gate.issueToken(runOrigin(skill), 'deploy');
 
   try {
     for (;;) {

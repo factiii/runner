@@ -1,21 +1,32 @@
 import type { BoardAgentActionMap } from '@shared/all/domains/electron';
 import { factiiiDayTotals } from '@shared/all/helpers/engagementDays';
 import {
+  computeFindings,
+  findingsCacheKey,
+  type FindingsInput,
+  FINDINGS_WINDOW_DAYS
+} from '@shared/all/helpers/findings/findings';
+import { toneValenceById } from '@shared/all/helpers/tones';
+import {
   ENGAGEMENT_HISTORY_MAX_LIMIT,
   type EngagementIntervalRow,
-  type EngagementMoodRow,
+  type EngagementStoredFindings,
+  type EngagementTone,
   engagementPushSchema,
   engagementQuerySchema
 } from '@shared/all/validators';
 
 import type { Statement } from './dbProtocol';
 import type { VaultDb } from './db';
+import { type FetchTagChanges, TAG_FEED_MIGRATIONS, type TagFeedSync, VaultTagFeed, withFeedTags } from './tagFeed';
+import { PRIVATE_TAG_MIGRATIONS, type PrivateTagModel, VaultPrivateTags } from './privateTags';
 
 // The owner's viewing data in the Vault (.specs/analytics.md "The runner's
-// Vault"): every device's engagement intervals, mood entries and the
-// snapshots History shows, pushed from
-// each device's local outbox over a direct link, and read back by the views
-// as "All devices". Factiii's server never sees a row.
+// Vault"): every device's engagement intervals and the snapshots History
+// shows, pushed from each device's local outbox over a direct link, and read
+// back by the views as "All devices"; and the Findings job's last result
+// (findingsJob.ts), worked out here over every device's intervals. Factiii's
+// server never sees a row.
 //
 // These tables are the Vault's own, not the server's: they are not in
 // vault.prisma, so schemaGen's drift check never compares them. Their
@@ -74,7 +85,28 @@ CREATE TABLE "RunnerEngagementDevice" (
   "updatedAt" BIGINT NOT NULL,
   PRIMARY KEY ("userId", "postId")
 );`
-  }
+  },
+  {
+    // Tone is passive (.specs/analytics.md "Tone is passive"): the
+    // self-report entries are dropped with the self-report. The Findings
+    // job's last result, and what it needs that no interval carries: the
+    // owner's zone and which factiiis are Tones (from the latest push).
+    id: 'runner_0103_findings_tone',
+    sql: `DROP TABLE IF EXISTS "RunnerMoodEntry";
+CREATE TABLE "RunnerFindings" (
+  "userId" INTEGER NOT NULL PRIMARY KEY,
+  "timeZone" TEXT,
+  "tones" JSONB NOT NULL DEFAULT '[]',
+  "result" JSONB,
+  "dataKey" TEXT,
+  "windowDays" INTEGER,
+  "computedAt" BIGINT
+);`
+  },
+  // The public tag-changes feed, attached to the history (tagFeed.ts).
+  ...TAG_FEED_MIGRATIONS,
+  // The owner's own dimensions and the local model's tags (privateTags.ts).
+  ...PRIVATE_TAG_MIGRATIONS
 ];
 
 type IntervalDbRow = {
@@ -89,11 +121,13 @@ type IntervalDbRow = {
   updatedAt: string | number;
 };
 
-type MoodDbRow = {
-  id: string;
-  mood: EngagementMoodRow['mood'];
-  timestamp: string | number;
-  updatedAt: string | number;
+type FindingsDbRow = {
+  timeZone: string | null;
+  tones: unknown;
+  result: unknown;
+  dataKey: string | null;
+  windowDays: number | null;
+  computedAt: string | number | null;
 };
 
 type HistoryDbRow = {
@@ -113,6 +147,13 @@ type HistoryDbRow = {
 };
 
 const DEFAULT_HISTORY_LIMIT = 20;
+const MS_PER_DAY = 86_400_000;
+
+/** What the Findings job did for one account. */
+export type FindingsRun =
+  | { state: 'computed'; computedAt: number }
+  | { state: 'unchanged' }
+  | { state: 'no-data' };
 
 const asIds = (value: unknown): number[] =>
   Array.isArray(value) ? value.filter((id): id is number => Number.isFinite(id)) : [];
@@ -136,15 +177,52 @@ const toInterval = (row: IntervalDbRow): Omit<EngagementIntervalRow, 'kind'> & {
   updatedAt: Number(row.updatedAt)
 });
 
-const toMood = (row: MoodDbRow): Omit<EngagementMoodRow, 'kind'> => ({
-  id: row.id,
-  mood: row.mood,
-  timestamp: Number(row.timestamp),
-  updatedAt: Number(row.updatedAt)
-});
+const asTones = (value: unknown): EngagementTone[] =>
+  Array.isArray(value)
+    ? value.filter(
+        (tone): tone is EngagementTone =>
+          !!tone &&
+          typeof tone === 'object' &&
+          Number.isFinite((tone as EngagementTone).id) &&
+          typeof (tone as EngagementTone).slug === 'string'
+      )
+    : [];
 
 export class VaultEngagement {
-  constructor(private readonly db: VaultDb) {}
+  private readonly tagFeed: VaultTagFeed;
+  private readonly privateTags: VaultPrivateTags;
+
+  constructor(private readonly db: VaultDb) {
+    this.tagFeed = new VaultTagFeed(db);
+    this.privateTags = new VaultPrivateTags(db);
+  }
+
+  /** Tag the posts read along the owner's own dimensions, with this
+   *  runner's Ollama (privateTags.ts). */
+  runPrivateTags(userId: number, model: PrivateTagModel): Promise<number> {
+    return this.privateTags.run(userId, model);
+  }
+
+  /** Download the public tag-changes feed since the last download
+   *  (tagFeed.ts). */
+  syncTagFeed(userId: number, fetchPage: FetchTagChanges): Promise<TagFeedSync> {
+    return this.tagFeed.sync(userId, fetchPage);
+  }
+
+  /** The intervals with the feed's tags of their posts attached: a tag
+   *  placed after a post was read, or taken off by a retag, counts. */
+  private async withTags<T extends { postId: string; factiiiIds: number[]; factiiiNames: Record<string, string> }>(
+    userId: number,
+    intervals: T[]
+  ): Promise<T[]> {
+    const states = await this.tagFeed.postTags(
+      userId,
+      intervals.map((row) => row.postId)
+    );
+    if (states.size === 0) return intervals;
+    const names = new Map((await this.tagFeed.factiiis(userId)).map((f) => [f.id, f.name]));
+    return intervals.map((row) => withFeedTags(row, states.get(row.postId), names));
+  }
 
   /**
    * Store a device's rows for `userId`, all or none. Each row upserts on its
@@ -155,11 +233,18 @@ export class VaultEngagement {
     payload: unknown,
     userId: number
   ): Promise<BoardAgentActionMap['engagementPush']['result']> {
-    const { deviceId, rows } = engagementPushSchema.parse(payload);
+    const { deviceId, rows, timeZone, tones } = engagementPushSchema.parse(payload);
     const statements: Statement[] = [];
     let newest = 0;
     for (const row of rows) {
       newest = Math.max(newest, row.updatedAt);
+      // A retired self-report row from an older app: acknowledged, never
+      // kept.
+      if (row.kind === 'mood') continue;
+      if (row.kind === 'privateDimension') {
+        statements.push(...this.privateTags.statements(row, userId));
+        continue;
+      }
       if (row.kind === 'interval') {
         statements.push({
           sql: `INSERT INTO "RunnerEngagementInterval"
@@ -203,19 +288,19 @@ ON CONFLICT ("userId", "postId") DO NOTHING`,
             row.updatedAt
           ]
         });
-      } else {
-        statements.push({
-          sql: `INSERT INTO "RunnerMoodEntry" ("id", "userId", "deviceId", "mood", "timestamp", "updatedAt")
-VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT ("id") DO UPDATE SET
-  "mood" = EXCLUDED."mood",
-  "timestamp" = EXCLUDED."timestamp",
-  "updatedAt" = EXCLUDED."updatedAt"
-WHERE "RunnerMoodEntry"."userId" = EXCLUDED."userId"
-  AND "RunnerMoodEntry"."updatedAt" < EXCLUDED."updatedAt"`,
-          params: [row.id, userId, deviceId, row.mood, row.timestamp, row.updatedAt]
-        });
       }
+    }
+    // The zone and the Tone list the Findings job reads, from whichever
+    // device pushed last; a push without them keeps what is held.
+    if (timeZone !== undefined || tones !== undefined) {
+      statements.push({
+        sql: `INSERT INTO "RunnerFindings" ("userId", "timeZone", "tones")
+VALUES ($1, $2, $3::jsonb)
+ON CONFLICT ("userId") DO UPDATE SET
+  "timeZone" = COALESCE(EXCLUDED."timeZone", "RunnerFindings"."timeZone"),
+  "tones" = CASE WHEN $4 THEN EXCLUDED."tones" ELSE "RunnerFindings"."tones" END`,
+        params: [userId, timeZone ?? null, JSON.stringify(tones ?? []), tones !== undefined]
+      });
     }
     statements.push({
       sql: `INSERT INTO "RunnerEngagementDevice" ("userId", "deviceId", "acceptedThrough", "lastPushAt")
@@ -236,6 +321,8 @@ ON CONFLICT ("userId", "deviceId") DO UPDATE SET
   ): Promise<BoardAgentActionMap['engagementQuery']['result']> {
     const query = engagementQuerySchema.parse(payload);
     const { start, end } = query.range;
+    if (query.kind === 'findings') return { kind: 'findings', findings: await this.storedFindings(userId) };
+    if (query.kind === 'privateTags') return { kind: 'privateTags', ...(await this.privateTags.read(userId)) };
     if (query.kind === 'history') {
       const limit = Math.min(query.limit ?? DEFAULT_HISTORY_LIMIT, ENGAGEMENT_HISTORY_MAX_LIMIT);
       const rows = await this.db.query<HistoryDbRow>(
@@ -276,31 +363,112 @@ LIMIT $4 OFFSET $5`,
         }))
       };
     }
-    const intervals = (
-      await this.db.query<IntervalDbRow>(
-        `SELECT "id", "deviceId", "postId", "factiiiIds", "factiiiNames", "startedAt", "endedAt", "source", "updatedAt"
+    const intervals = await this.withTags(
+      userId,
+      (
+        await this.db.query<IntervalDbRow>(
+          `SELECT "id", "deviceId", "postId", "factiiiIds", "factiiiNames", "startedAt", "endedAt", "source", "updatedAt"
 FROM "RunnerEngagementInterval"
 WHERE "userId" = $1 AND "endedAt" >= $2 AND "startedAt" <= $3
 ORDER BY "startedAt", "id"`,
-        [userId, start, end]
-      )
-    ).map(toInterval);
-    const moods = (
-      await this.db.query<MoodDbRow>(
-        `SELECT "id", "mood", "timestamp", "updatedAt" FROM "RunnerMoodEntry"
-WHERE "userId" = $1 AND "timestamp" BETWEEN $2 AND $3
-ORDER BY "timestamp", "id"`,
-        [userId, start, end]
-      )
-    ).map(toMood);
+          [userId, start, end]
+        )
+      ).map(toInterval)
+    );
     if (query.kind === 'intervals') {
-      return { kind: 'intervals', intervals: intervals.map(({ deviceId: _d, ...row }) => row), moods };
+      return { kind: 'intervals', intervals: intervals.map(({ deviceId: _d, ...row }) => row) };
     }
     const clipped = intervals.map((row) => ({
       ...row,
       startedAt: Math.max(row.startedAt, start),
       endedAt: Math.min(row.endedAt, end)
     }));
-    return { kind: 'daily', totals: factiiiDayTotals(clipped, query.timeZone), moods };
+    return { kind: 'daily', totals: factiiiDayTotals(clipped, query.timeZone) };
+  }
+
+  private async findingsRow(userId: number): Promise<FindingsDbRow | null> {
+    const [row] = await this.db.query<FindingsDbRow>(
+      `SELECT "timeZone", "tones", "result", "dataKey", "windowDays", "computedAt"
+FROM "RunnerFindings" WHERE "userId" = $1`,
+      [userId]
+    );
+    return row ?? null;
+  }
+
+  /** The Findings job's last result for `userId`, or null before its first
+   *  run. */
+  async storedFindings(userId: number): Promise<EngagementStoredFindings | null> {
+    const row = await this.findingsRow(userId);
+    if (!row?.result || row.computedAt === null) return null;
+    return {
+      result: row.result as EngagementStoredFindings['result'],
+      computedAt: Number(row.computedAt),
+      windowDays: row.windowDays ?? FINDINGS_WINDOW_DAYS,
+      timeZone: row.timeZone
+    };
+  }
+
+  /** The accounts that have viewing data here: the owner, in practice. */
+  async findingsUsers(): Promise<number[]> {
+    const rows = await this.db.query<{ userId: number }>(
+      `SELECT DISTINCT "userId" FROM "RunnerEngagementInterval" ORDER BY "userId"`
+    );
+    return rows.map((row) => Number(row.userId));
+  }
+
+  /**
+   * The Findings job for one account (.specs/analytics.md "Findings"): the
+   * tests over every device's intervals of the last FINDINGS_WINDOW_DAYS, in
+   * the zone and with the Tone list the latest push gave. Skipped when the
+   * rows, zone and Tones are what the last run saw.
+   */
+  async runFindings(userId: number, now: number = Date.now()): Promise<FindingsRun> {
+    const end = now;
+    const start = end - FINDINGS_WINDOW_DAYS * MS_PER_DAY;
+    const intervals = await this.withTags(
+      userId,
+      (
+        await this.db.query<IntervalDbRow>(
+          `SELECT "id", "deviceId", "postId", "factiiiIds", "factiiiNames", "startedAt", "endedAt", "source", "updatedAt"
+FROM "RunnerEngagementInterval"
+WHERE "userId" = $1 AND "endedAt" >= $2 AND "startedAt" <= $3
+ORDER BY "startedAt", "id"`,
+          [userId, start, end]
+        )
+      ).map(toInterval)
+    );
+    if (intervals.length === 0) return { state: 'no-data' };
+    const held = await this.findingsRow(userId);
+    // The Tone list a device pushed; before any push carried one, the feed's.
+    const pushedTones = asTones(held?.tones);
+    const tones =
+      pushedTones.length > 0
+        ? pushedTones
+        : (await this.tagFeed.factiiis(userId)).filter((f) => f.dimension === 'tone');
+    const factiiiNames: Record<number, string> = {};
+    for (const interval of intervals) {
+      for (const [id, name] of Object.entries(interval.factiiiNames)) factiiiNames[Number(id)] = name;
+    }
+    const input: FindingsInput = {
+      intervals,
+      factiiiNames,
+      toneValence: toneValenceById(tones),
+      ...(held?.timeZone ? { timeZone: held.timeZone } : {})
+    };
+    // The window slides with the day, so the day is part of the key.
+    const dataKey = `${FINDINGS_WINDOW_DAYS}:${Math.floor(now / MS_PER_DAY)}:${findingsCacheKey(input)}`;
+    if (held?.dataKey === dataKey && held.result) return { state: 'unchanged' };
+    const result = computeFindings(input);
+    await this.db.query(
+      `INSERT INTO "RunnerFindings" ("userId", "result", "dataKey", "windowDays", "computedAt")
+VALUES ($1, $2::jsonb, $3, $4, $5)
+ON CONFLICT ("userId") DO UPDATE SET
+  "result" = EXCLUDED."result",
+  "dataKey" = EXCLUDED."dataKey",
+  "windowDays" = EXCLUDED."windowDays",
+  "computedAt" = EXCLUDED."computedAt"`,
+      [userId, JSON.stringify(result), dataKey, FINDINGS_WINDOW_DAYS, now]
+    );
+    return { state: 'computed', computedAt: now };
   }
 }

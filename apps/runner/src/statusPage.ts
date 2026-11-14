@@ -10,7 +10,10 @@ import { readBootJson, writeBootJson } from './secureFile';
 
 // Heartbeats to status.factiii.com (apps/status), the page that watches
 // Factiii from outside it: so a runner shows there, and an alert goes out
-// when it stops, even with Factiii's own servers down. Off until the owner
+// when it stops, even with Factiii's own servers down. Each beat carries the
+// machine's health level (healthWatch.ts), so the page shows the runner
+// degraded at warn and critical at critical, and alerts through ntfy when it
+// turns critical and when it recovers (card b78a269a). Off until the owner
 // sets it with `factiii-runner status-page set <url>`. The token lives with
 // the runner's other boot secrets (secureFile.ts), never in a log line.
 
@@ -19,8 +22,8 @@ export type StatusPageConfig = { url: string; token: string };
 const FILE = path.join(CONFIG_DIR, 'status-page.json');
 /** The page counts a runner down after 6 quiet minutes. */
 const BEAT_MS = 2 * 60_000;
-/** Machine health is many processes; its level is read this often at most. */
-const LEVEL_EVERY_MS = 10 * 60_000;
+/** `tailscale status` is a process; the tailnet is read this often at most. */
+const TAILNET_EVERY_MS = 10 * 60_000;
 const TIMEOUT_MS = 10_000;
 
 export function readStatusPage(): StatusPageConfig | null {
@@ -110,25 +113,32 @@ export async function sendBeat(
   return res.status;
 }
 
+export type StatusHeartbeat = {
+  stop(): void;
+  /** Beat now, off the 2 minute beat: the machine's level changed, so the
+   *  page (and its ntfy alert) need not wait for the next one. */
+  now(): void;
+};
+
 /** Beat every BEAT_MS while configured. The file is read each time, so
- *  `status-page set` and `off` take effect without a restart. Returns a stop. */
+ *  `status-page set` and `off` take effect without a restart. `level` is the
+ *  health watch's last reading (null before its first, sent as ok). */
 export function startStatusHeartbeat(opts: {
   runnerName: () => string;
   version: string;
-  level: () => Promise<RunnerHealthLevel>;
-}): () => void {
-  let level: RunnerHealthLevel = 'ok';
-  let levelAt = 0;
+  level: () => RunnerHealthLevel | null;
+}): StatusHeartbeat {
+  let tailnetAt = 0;
   let tailnet: Tailnet | null = null;
   let warned = false;
   const beat = async () => {
     const config = readStatusPage();
     if (!config) return;
-    if (Date.now() - levelAt > LEVEL_EVERY_MS) {
-      level = await opts.level().catch(() => level);
+    if (Date.now() - tailnetAt > TAILNET_EVERY_MS) {
       tailnet = await readTailnet().catch(() => tailnet);
-      levelAt = Date.now();
+      tailnetAt = Date.now();
     }
+    const level = opts.level() ?? 'ok';
     try {
       const status = await sendBeat(config, {
         runner: opts.runnerName(),
@@ -156,5 +166,5 @@ export function startStatusHeartbeat(opts: {
   void beat();
   const timer = setInterval(() => void beat(), BEAT_MS);
   timer.unref();
-  return () => clearInterval(timer);
+  return { stop: () => clearInterval(timer), now: () => void beat() };
 }

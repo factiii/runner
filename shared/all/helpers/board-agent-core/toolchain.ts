@@ -1,4 +1,5 @@
 import type {
+  DesktopSetupAi,
   EnvironmentFeature,
   EnvironmentFix,
   EnvironmentItem
@@ -47,6 +48,22 @@ type Tool = {
      *  install it by hand instead of offering a button that always fails. */
     supported: () => boolean;
   };
+  /** The files Factiii Desktop carries for it, in the app's tools folder
+   *  (Contents/Resources/tools), which "Set up this computer" copies into
+   *  FACTIII_TOOLS_DIR. Present only in a build that ships them: a Desktop
+   *  without the folder, an npm runner and Linux never see it. */
+  bundled?: string[];
+  /** Another command that stands in for `bin` when found (Valkey's server
+   *  for redis-server). */
+  alias?: string;
+  /** The maker's own installer, which only Factiii Desktop runs (its
+   *  "Connect your AI" step, after a yes). The core runner never runs it. */
+  official?: {
+    command: string;
+    /** About how much it downloads and how long it takes, shown before. */
+    sizeMb: number;
+    minutes: number;
+  };
 };
 
 // The basics: what Initialize installs, and all a board needs to run a card.
@@ -55,7 +72,7 @@ type Tool = {
 // Pins apply to a FRESH install only - an existing CLI is left untouched.
 const TOOLS: Tool[] = [
   { bin: 'git' },
-  { bin: 'tmux' },
+  { bin: 'tmux', bundled: ['tmux'] },
   // Allocates the pty tmux runs on (see tmux.ts). Base-system everywhere in
   // practice; without the probe a stripped image fails as "terminal won't open".
   {
@@ -66,12 +83,44 @@ const TOOLS: Tool[] = [
     bin: 'node',
     pkg: { brew: 'node', apt: 'nodejs', dnf: 'nodejs', pacman: 'nodejs' }
   },
-  { bin: 'claude', npm: '@anthropic-ai/claude-code@~2.1.0' }
+  {
+    bin: 'claude',
+    npm: '@anthropic-ai/claude-code@~2.1.0',
+    // Anthropic's native installer: no Node needed, into ~/.local/bin (one
+    // of host-env.ts EXTRA_BIN_DIRS).
+    official: {
+      command: 'curl -fsSL https://claude.ai/install.sh | bash',
+      sizeMb: 300,
+      minutes: 3
+    }
+  }
 ];
 
 // A provider CLI past Claude. Initialize adds it for a board whose provider
 // it is, and its sign-in installs it first, so nobody installs it by hand.
-const PROVIDER_TOOLS: Tool[] = [{ bin: 'codex', npm: '@openai/codex@~0.144.1' }];
+const CODEX_NPM = '@openai/codex@~0.144.1';
+const PROVIDER_TOOLS: Tool[] = [
+  {
+    bin: 'codex',
+    npm: CODEX_NPM,
+    // OpenAI ships Codex through npm and a Homebrew cask, no script of its
+    // own: whichever this Mac has, else the exact reason.
+    official: {
+      command: [
+        'if command -v npm >/dev/null 2>&1; then',
+        `  npm install -g --prefix "${NPM_PREFIX}" ${CODEX_NPM}`,
+        'elif command -v brew >/dev/null 2>&1; then',
+        '  brew install --cask codex',
+        'else',
+        '  echo "Codex installs with npm (Node.js, nodejs.org) or Homebrew (brew.sh), and this Mac has neither. Install one, then Retry, or pick Claude Code." >&2',
+        '  exit 1',
+        'fi'
+      ].join('\n'),
+      sizeMb: 60,
+      minutes: 1
+    }
+  }
+];
 
 /** Tart's signed release, pinned like the npm CLIs. The repo moved from
  *  cirruslabs/tart to openai/tart; both serve the same build. */
@@ -133,9 +182,13 @@ const TART_SCRIPT = {
 // it needs root and a tailnet sign-in, which belong to Factiii Desktop, not to
 // an npm package (npm pulled 0.28.0 and 0.33.0 as malware; see CHANGELOG).
 const EXTRA_TOOLS: Tool[] = [
+  // Factiii Desktop carries Valkey (redis's BSD fork, same protocol) in its
+  // place; state.ts runs it when FACTIII_TOOLS_DIR has it.
   {
     bin: 'redis-server',
-    pkg: { brew: 'redis', apt: 'redis-server', dnf: 'redis', pacman: 'redis' }
+    pkg: { brew: 'redis', apt: 'redis-server', dnf: 'redis', pacman: 'redis' },
+    alias: 'valkey-server',
+    bundled: ['valkey-server', 'valkey-cli']
   },
   // `orb` is OrbStack's own CLI; it also puts `docker` on the PATH. A Mac
   // app, so Homebrew alone: elsewhere Docker is installed by hand.
@@ -164,7 +217,8 @@ const SECRETS_TOOLS: Tool[] = [
   // The binary the secrets store probes; the package is `age`.
   {
     bin: 'age-keygen',
-    pkg: { brew: 'age', apt: 'age', dnf: 'age', pacman: 'age' }
+    pkg: { brew: 'age', apt: 'age', dnf: 'age', pacman: 'age' },
+    bundled: ['age', 'age-keygen']
   }
 ];
 
@@ -234,9 +288,17 @@ function installCommand(tool: Tool, mgr: PackageManager): string {
   }
 }
 
+/** `command -v` for the tool, or for its stand-in (Valkey for redis). */
+function lookFor(bin: string): string {
+  const alias = ALL_TOOLS.find((t) => t.bin === bin)?.alias;
+  return alias
+    ? `command -v ${bin} || command -v ${alias}`
+    : `command -v ${bin}`;
+}
+
 async function isInstalled(target: ExecTarget, bin: string): Promise<boolean> {
   try {
-    await target.sh(`command -v ${bin}`);
+    await target.sh(lookFor(bin));
   } catch {
     return false;
   }
@@ -331,7 +393,7 @@ export async function planTools(target: ExecTarget): Promise<ToolPlan[]> {
   const mgr = await detectPackageManager(target);
   const plans: ToolPlan[] = [];
   for (const tool of ALL_TOOLS) {
-    const found = await probe(target, `command -v ${tool.bin}`);
+    const found = await probe(target, lookFor(tool.bin));
     const location = found && !(await isGitStub(target, tool.bin)) ? found : '';
     plans.push({ bin: tool.bin, location, install: installPlan(tool, mgr) });
   }
@@ -352,6 +414,11 @@ export const ENVIRONMENT_TOOLS: {
   required: boolean;
   /** What to do where the runner knows no package for it. */
   manual?: string;
+  /** The bare minimum Factiii Desktop's "Set up this computer" makes sure
+   *  of before a runner comes online: `true` always, `'ai'` when it is the
+   *  AI the person picked. Setup installs nothing that is not marked here
+   *  or bundled (`Tool.bundled`). */
+  minimum?: true | 'ai';
 }[] = [
   {
     bin: 'git',
@@ -365,18 +432,20 @@ export const ENVIRONMENT_TOOLS: {
     title: 'tmux',
     feature: 'terminals',
     purpose: 'terminals',
-    required: true
+    required: true,
+    minimum: true
   },
   {
     bin: 'script',
     title: 'script',
     feature: 'terminals',
     purpose: 'terminals (it gives tmux its pty)',
-    required: true
+    required: true,
+    minimum: true
   },
   {
     bin: 'redis-server',
-    title: 'redis',
+    title: 'redis (or Valkey)',
     feature: 'terminals',
     purpose: 'live agent status in terminals (working, idle, waiting on you)',
     required: false
@@ -393,14 +462,16 @@ export const ENVIRONMENT_TOOLS: {
     title: 'claude CLI',
     feature: 'card-ai',
     purpose: 'card AI',
-    required: true
+    required: true,
+    minimum: 'ai'
   },
   {
     bin: 'codex',
     title: 'codex CLI',
     feature: 'card-ai',
     purpose: 'card AI with Codex (its sign-in installs it)',
-    required: false
+    required: false,
+    minimum: 'ai'
   },
   {
     bin: 'sops',
@@ -446,6 +517,68 @@ export const ENVIRONMENT_TOOLS: {
       'Tart runs on a Mac with Apple silicon. Download it from https://github.com/openai/tart/releases.'
   }
 ];
+
+/** The AI CLIs "Connect your AI" offers, Claude Code first (the default). */
+export type SetupAi = DesktopSetupAi;
+
+export const SETUP_AIS: readonly SetupAi[] = ['claude', 'codex'];
+
+/** One tool as Factiii Desktop's "Set up this computer" reads the doctor's
+ *  table: whether it is part of the minimum, and the files the app carries
+ *  for it (empty: none, it is found on the machine or installed by its
+ *  maker's installer). */
+export type SetupTool = {
+  bin: string;
+  title: string;
+  minimum: true | 'ai' | null;
+  bundled: string[];
+};
+
+/** Every row Setup cares about, from ENVIRONMENT_TOOLS (no second list):
+ *  the minimum, and whatever the app carries. */
+export function setupTools(): SetupTool[] {
+  return ENVIRONMENT_TOOLS.flatMap((row) => {
+    const bundled = ALL_TOOLS.find((t) => t.bin === row.bin)?.bundled ?? [];
+    if (!row.minimum && !bundled.length) return [];
+    return [
+      { bin: row.bin, title: row.title, minimum: row.minimum ?? null, bundled }
+    ];
+  });
+}
+
+/** The tools Setup must find before the runner starts, for this AI: the
+ *  always-minimum ones (tmux, script). The AI CLI has its own step. */
+export function minimumTools(): SetupTool[] {
+  return setupTools().filter((t) => t.minimum === true);
+}
+
+/** The AI CLI's maker's installer, as Setup runs and announces it. */
+export function aiInstaller(ai: SetupAi): {
+  bin: string;
+  title: string;
+  command: string;
+  sizeMb: number;
+  minutes: number;
+} {
+  const tool = ALL_TOOLS.find((t) => t.bin === ai);
+  const row = ENVIRONMENT_TOOLS.find((r) => r.bin === ai);
+  if (!tool?.official || !row) throw new Error(`No installer for ${ai}.`);
+  return { bin: ai, title: AI_TITLES[ai], ...tool.official };
+}
+
+const AI_TITLES: Record<SetupAi, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex'
+};
+
+/** Factiii Desktop installs this tool, so the core runner does not: the
+ *  minimum, what the app carries, and the AI CLIs. The doctor prints the
+ *  command for a machine without the app (Linux, headless) instead. */
+export function desktopProvides(bin: string): boolean {
+  const tool = ALL_TOOLS.find((t) => t.bin === bin);
+  const row = ENVIRONMENT_TOOLS.find((r) => r.bin === bin);
+  return Boolean(row?.minimum || tool?.bundled?.length || tool?.official);
+}
 
 /** Who installs a missing tool on this host, as the app's list says it.
  *  Initialize installs the basic TOOLS: with npm and brew as they are, with
@@ -500,8 +633,9 @@ export async function environmentStatus(
   });
 }
 
-/** Install one tool the way Initialize would. Only where that needs no root:
- *  the doctor prints the command for the rest and never runs it. */
+/** Install one tool the way Initialize would (`parts add`). Only where that
+ *  needs no root, and never one Factiii Desktop installs (desktopProvides):
+ *  the doctor prints the command for those and never runs it. */
 export async function installTool(
   target: ExecTarget,
   bin: string,
@@ -509,6 +643,11 @@ export async function installTool(
 ): Promise<void> {
   const tool = ALL_TOOLS.find((t) => t.bin === bin);
   if (!tool) throw new Error(`Unknown tool: ${bin}`);
+  if (desktopProvides(bin)) {
+    throw new Error(
+      `The runner does not install ${bin}: Factiii Desktop's Set up this computer does. Without the app, run: ${installPlan(tool, await detectPackageManager(target))?.command ?? `install ${bin} by hand`}`
+    );
+  }
   const mgr = await detectPackageManager(target);
   const plan = installPlan(tool, mgr);
   if (!plan || plan.sudo) {

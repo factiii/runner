@@ -363,6 +363,28 @@ describe('PartsManager', () => {
     assert.deepEqual(running?.actions, ['stop']);
     assert.equal(await manager.run('local-ai', 'stop'), true);
   });
+
+  it('starts Ollama as part of its add, and leaves it installed when the start fails', async () => {
+    const { machine, calls, svc } = fakeMachine(['ollama']);
+    const manager = new PartsManager(machine);
+    const lines: string[] = [];
+    assert.equal(await manager.run('local-ai', 'add', (l) => lines.push(l)), true);
+    assert.deepEqual(calls, ['install ollama']);
+    assert.equal(svc.running, true);
+    assert.equal(lines.at(-1), 'Ollama is running.');
+
+    const failing = fakeMachine(['ollama']);
+    const service = failing.machine.service('local-ai');
+    assert.ok(service);
+    service.start = async () => {
+      throw new Error('Ollama did not come up.');
+    };
+    const out: string[] = [];
+    assert.equal(await new PartsManager(failing.machine).run('local-ai', 'add', (l) => out.push(l)), true);
+    assert.equal(out.at(-1), 'Ollama did not come up.');
+    const part = (await new PartsManager(failing.machine).list()).parts.find((p) => p.id === 'local-ai');
+    assert.deepEqual(part?.actions, ['start', 'remove']);
+  });
 });
 
 describe('modules', () => {
@@ -376,7 +398,7 @@ describe('modules', () => {
     assert.deepEqual(findPart('vault').covers, ['vault-storage', 'vault-search']);
   });
 
-  it('groups Bare, Coding, Private vault for Oakbox and Local AI, in order', () => {
+  it('groups Bare, Coding, Runner Cloud and Vault for Oakbox and Local AI, in order', () => {
     assert.deepEqual(
       modulesFor('darwin').map(({ def, parts }) => [def.id, parts.map((p) => p.id)]),
       [
@@ -607,6 +629,52 @@ describe('machine health and free up space', () => {
     assert.deepEqual(ran, [[item.id]]);
     assert.deepEqual(done, { items: [], bytes: 0, ran: true, lines: ['Removed b/builds/old (2 KB).'] });
     await assert.rejects(manager.cleanup({ confirm: 'yes' }));
+  });
+
+  it('answers the biggest folders with the plan, for each folder’s own Free up', async () => {
+    const { machine } = fakeMachine([]);
+    const item = {
+      id: 'cache:npm',
+      title: 'npm download cache',
+      path: '~/.npm/_cacache',
+      bytes: 5_000,
+      kind: 'cache' as const,
+      dir: '~/.npm/_cacache'
+    };
+    const use = { label: 'npm cache', path: '~/.npm', bytes: 9_000 };
+    machine.cleanup = {
+      plan: async () => [item],
+      run: async () => 0,
+      usage: async () => [use]
+    };
+    const res = await new PartsManager(machine).cleanup({ usage: true });
+    assert.deepEqual(res, { items: [item], bytes: 5_000, ran: false, lines: [], usage: [use] });
+  });
+
+  it('frees memory only on confirm, with the one stop it knows', async () => {
+    const { machine } = fakeMachine([]);
+    const stopped: string[] = [];
+    machine.cleanup = {
+      plan: async () => [],
+      run: async () => 0,
+      stop: async (what, onLine) => {
+        stopped.push(what);
+        onLine('Shut down the iOS simulators. Their apps and data stay.');
+        return true;
+      }
+    };
+    const manager = new PartsManager(machine);
+    await assert.rejects(manager.cleanup({ stop: 'simulators' }));
+    await assert.rejects(manager.cleanup({ stop: 'everything', confirm: true }));
+    assert.deepEqual(stopped, []);
+    const res = await manager.cleanup({ stop: 'simulators', confirm: true });
+    assert.deepEqual(stopped, ['simulators']);
+    assert.deepEqual(res, {
+      items: [],
+      bytes: 0,
+      ran: true,
+      lines: ['Shut down the iOS simulators. Their apps and data stay.']
+    });
   });
 });
 

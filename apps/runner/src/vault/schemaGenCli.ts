@@ -4,19 +4,21 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { VAULT_MIGRATIONS } from './migrations.generated';
-import { pruneSchema } from './schemaGen';
+import { pruneSchema } from '@shared/vault-core/schemaGen';
 
 // `pnpm --filter @factiii/runner vault:schema`: cut the server's schema down
-// to the vault (schemaGen.ts), write it to vault.prisma, and have Prisma write
+// to the vault (shared/vault-core/schemaGen.ts), write it to vault.prisma, and have Prisma write
 // the SQL that takes the last vault.prisma to the new one. Each run that
 // changes something appends one migration; one that changes nothing writes
-// nothing. `--check` only says whether vault.prisma is behind the server.
+// nothing. `--check` (`vault:schema:check`, the drift check; the runner's
+// schemaGen.test.ts runs the same comparison) only says whether vault.prisma
+// is behind the server.
 
 const HERE = __dirname;
 const REPO = path.resolve(HERE, '../../../..');
 const SERVER_SCHEMA = path.join(REPO, 'apps/server/prisma/schema.prisma');
 // The vault-only schema lives with the router that queries it (.specs/vault-router.md).
-const VAULT_SCHEMA = path.join(REPO, 'shared/vault-router/vault.prisma');
+const VAULT_SCHEMA = path.join(REPO, 'shared/vault-core/vault.prisma');
 const MIGRATIONS = path.join(HERE, 'migrations.generated.ts');
 const PRISMA = path.join(REPO, 'node_modules/.bin/prisma');
 

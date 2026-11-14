@@ -1,10 +1,10 @@
-import crypto from 'node:crypto';
 import path from 'node:path';
 
 import {
   TOOLS_DIR_ENV,
   toolDirs
 } from '@shared/all/helpers/board-agent-core/host-env';
+import { serviceNameSuffix } from '@shared/all/helpers/board-agent-core/runner-dir';
 
 // `factiii-runner service install | status | remove`: start the runner at
 // login and restart it after a crash, with the operating system's own service
@@ -120,12 +120,7 @@ export function servicePath(
 }
 
 function nameSuffix(spec: ServiceSpec): string {
-  if (!spec.customDir) return '';
-  return crypto
-    .createHash('sha256')
-    .update(spec.runnerDir)
-    .digest('hex')
-    .slice(0, 8);
+  return spec.customDir ? serviceNameSuffix(spec.runnerDir) : '';
 }
 
 /** The launchd label, the systemd unit, or the task name. */

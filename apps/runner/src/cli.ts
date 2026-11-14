@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { Command } from 'commander';
 
+import { describeUpdateLines } from '@shared/all/domains/runnerAutoUpdate';
 import { applyAgentHomes } from '@shared/all/helpers/board-agent-core/agent-homes';
 import { addToolDirs } from '@shared/all/helpers/board-agent-core/host-env';
 import { runnerIdFromRunnerToken } from '@shared/all/helpers/board-agent-core/runner-access';
@@ -48,6 +49,15 @@ import {
   serviceStatus
 } from './service';
 import { runSupervised } from './supervisor';
+import {
+  autoUpdateForcedOff,
+  failedUpdates,
+  readLastSkip,
+  readLastUpdate,
+  readPendingUpdate,
+  readUpdateSettings,
+  writeUpdateSettings
+} from './updateSafety';
 
 /** Print a failure with its remedy, then exit non-zero. */
 function fail(err: unknown): never {
@@ -229,6 +239,51 @@ program
     } catch (err) {
       fail(err);
     }
+  });
+
+// The automatic update and its rollback (updateSafety.ts, autoUpdate.ts).
+const update = program
+  .command('update')
+  .description('Automatic updates: on by default, rolled back when a new version fails to start');
+
+update
+  .command('status')
+  .description('Whether this runner updates itself, and what it rolled back')
+  .action(() => {
+    const { auto } = readUpdateSettings(CONFIG_DIR);
+    console.log(`Version:  ${currentVersion()}`);
+    console.log(
+      `Automatic updates: ${auto ? 'on' : 'off'}${autoUpdateForcedOff() ? ' (FACTIII_RUNNER_AUTO_UPDATE)' : ''}`
+    );
+    // The same lines the Software tab shows.
+    const [last, ...since] = describeUpdateLines({
+      lastResult: readLastUpdate(CONFIG_DIR),
+      lastSkip: readLastSkip(CONFIG_DIR)
+    });
+    console.log(`Last update: ${last}`);
+    for (const line of since) console.log(`Since then: ${line}`);
+    const pending = readPendingUpdate(CONFIG_DIR);
+    if (pending) {
+      console.log(`Updating from ${pending.from}: waiting for the new version to come up.`);
+    }
+    for (const failed of failedUpdates(CONFIG_DIR)) {
+      console.log(
+        `Rolled back ${failed.version} (${new Date(failed.at).toISOString()}): ${failed.reason}. Skipped by automatic updates.`
+      );
+    }
+  });
+
+update
+  .command('auto <state>')
+  .description('Turn automatic updates on or off')
+  .action((state: string) => {
+    const value = state.trim().toLowerCase();
+    if (value !== 'on' && value !== 'off') {
+      console.error('Say "on" or "off".');
+      process.exit(1);
+    }
+    writeUpdateSettings(CONFIG_DIR, { auto: value === 'on' });
+    console.log(`Automatic updates are ${value}. The running runner reads it at its next check.`);
   });
 
 /** The service this runner would install, or exit saying why there is none. */

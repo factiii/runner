@@ -101,18 +101,38 @@ export async function respawnTmuxPane(opts: {
   await target.sh(`${tmuxCli(target)} ${shellQuote(cmd)}`);
 }
 
+/** A session target for exactly `session`: tmux otherwise takes a name it
+ *  has no session of as a prefix, so `<post>-1` reads as live while
+ *  `<post>-10` is. */
+const exactSession = (session: string) => shellQuote([`=${session}`]);
+
 /** Tells a create from an attach: `new-session -A` does both and reports
- *  neither, and only a create should be stamped. */
+ *  neither, and only a create should be stamped. That exact name only. */
 export async function tmuxSessionExists(
   target: ExecTarget,
   session: string
 ): Promise<boolean> {
   return await target
-    .sh(
-      `${tmuxCli(target)} has-session -t ${shellQuote([session])} 2>/dev/null`
-    )
+    .sh(`${tmuxCli(target)} has-session -t ${exactSession(session)} 2>/dev/null`)
     .then(() => true)
     .catch(() => false);
+}
+
+/** One variable of exactly `session`'s own environment (what `new-session
+ *  -e` and setTmuxSessionEnv set), or null when there is no such session or
+ *  variable. */
+export async function tmuxSessionEnvValue(
+  target: ExecTarget,
+  session: string,
+  name: string
+): Promise<string | null> {
+  const out = await target
+    .sh(
+      `${tmuxCli(target)} show-environment -t ${exactSession(session)} ${shellQuote([name])} 2>/dev/null`
+    )
+    .catch(() => null);
+  const line = out?.trim() ?? '';
+  return line.startsWith(`${name}=`) ? line.slice(name.length + 1) : null;
 }
 
 /** A session's pane as its screen shows now, with up to `lines` lines of
@@ -146,6 +166,41 @@ export async function setTmuxSessionOption(
     .catch(() => {
       // The session can go between the caller's check and this - best effort.
     });
+}
+
+/** Set one variable in a session's own environment (what `new-session -e`
+ *  set), so a pane split or respawned later reads the new value. The pane
+ *  running now keeps what it started with. Best effort, like the option. */
+export async function setTmuxSessionEnv(
+  target: ExecTarget,
+  session: string,
+  name: string,
+  value: string
+): Promise<void> {
+  await target
+    .sh(
+      `${tmuxCli(target)} set-environment -t ${exactSession(session)} ${shellQuote([name, value])}`
+    )
+    .catch(() => {
+      // The session can go between the caller's check and this - best effort.
+    });
+}
+
+/** Does any session on our server have `name=value` in its own environment?
+ *  False when there is no server. */
+export async function tmuxSessionEnvHas(
+  target: ExecTarget,
+  name: string,
+  value: string
+): Promise<boolean> {
+  const cli = tmuxCli(target);
+  const out = await target
+    .sh(
+      `${cli} list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do ${cli} show-environment -t "$s" ${shellQuote([name])} 2>/dev/null; done`
+    )
+    .catch(() => '');
+  const wanted = `${name}=${value}`;
+  return out.split('\n').some((line) => line.trim() === wanted);
 }
 
 /** Re-read the config into the RUNNING server: tmux applies `-f` only at

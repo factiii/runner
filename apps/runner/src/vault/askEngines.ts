@@ -414,6 +414,9 @@ export async function cliAnswer(
  * stream-json stdin, so no file is written; Codex only takes files
  * (`--image`), written into that same private folder (mkdtemp, owner-only)
  * rather than the runner's shared drops folder, and removed with it.
+ *
+ * Answers the text and the model that ran it: Claude's as its `init` event
+ * names it, else the model asked for, else null (the CLI's own default).
  */
 export async function cliPlainAnswer(
   target: ExecTarget,
@@ -422,7 +425,7 @@ export async function cliPlainAnswer(
   settings?: CliAskSettings,
   signal?: AbortSignal,
   images?: AskImage[]
-): Promise<string> {
+): Promise<{ text: string; model: string | null }> {
   if (!(await isSignedIn(target, engine))) {
     const { label } = PROVIDERS[engine];
     throw new Error(
@@ -432,6 +435,7 @@ export async function cliPlainAnswer(
   const { codexConfig, ...run } = cliRunSettings(engine, settings);
   signal?.throwIfAborted();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'factiii-ai-'));
+  let model: string | null = null;
   try {
     // Codex's image files land in the run's own folder (spawnAgent writes
     // them to the target's drops folder).
@@ -455,13 +459,20 @@ export async function cliPlainAnswer(
         ...CODEX_FEATURES_OFF.map((feature) => `features.${feature}=false`),
         ...codexConfig
       ],
-      callbacks: {}
+      // Claude names the model it runs (an alias resolved); Codex says
+      // nothing of it, so its own setting is all that is known.
+      callbacks: {
+        onModel: (name) => {
+          model = name;
+        }
+      }
     });
     const stop = () => killTree(proc);
     if (signal?.aborted) stop();
     signal?.addEventListener('abort', stop, { once: true });
     try {
-      return (await result).text;
+      const { text } = await result;
+      return { text, model: model ?? settings?.model ?? null };
     } finally {
       signal?.removeEventListener('abort', stop);
     }

@@ -37,9 +37,6 @@ export type DevVmSpace = {
   spaceDir: string;
   /** The board's GitHub token now, '' for none: the VM's GH_TOKEN. */
   githubToken: () => string;
-  /** The token every session of the space carries (FACTIII_SECRETS_TOKEN):
-   *  the only one the narrow path takes. */
-  spaceToken: () => string;
 };
 
 export type HostExec = (
@@ -369,7 +366,6 @@ export class DevVm {
         await startNarrowPath({
           listenPath: this.narrowHostPath(space.slug),
           upstreamPath: path.join(paths.state, 'secrets.sock'),
-          spaceToken: space.spaceToken,
           simctl
         })
       );
@@ -440,13 +436,9 @@ export class DevVm {
       lanHosts: [lanIp, router].filter(Boolean),
       narrowSockets: spaces.map((s) => path.join(hostSpacePaths(s.spaceDir).state, 'secrets.sock'))
     });
-    // The token rides in on stdin with the script, never on a command line.
-    const token = spaces[0]?.spaceToken() ?? '';
-    const res = await this.exec(
-      'session',
-      'bash -s',
-      `export FACTIII_SECRETS_TOKEN=${shQuote(token)}\n${script}`
-    );
+    // No session token: every narrow-path probe is one that must be refused
+    // whatever the token (each session has its own, and this is not one).
+    const res = await this.exec('session', 'bash -s', script);
     return { code: res.code, output: res.stdout + res.stderr };
   }
 

@@ -13,10 +13,13 @@ import type { RunnerConfig } from './config';
  *  token is due for a refresh. */
 export const RUNNER_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
-/** A token older than this is traded for a new one. One day against a 30-day
- *  lifetime: a tunnel's frpc, the one thing that takes the token when it
- *  starts and keeps it, always gets one with at least 29 days left. (A
- *  session holds no copy, and the index service is sent each new one.) */
+/** A token older than this is traded for a new one (or at half its life, if
+ *  that is sooner: tokenRefreshDue). One day against a 7-day lifetime, the
+ *  one the server gives a runner that announces `tunnelCredential`: no tunnel
+ *  holds the access token any more (each gets its own credential), a session
+ *  holds no copy, and the index service is sent each new one. On a server
+ *  from before that, the lifetime is 30 days and a tunnel's frpc still gets
+ *  the access token, with at least 29 days left. */
 export const RUNNER_TOKEN_REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
 
 /** How long to wait for the server's answer to `runner:token-refresh`. */
@@ -233,8 +236,10 @@ export type TokenKeeperDeps = {
  * 1. A pair that is in memory but not in the file is written again.
  * 2. A refresh token that is in the file, and that the server has not yet
  *    acknowledged as saved in this process, is confirmed
- *    (`runner:token-saved`). The server then retires this runner's legacy
- *    access token. Never sent while the file does not hold the token.
+ *    (`runner:token-saved`). The server checks the token is one of this
+ *    runner's chain and stores nothing (a legacy token with no `exp` is
+ *    refused outright, so there is none left to retire). Never sent while the
+ *    file does not hold the token.
  * 3. When the access token is due, the refresh token is traded for a new pair,
  *    which is written, read back and confirmed the same way.
  *
@@ -381,4 +386,40 @@ export function createTokenKeeper(deps: TokenKeeperDeps): {
     run,
     state: () => ({ saved, confirmed, hasRefreshToken: refreshToken !== null })
   };
+}
+
+/** How long to wait for the server's answer to `runner:tunnel-token`. */
+export const RUNNER_TUNNEL_TOKEN_ACK_TIMEOUT_MS = 15 * 1000;
+
+/** Thrown at `factiii-expose` while the runner is not connected. */
+export const TUNNEL_OFFLINE =
+  'This runner is not connected to Factiii right now, so it cannot open a tunnel. Try again in a moment.';
+
+/**
+ * The credential `factiii-expose` hands frpc: a frp-only one from the server
+ * (`runner:tunnel-token`), so no tunnel holds the runner's access token. A
+ * server that answered its hello without `tunnelToken` gets the access
+ * token, as before: its frp hook knows nothing else. A server that has not
+ * answered (a hello that timed out is unknown, serverPeer.ts) is asked for a
+ * frp-only one like any other, never handed the access token on a guess.
+ * Throws with words for the session when it cannot get one.
+ */
+export async function tunnelCredential(deps: {
+  connected: () => boolean;
+  /** The server answered its hello and said it has no `tunnelToken`. */
+  serverLacks: () => boolean;
+  ask: () => Promise<unknown>;
+  accessToken: () => string;
+}): Promise<string> {
+  if (deps.serverLacks()) return deps.accessToken();
+  if (!deps.connected()) throw new Error(TUNNEL_OFFLINE);
+  const answer = (await deps.ask().catch(() => null)) as
+    | { token?: unknown; error?: unknown }
+    | null;
+  if (answer && typeof answer.token === 'string' && answer.token) {
+    return answer.token;
+  }
+  const reason =
+    answer && typeof answer.error === 'string' ? answer.error : 'no answer';
+  throw new Error(`The server gave no tunnel credential (${reason}).`);
 }

@@ -1,45 +1,59 @@
+import type { AiAnsweredBy } from '../validators/aiSource';
 import type {
   RoutineDueAck,
   RoutineDueFrame,
-  RoutineResultFrame,
-} from "../validators/routines";
-import type { RunnerSleepSnapshot } from "../validators/runnerParts";
+  RoutineResultFrame
+} from '../validators/routines';
+import type { RunnerSleepSnapshot } from '../validators/runnerParts';
+import type {
+  DesktopSessionsReport,
+  RunnerSessionsReport,
+  SessionOp,
+  SessionRelayRequest
+} from '../validators/sessionRelay';
 import type {
   AudioRoomAck,
   AudioRoomRole,
   AudioRoomSignal,
-  AudioRoomState,
-} from "./audioRooms";
+  AudioRoomState
+} from './audioRooms';
 import type {
   AgentState,
   BoardAgentActionMap,
   RunnerGrants,
   RunnerHealthAlert,
-  RunnerJobInfo,
   RunnerJobEndState,
+  RunnerJobInfo,
   RunnerJobState,
-  RunnerJobTargetWait,
-} from "./electron";
-import type { IcePair } from "./iceLink";
-import type { Post } from "./posts";
+  RunnerJobTargetWait
+} from './electron';
+import type { IcePair } from './iceLink';
+import type { Post } from './posts';
+import type { RunnerJobStoppedMessage } from './runnerActivity';
+import type { ProtocolHello } from './runnerProtocol';
+import type {
+  RelaySession,
+  SessionOpAck,
+  SessionRelayAnswer
+} from './sessionRelay';
 
 // UserTag as string union - compatible with both Prisma enum and shared enum
 export type SocketUserTag =
-  | "HUMAN"
-  | "BOT"
-  | "GOVERNMENT"
-  | "ACADEMIA"
-  | "BUSINESS"
-  | "NEW"
-  | "WAITLIST"
-  | "VERIFIED";
+  | 'HUMAN'
+  | 'BOT'
+  | 'GOVERNMENT'
+  | 'ACADEMIA'
+  | 'BUSINESS'
+  | 'NEW'
+  | 'WAITLIST'
+  | 'VERIFIED';
 
 // ============================================
 // WebRTC Signaling Types
 // ============================================
 
 export interface RTCSessionDescriptionInit {
-  type: "offer" | "answer" | "pranswer" | "rollback";
+  type: 'offer' | 'answer' | 'pranswer' | 'rollback';
   sdp: string;
 }
 
@@ -70,13 +84,13 @@ export interface ScrapeStatusUpdate {
 // uploads to a platform. Ephemeral (no DB persistence) — the DB status is the
 // source of truth on reload; this just drives the realtime progress bar.
 export type CrossPostStage =
-  | "queued"
-  | "fetching"
-  | "uploading"
-  | "publishing"
-  | "processing"
-  | "posted"
-  | "failed";
+  | 'queued'
+  | 'fetching'
+  | 'uploading'
+  | 'publishing'
+  | 'processing'
+  | 'posted'
+  | 'failed';
 
 export interface CrossPostProgress {
   crossPostId: number;
@@ -143,7 +157,7 @@ export interface NewConversationPayload {
   encrypted?: boolean;
   id: string;
   name: string | null;
-  kind?: "DM" | "GROUP" | "CHANNEL";
+  kind?: 'DM' | 'GROUP' | 'CHANNEL';
   read: boolean;
   /** Always 0/false here — a conversation you were just added to has nothing
    *  unread yet and cannot already be muted. Present so the payload maps
@@ -152,7 +166,7 @@ export interface NewConversationPayload {
   muted?: boolean;
   lastMessage: SocketLastMessage | null;
   participants: SocketConversationParticipant[];
-  type?: "REGULAR" | "BAN_DISPUTE";
+  type?: 'REGULAR' | 'BAN_DISPUTE';
   ban?: SocketBanInfo | null;
 }
 
@@ -168,16 +182,16 @@ export interface MemberAddedPayload {
   isActive: boolean;
 }
 
-export type BoardScope = "factiiis" | "posts" | "all";
+export type BoardScope = 'factiiis' | 'posts' | 'all';
 
 // Realtime payload for the admin search-index backfill (pushed over socket).
 type SearchIndexKind =
-  | "post"
-  | "user"
-  | "space"
-  | "factiii"
-  | "product"
-  | "media";
+  | 'post'
+  | 'user'
+  | 'space'
+  | 'factiii'
+  | 'product'
+  | 'media';
 export type SearchIndexProgress = {
   running: boolean;
   processed: number;
@@ -187,19 +201,19 @@ export type SearchIndexProgress = {
 // Live step of an AI research run, pushed per tool call so the UI can show
 // "Searching Wikipedia…" etc. in real time.
 export type ResearchProgressSource =
-  | "wikipedia"
-  | "bluesky"
-  | "youtube"
-  | "openalex"
-  | "edgar"
-  | "onedrive"
+  | 'wikipedia'
+  | 'bluesky'
+  | 'youtube'
+  | 'openalex'
+  | 'edgar'
+  | 'onedrive'
   // Finding or reading a skill (.specs/skills.md).
-  | "skill"
+  | 'skill'
   // Running code in the sandbox, and the files it made.
-  | "code"
+  | 'code'
   // Summarizing a long Ask chat's earlier messages, so a follow-up costs less.
-  | "summary"
-  | "web";
+  | 'summary'
+  | 'web';
 
 export interface ResearchProgress {
   sessionId: string;
@@ -224,6 +238,9 @@ export interface ResearchResult {
   /** Set when the chat's earlier messages were summarized before this answer,
    *  so the thread can say so above the question it answers. */
   summarized?: boolean;
+  /** On OpenRouter: the model that answered and what OpenRouter billed
+   *  (.specs/ai-source.md → Research); `cost` is 0 there. */
+  answeredBy?: AiAnsweredBy | null;
 }
 
 // A file the Ask assistant made with code execution, as the answer's file card
@@ -232,12 +249,12 @@ export interface ResearchResult {
 // vault already has. `confirm` is a name clash waiting on the person: the
 // assistant never replaces a file on its own say-so.
 type ResearchFileStatus =
-  | "saving"
-  | "saved"
-  | "confirm"
-  | "duplicate"
-  | "failed"
-  | "discarded";
+  | 'saving'
+  | 'saved'
+  | 'confirm'
+  | 'duplicate'
+  | 'failed'
+  | 'discarded';
 
 export interface ResearchFile {
   id: string;
@@ -304,7 +321,7 @@ export interface ServerToClientEvents {
   tronReward: (quantity: number, title: string) => void;
   notificationCount: (
     count: number,
-    detail?: { type: string; username: string },
+    detail?: { type: string; username: string }
   ) => void;
 
   // Conversations
@@ -317,7 +334,7 @@ export interface ServerToClientEvents {
     attachments?: Array<{
       id: string;
       key: string;
-      type: "IMAGE" | "VIDEO" | "DOCUMENT";
+      type: 'IMAGE' | 'VIDEO' | 'DOCUMENT';
       name: string | null;
       // Signed, for a file in the private bucket (MessageAttachment.url).
       url?: string;
@@ -327,7 +344,7 @@ export interface ServerToClientEvents {
      * transcript MUST skip these — a reply belongs in its thread pane, and
      * threads deliberately do not bump the conversation's last message.
      */
-    parentId?: number | null,
+    parentId?: number | null
   ) => void;
   newConversation: (conversation: NewConversationPayload) => void;
   conversationNameUpdated: (conversationId: string, name: string) => void;
@@ -339,7 +356,7 @@ export interface ServerToClientEvents {
   messageEdited: (
     messageId: number,
     conversationId: string,
-    content: string,
+    content: string
   ) => void;
   /** Delete for everyone — the message is tombstoned, not removed. */
   messageDeleted: (messageId: number, conversationId: string) => void;
@@ -354,11 +371,11 @@ export interface ServerToClientEvents {
     attachments: Array<{
       id: string;
       key: string;
-      type: "IMAGE" | "VIDEO" | "DOCUMENT";
+      type: 'IMAGE' | 'VIDEO' | 'DOCUMENT';
       name: string | null;
       // Signed, for a file in the private bucket (MessageAttachment.url).
       url?: string;
-    }>,
+    }>
   ) => void;
   /**
    * A reaction was toggled. `count` is the emoji's new total on that message
@@ -371,13 +388,13 @@ export interface ServerToClientEvents {
     emoji: string,
     userId: number,
     added: boolean,
-    count: number,
+    count: number
   ) => void;
   /** A thread gained or lost a reply — `count` is the root's new reply total. */
   threadReplyCount: (
     parentId: number,
     conversationId: string,
-    count: number,
+    count: number
   ) => void;
   typing: (conversationId: string, senderId: number) => void;
   activity: (status: ActivityStatus, conversationId: string) => void;
@@ -446,6 +463,11 @@ export interface ServerToClientEvents {
   // on a board both joined). Sent at every report and, for an owner's socket
   // that joins later, in the connect burst beside `runnerOnline` (a member's
   // app seeds from `runners.health`). Drives the low disk and memory banner.
+  // This runner has work running or a prompt waiting that concerns you, or
+  // no longer does (helpers/runnerBusy.ts). The app holds its link open while
+  // busy, so the Running jobs pill, job-finish notices and approvals reach you
+  // with links opened only when needed. A runner id and a flag, nothing more.
+  runnerBusy: (data: { runnerId: number; busy: boolean }) => void;
   runnerHealth: (data: {
     runnerId: number;
     name: string;
@@ -454,11 +476,23 @@ export interface ServerToClientEvents {
      *  it on, for the banner's Status link. */
     spaceSlug?: string;
   }) => void;
+  // A runner release went out (POST /webhooks/release): the newest runner
+  // version, to every app socket. The update banner takes it as the server's
+  // `runners.latestVersion` answer, so it shows within the minute.
+  runnerLatestVersion: (data: { version: string }) => void;
+  // A desktop release went out: its version (`1.8.47`), to every app socket.
+  // Factiii Desktop asks its updater to look now (window.electronAPI
+  // checkForUpdates) instead of at its daily check.
+  desktopLatestRelease: (data: { version: string }) => void;
   // The owner revoked this runner from Settings → Connected Apps. The daemon
   // tears down any running jobs (kills processes + removes their containers)
   // and exits. The server still force-disconnects shortly after as a fallback
   // for older runners that don't handle this event.
   runnerRevoked: () => void;
+  // A job you started on a runner was stopped from its Activity (by you on
+  // another device, the owner, or a member with full access). The apps show
+  // it as a toast.
+  runnerJobStopped: (data: RunnerJobStoppedMessage) => void;
 
   // Runner reported which private connections it has configured on its host
   // (the fact only, never the token value). Pushed to the owner's user room so
@@ -482,20 +516,27 @@ export interface ServerToClientEvents {
     linkId?: string;
     // ICE servers for the runner's side of this connection, minted by the
     // server. Rides along on the offer so the runner needs no extra auth path.
-    // Absent on older servers: the runner falls back to STUN.
+    // Absent on older servers: the runner falls back to STUN. STUN only when
+    // the caller asked (`stunOnly`): an upgrade try that must prove a path
+    // without TURN on either side.
     iceServers?: {
       urls: string | string[];
       username?: string;
       credential?: string;
     }[];
   }) => void;
+  // `linkId`: the offer's, so a client with two dials to one runner at once
+  // (the link and its upgrade try) applies each answer and candidate to its
+  // own peer. Absent from older runners and clients: match on socket only.
   runnerAnswer: (data: {
     fromSocketId: string;
     answer: RTCSessionDescriptionInit;
+    linkId?: string;
   }) => void;
   runnerIceCandidate: (data: {
     fromSocketId: string;
     candidate: RTCIceCandidateInit;
+    linkId?: string;
   }) => void;
 
   // Runner: socket-relay link, the client's last resort once every WebRTC path
@@ -523,14 +564,20 @@ export interface ServerToClientEvents {
   // reported nothing anywhere. `reason` says which gate refused it.
   runnerSignalError: (data: {
     targetSocketId: string;
-    reason: "no-session" | "runner-offline" | "not-shared";
+    reason: 'no-session' | 'runner-offline' | 'not-shared';
   }) => void;
+
+  // Server -> runner: a runner release went out (POST /webhooks/release).
+  // The runner looks for the update within the minute, as its daily check
+  // would (autoUpdate.ts `soon`); a runner from before it ignores the event
+  // and keeps its own schedule.
+  'runner:release': (data: { version: string }) => void;
 
   // Server -> runner: space `spaceId`'s slug is now `slug` and its name `name`
   // (its name changed). The runner moves what it keeps under the old slug and
   // names the board by `name` from then on (boardRegistry.ts). `name` is absent
   // from a server older than it.
-  "runner:space-renamed": (data: {
+  'runner:space-renamed': (data: {
     spaceId: number;
     slug: string;
     name?: string;
@@ -540,7 +587,7 @@ export interface ServerToClientEvents {
   // its `exp`, so the connection is good for `runner:token-refresh` and
   // nothing else. Sent once, on connect. The runner refreshes with its refresh
   // token and reconnects.
-  "runner:token-expired": () => void;
+  'runner:token-expired': () => void;
 
   // ── Shared runner jobs + secrets gate (.specs/runner-secrets-gate.md) ──
   // Server -> runner, sent only after the server checked that the actor is a
@@ -550,59 +597,73 @@ export interface ServerToClientEvents {
   // tRPC call with what the runner said.
 
   /** The jobs the runner exposes for this space. */
-  "runner:job-list": (
+  'runner:job-list': (
     data: { spaceSlug: string; spaceId?: number; actor: RunnerActor },
-    ack: (res: RunnerAck<{ jobs: RunnerJobInfo[] }>) => void,
+    ack: (res: RunnerAck<{ jobs: RunnerJobInfo[] }>) => void
   ) => void;
   /** Start a job by name. Never a command. The ack says whether the runner
    *  accepted it (known job, params match); progress arrives as
    *  `runner:job-log` / `runner:job-end` keyed by `callId`. */
-  "runner:job-call": (
+  'runner:job-call': (
     data: RunnerJobCall,
-    ack: (res: RunnerAck<{ accepted: true }>) => void,
+    ack: (res: RunnerAck<{ accepted: true }>) => void
   ) => void;
   /** Optional: the runner's own view of a call, for a server that lost its
    *  buffered state (restart). */
-  "runner:job-status-request": (
+  'runner:job-status-request': (
     data: { callId: string; afterSeq?: number },
-    ack: (res: RunnerAck<RunnerJobStatus>) => void,
+    ack: (res: RunnerAck<RunnerJobStatus>) => void
   ) => void;
   /** Stop a running (or queued) call. The server already checked that the
    *  actor started it, owns the runner, or owns the space. `cancelled: false`
    *  = the call had already ended. The end still arrives as
    *  `runner:job-end` with state 'cancelled'. */
-  "runner:job-cancel": (
+  'runner:job-cancel': (
     data: { callId: string; actor: RunnerActor },
-    ack: (res: RunnerAck<{ cancelled: boolean }>) => void,
+    ack: (res: RunnerAck<{ cancelled: boolean }>) => void
   ) => void;
   /** An encrypted secret update from a laptop CLI. `ciphertext` is age armor
    *  to the runner's recipient: the server never sees the value. The runner
    *  parks it in its inbox and opens the gate. */
-  "runner:secret-submit": (
+  'runner:secret-submit': (
     data: RunnerSecretSubmit,
-    ack: (res: RunnerAck<{ accepted: true }>) => void,
+    ack: (res: RunnerAck<{ accepted: true }>) => void
   ) => void;
   /** The runner's public age recipient (`age-recipient.txt`) for a space. */
-  "runner:recipient-request": (
+  'runner:recipient-request': (
     data: { spaceSlug: string; spaceId?: number; actor: RunnerActor },
-    ack: (res: RunnerAck<{ recipient: string }>) => void,
+    ack: (res: RunnerAck<{ recipient: string }>) => void
   ) => void;
   /** A Routine is due (.todos/routines.md): open a Chat session on the board
    *  with its prompt, acting for the runner's owner. The server sends it only
    *  to the owner's own runner. The ack names the session, or why not. */
-  "runner:routine-due": (
+  'runner:routine-due': (
     data: RoutineDueFrame,
-    ack: (res: RoutineDueAck) => void,
+    ack: (res: RoutineDueAck) => void
+  ) => void;
+  /** A session on another runner reads, messages or starts a session here
+   *  (.specs/card-sessions.md "Across runners"). The server checked that
+   *  `actor` may use both runners on those boards; the runner checks its own
+   *  levels again, and its owner's setting for a start. */
+  'runner:session-op': (
+    data: SessionOp,
+    ack: (res: SessionOpAck) => void
+  ) => void;
+  /** The same, to the desktop app's local agent, on its person's socket.
+   *  Read and message only: the desktop app takes no starts from runners. */
+  'desktop:session-op': (
+    data: SessionOp,
+    ack: (res: SessionOpAck) => void
   ) => void;
   /** Read the runner's audit log (owner only; the server checks that). */
-  "runner:audit-read": (
+  'runner:audit-read': (
     data: {
       spaceSlug: string;
       spaceId?: number;
       query: RunnerAuditQuery;
       actor: RunnerActor;
     },
-    ack: (res: RunnerAck<RunnerAuditResult>) => void,
+    ack: (res: RunnerAck<RunnerAuditResult>) => void
   ) => void;
 }
 
@@ -652,13 +713,13 @@ type RunnerSecretSubmit = {
   spaceSlug: string;
   spaceId?: number;
   key: string;
-  kind: "env" | "file";
+  kind: 'env' | 'file';
   ciphertext: string;
   actor: RunnerActor;
 };
 
-type RunnerAuditQuery = BoardAgentActionMap["auditRead"]["payload"];
-type RunnerAuditResult = BoardAgentActionMap["auditRead"]["result"];
+type RunnerAuditQuery = BoardAgentActionMap['auditRead']['payload'];
+type RunnerAuditResult = BoardAgentActionMap['auditRead']['result'];
 
 /** The states a call can end in: defined once beside RunnerJobState in
  *  electron.ts (RUNNER_JOB_END_STATES) and re-exported here. */
@@ -698,9 +759,9 @@ export type RunnerDangerousApprovalOpen = {
 // `userId` + `name` name the person on the other end of the channel, so the
 // runner can write a server-vouched actor into its audit log.
 export type RunnerScope =
-  | { role: "owner"; userId: string; name: string }
+  | { role: 'owner'; userId: string; name: string }
   | {
-      role: "member";
+      role: 'member';
       spaceSlugs: string[];
       userId: string;
       name: string;
@@ -716,47 +777,47 @@ export type RunnerScope =
 export interface ClientToServerEvents {
   // Audio rooms (.specs/audio-rooms.md → Events). Every one answers through
   // its ack; the server checks the rules in domains/audioRooms.ts.
-  "audioRoom:peek": (
+  'audioRoom:peek': (
     data: { conversationId: string },
-    ack: (res: AudioRoomAck<AudioRoomState | null>) => void,
+    ack: (res: AudioRoomAck<AudioRoomState | null>) => void
   ) => void;
-  "audioRoom:start": (
+  'audioRoom:start': (
     data: { conversationId: string },
-    ack: (res: AudioRoomAck<AudioRoomState>) => void,
+    ack: (res: AudioRoomAck<AudioRoomState>) => void
   ) => void;
-  "audioRoom:join": (
+  'audioRoom:join': (
     data: { roomId: string },
-    ack: (res: AudioRoomAck<AudioRoomState>) => void,
+    ack: (res: AudioRoomAck<AudioRoomState>) => void
   ) => void;
-  "audioRoom:leave": (
+  'audioRoom:leave': (
     data: { roomId: string },
-    ack?: (res: AudioRoomAck<null>) => void,
+    ack?: (res: AudioRoomAck<null>) => void
   ) => void;
-  "audioRoom:hand": (
+  'audioRoom:hand': (
     data: { roomId: string; raised: boolean },
-    ack: (res: AudioRoomAck<null>) => void,
+    ack: (res: AudioRoomAck<null>) => void
   ) => void;
-  "audioRoom:mute": (
+  'audioRoom:mute': (
     data: { roomId: string; muted: boolean },
-    ack: (res: AudioRoomAck<null>) => void,
+    ack: (res: AudioRoomAck<null>) => void
   ) => void;
-  "audioRoom:setRole": (
+  'audioRoom:setRole': (
     data: {
       roomId: string;
       userId: number;
-      role: Exclude<AudioRoomRole, "HOST">;
+      role: Exclude<AudioRoomRole, 'HOST'>;
     },
-    ack: (res: AudioRoomAck<null>) => void,
+    ack: (res: AudioRoomAck<null>) => void
   ) => void;
-  "audioRoom:remove": (
+  'audioRoom:remove': (
     data: { roomId: string; userId: number },
-    ack: (res: AudioRoomAck<null>) => void,
+    ack: (res: AudioRoomAck<null>) => void
   ) => void;
-  "audioRoom:end": (
+  'audioRoom:end': (
     data: { roomId: string },
-    ack: (res: AudioRoomAck<null>) => void,
+    ack: (res: AudioRoomAck<null>) => void
   ) => void;
-  "audioRoom:signal": (data: {
+  'audioRoom:signal': (data: {
     roomId: string;
     toSocketId: string;
     signal: AudioRoomSignal;
@@ -792,14 +853,19 @@ export interface ClientToServerEvents {
     offer: RTCSessionDescriptionInit;
     /** See ServerToClientEvents.runnerOffer — one id per handshake attempt. */
     linkId?: string;
+    /** Hand the runner STUN only, no TURN: the upgrade try from TURN to a
+     *  direct route, which proves a path only if neither side relays. */
+    stunOnly?: boolean;
   }) => void;
   runnerAnswer: (data: {
     targetSocketId: string;
     answer: RTCSessionDescriptionInit;
+    linkId?: string;
   }) => void;
   runnerIceCandidate: (data: {
     targetSocketId: string;
     candidate: RTCIceCandidateInit;
+    linkId?: string;
   }) => void;
 
   // Runner: socket-relay link. See ServerToClientEvents.runnerSocketOpen.
@@ -827,24 +893,50 @@ export interface ClientToServerEvents {
   // `heartbeatAt`), throttled. Not the online flag: that is the socket itself.
   // A runner build from before this event sends nothing, and its row keeps
   // both fields null.
-  "runner:heartbeat": (data: { version: string }) => void;
+  // `protocol` and `features` (.specs/versioning.md "Protocol") ride along
+  // from a runner that has the handshake; an older one sends `version` only.
+  'runner:heartbeat': (data: {
+    version: string;
+    protocol?: number;
+    features?: string[];
+  }) => void;
+  // Runner → server, acked: the handshake (.specs/versioning.md "Protocol").
+  // The runner says its version and what it supports; the server answers what
+  // it supports. A server from before it never acks: the runner then knows
+  // nothing of it (everything as before the handshake, no tunnel given the
+  // access token) and asks again (apps/runner/src/serverPeer.ts).
+  'runner:hello': (
+    data: { version: string } & ProtocolHello,
+    ack: (answer: ProtocolHello) => void
+  ) => void;
   // Runner → server: its machine's disk and memory level, on connect and on
   // every change (apps/runner/src/healthWatch.ts). The server keeps the last
   // one per connection, relays it to the owner and to the members it is
   // shared with (`runnerHealth`) and pushes
   // the owner when it turns critical and when it recovers
   // (helpers/runnerHealthPush.ts). An older server ignores it.
-  "runner:health": (data: RunnerHealthAlert) => void;
+  'runner:health': (data: RunnerHealthAlert) => void;
 
   // Runner → server: "I am letting this Mac sleep" (.specs/runner-keep-awake.md
   // "Asleep, not Offline"), sent just before keep-awake lets go, with what it
   // was doing. The server keeps the snapshot on the Runner row, and when this
   // socket then drops the runner shows Asleep, not Offline, until it is back.
   // Validated server-side (runnerSleepSnapshotSchema); a bad one is dropped.
-  "runner:going-to-sleep": (data: RunnerSleepSnapshot) => void;
+  'runner:going-to-sleep': (data: RunnerSleepSnapshot) => void;
   // Runner → server: work came back before the Mac slept, so the snapshot is
   // void. A reconnect clears it too.
-  "runner:awake": () => void;
+  'runner:awake': () => void;
+  // Runner → server: a job in its Activity was stopped (.specs/runner.md
+  // "Activity"). The server tells the job's starter (`runnerJobStopped`)
+  // only when they are the owner or hold a level on the runner
+  // (runnerJobStoppedTarget). Carries the job's title (a Vault job's is its
+  // type) and who stopped it, never its log.
+  'runner:job-stopped': (data: {
+    userId: number;
+    jobId: string;
+    title: string;
+    stoppedBy: string;
+  }) => void;
 
   // Runner → server: trade the runner's refresh token for a new access token
   // and a new refresh token. `refreshToken` is absent only on the first call
@@ -852,17 +944,28 @@ export interface ClientToServerEvents {
   // the handshake authorises. Refused for a revoked runner. A server from
   // before this event never acks, so the runner sends it with a timeout and
   // keeps its token.
-  "runner:token-refresh": (
+  'runner:token-refresh': (
     data: { refreshToken?: string },
-    ack: (res: RunnerTokenRefresh | RunnerTokenRefreshRefusal) => void,
+    ack: (res: RunnerTokenRefresh | RunnerTokenRefreshRefusal) => void
   ) => void;
 
   // Runner → server: "the refresh token is in my config file; I read it
   // back". Carries that token as proof; the server checks it is one of this
   // runner's chain. Never sent when the save failed.
-  "runner:token-saved": (
+  'runner:token-saved': (
     data: { refreshToken: string },
-    ack: (res: RunnerAck<{ ok: true }>) => void,
+    ack: (res: RunnerAck<{ ok: true }>) => void
+  ) => void;
+
+  // Runner → server: a tunnel credential for one `factiii-expose`
+  // (.specs/runner-link.md "Tunnels"). Good for the frp hook only, and for
+  // RUNNER_TUNNEL_TOKEN_TTL_SECONDS; it dies with the runner's pairing like
+  // the access token. Needs a live identity (not refresh-only). A server from
+  // before it does not announce `tunnelToken`, and the runner then hands
+  // frpc its access token as before.
+  'runner:tunnel-token': (
+    data: Record<string, never>,
+    ack: (res: RunnerAck<{ token: string; expiresAt: number }>) => void
   ) => void;
 
   // Runner → server, on connect: the boards it keeps, by id (spaces.json) and
@@ -871,9 +974,18 @@ export interface ClientToServerEvents {
   // on; anything else is left out. A board renamed while the runner was
   // offline comes back under its new slug. A server older than this never
   // acks, so the runner asks with a timeout and keeps what it has.
-  "runner:board-names": (
+  'runner:board-names': (
     data: { spaceIds: number[]; spaceSlugs: string[] },
-    ack: (res: RunnerAck<{ boards: RunnerBoardName[] }>) => void,
+    ack: (res: RunnerAck<{ boards: RunnerBoardName[] }>) => void
+  ) => void;
+
+  // Runner → server: "which is my owner's profile board?" (.specs/runner-setup.md
+  // "The onboarding session"). Made now if the account has none. Always the
+  // runner owner's own board: the server reads the owner from the connection,
+  // never from the message. A server older than this never acks.
+  'runner:profile-board': (
+    data: Record<string, never>,
+    ack: (res: RunnerAck<{ id: number; slug: string }>) => void
   ) => void;
 
   // Runner → server: "I am being nuked: unpair me" (.specs/runner-setup.md
@@ -881,9 +993,9 @@ export interface ClientToServerEvents {
   // every rail and its tokens stop working. Its other connections are cut;
   // the caller gets the ack, then is cut too. `removed: false` = there was no
   // row left to remove.
-  "runner:unpair": (
+  'runner:unpair': (
     data: Record<string, never>,
-    ack: (res: RunnerAck<{ removed: boolean }>) => void,
+    ack: (res: RunnerAck<{ removed: boolean }>) => void
   ) => void;
 
   // Runner → server: what this side of a handshake saw, once it settled. The
@@ -892,7 +1004,7 @@ export interface ClientToServerEvents {
   runnerLinkReport: (data: {
     linkId: string;
     peerSocketId: string;
-    outcome: "connected" | "failed";
+    outcome: 'connected' | 'failed';
     detail: string;
     // The candidate pair the link is using, for the server's per-route
     // counters: null when nothing was nominated (a failed handshake), absent
@@ -932,17 +1044,17 @@ export interface ClientToServerEvents {
   // false means the user may not read that conversation.
   joinConversation: (
     conversationId: string,
-    ack: (joined: boolean) => void,
+    ack: (joined: boolean) => void
   ) => void;
 
   // Runner -> server: shared runner job progress. `text` is already redacted
   // by the runner; the server buffers it (24h) for `runnerJobs.status`.
-  "runner:job-log": (data: {
+  'runner:job-log': (data: {
     callId: string;
     seq: number;
     text: string;
   }) => void;
-  "runner:job-end": (data: {
+  'runner:job-end': (data: {
     callId: string;
     state: RunnerJobEndState;
     exitCode: number | null;
@@ -951,38 +1063,54 @@ export interface ClientToServerEvents {
   // on the secrets gate). The end arrives as `runner:job-end`. A secret
   // update's submitId counts as a callId here and there. `wait` comes with
   // 'waiting-target', again each time the holder or the place in line moves.
-  "runner:job-state": (data: {
+  'runner:job-state': (data: {
     callId: string;
     state:
-      | "queued"
-      | "waiting-owner"
-      | "waiting-target"
-      | "waiting-auth"
-      | "running";
+      | 'queued'
+      | 'waiting-owner'
+      | 'waiting-target'
+      | 'waiting-auth'
+      | 'running';
     wait?: RunnerJobTargetWait;
   }) => void;
   // Runner -> server: the secrets gate opened on a shared runner. The server
   // pushes the space's approvers, at most once per requestId.
-  "runner:gate-open": (data: RunnerGateOpen) => void;
+  'runner:gate-open': (data: RunnerGateOpen) => void;
   // Runner -> server: a member's call of a dangerous job waits for the
   // runner owner's approval. The server pushes the runner's OWNER only, at
   // most once per requestId. An older server ignores it; the call then waits
   // until the owner opens the app, or ends denied after 10 minutes.
-  "runner:dangerous-approval": (data: RunnerDangerousApprovalOpen) => void;
+  'runner:dangerous-approval': (data: RunnerDangerousApprovalOpen) => void;
   // Runner -> server: the level the owner gave each board member (Runner
   // Settings). Sent on connect and on every change. The server keeps the last
   // value per connected runner, shows the runner only to members with a
   // level, and refuses a non-owner job call early below the Jobs level; the
   // runner enforces all of it too.
   // `vault`: the accounts the owner let into the runner's Vault.
-  "runner:access-state": (data: {
+  'runner:access-state': (data: {
     grants: RunnerGrants;
     vault?: string[];
   }) => void;
+  // Runner -> server: its live sessions per board, what it offers and
+  // whether its owner lets other runners start sessions there: the server's
+  // session directory (.specs/card-sessions.md "Across runners"). On connect
+  // and on every change; kept per connection, like the grants.
+  'runner:sessions': (data: RunnerSessionsReport) => void;
+  // Runner -> server: a hypervisor tool reaching past this runner (list the
+  // other runners or their sessions, read, message or start one). The server
+  // checks who may reach what, carries the call to the target and answers,
+  // or holds a message for an offline target.
+  'runner:session-relay': (
+    data: SessionRelayRequest,
+    ack: (res: SessionRelayAnswer) => void
+  ) => void;
+  // Desktop app -> server: one board's sessions on its local agent, each
+  // time the app reads them. Kept per connection.
+  'desktop:sessions': (data: DesktopSessionsReport) => void;
   // Runner -> server: a session a Routine started has finished
   // (.todos/routines.md). Validated server-side (routineResultFrameSchema)
   // and taken only for the owner's own RUNNING run with that session.
-  "runner:routine-result": (data: RoutineResultFrame) => void;
+  'runner:routine-result': (data: RoutineResultFrame) => void;
 }
 
 /**
@@ -996,13 +1124,13 @@ export interface ClientToServerEvents {
  * the same wire because a stop is a stop, whichever field carried it.
  */
 export type RunnerSessionEndPhase =
-  | "complete"
-  | "done"
-  | "error"
-  | "awaiting-input"
-  | "bare-review"
-  | "terminal-idle"
-  | "terminal-blocked";
+  | 'complete'
+  | 'done'
+  | 'error'
+  | 'awaiting-input'
+  | 'bare-review'
+  | 'terminal-idle'
+  | 'terminal-blocked';
 
 /**
  * What a settled job says when it announces itself. Shared so the phone's push
@@ -1011,13 +1139,13 @@ export type RunnerSessionEndPhase =
  * shouldn't look like two different things.
  */
 export const SESSION_END_MESSAGE: Record<RunnerSessionEndPhase, string> = {
-  complete: "changes are ready for review",
-  done: "changes pushed",
-  error: "the run hit an error",
-  "awaiting-input": "the agent has a question for you",
-  "bare-review": "terminal changes are ready for review",
-  "terminal-idle": "the terminal finished its work",
-  "terminal-blocked": "the terminal is waiting on your approval",
+  complete: 'changes are ready for review',
+  done: 'changes pushed',
+  error: 'the run hit an error',
+  'awaiting-input': 'the agent has a question for you',
+  'bare-review': 'terminal changes are ready for review',
+  'terminal-idle': 'the terminal finished its work',
+  'terminal-blocked': 'the terminal is waiting on your approval'
 };
 
 /**
@@ -1034,17 +1162,17 @@ export const SESSION_END_MESSAGE: Record<RunnerSessionEndPhase, string> = {
  */
 export function agentSettledPhase(
   previous: AgentState | undefined,
-  current: AgentState | undefined,
+  current: AgentState | undefined
 ): RunnerSessionEndPhase | null {
-  if (previous !== "working" || current === "working") return null;
-  if (current === "idle") return "terminal-idle";
-  if (current === "blocked") return "terminal-blocked";
+  if (previous !== 'working' || current === 'working') return null;
+  if (current === 'idle') return 'terminal-idle';
+  if (current === 'blocked') return 'terminal-blocked';
   return null;
 }
 
 /** Whether a phase is one the user should be told about. */
 export function isSessionEndPhase(
-  phase: string | null | undefined,
+  phase: string | null | undefined
 ): phase is RunnerSessionEndPhase {
   return Boolean(phase && phase in SESSION_END_MESSAGE);
 }
@@ -1053,7 +1181,7 @@ export function isSessionEndPhase(
 // Runner model). Open-ended by design — the server stores whatever strings the
 // runner sends; the UI renders known kinds with a label/icon and falls back to
 // the raw string for anything new.
-export type RunnerConnectionKind = "claude" | "git";
+export type RunnerConnectionKind = 'claude' | 'git';
 
 // ============================================
 // Inter-Server Events (for Socket.io clusters)
@@ -1072,7 +1200,7 @@ export interface InterServerEvents {
  * channel rooms itself. A client that does not send it is joined to every
  * conversation at connect, which keeps builds from before this rule working.
  */
-export const LAZY_CHAT_ROOMS = "lazy";
+export const LAZY_CHAT_ROOMS = 'lazy';
 
 export interface SocketData {
   userId?: number;
@@ -1093,6 +1221,12 @@ export interface SocketData {
   runnerName?: string;
   /** Runner.platform, cached from the DB row at handshake time. */
   runnerPlatform?: string;
+  /** The version the runner last said (`runner:hello`, `runner:heartbeat`). */
+  runnerVersion?: string;
+  /** What the runner announced it supports, when it has the handshake
+   *  (.specs/versioning.md "Protocol"). Undefined for an older runner, whose
+   *  features are read off `runnerVersion` (`runnerFeaturesOf`). */
+  runnerAnnounced?: ProtocolHello;
   /** The runner's last `runner:access-state` report, parsed. Undefined until
    *  it reports; lives only as long as the connection. */
   runnerGrants?: RunnerGrants;
@@ -1104,6 +1238,17 @@ export interface SocketData {
   /** The runner's last `runner:health` report, checked. Undefined until it
    *  reports; lives only as long as the connection. */
   runnerHealth?: RunnerHealthAlert;
+  /** Prompts this runner raised that wait on people (a dangerous approval,
+   *  a secrets gate), by request id: who, and until when they count
+   *  (helpers/runnerBusy.ts). Lives only as long as the connection. */
+  runnerAsks?: Record<string, { userIds: number[]; until: number }>;
+  /** The users last told this runner is busy for them (runnerBusy). */
+  runnerBusyUsers?: number[];
+  /** The runner's last `runner:sessions` report (the session directory).
+   *  Undefined until it reports; lives only as long as the connection. */
+  runnerSessions?: RunnerSessionsReport;
+  /** The desktop app's last `desktop:sessions` report per board slug. */
+  desktopSessions?: Record<string, RelaySession[]>;
   /** Set INSTEAD of `runnerId` / `userId` when the runner's access token was
    *  past its `exp` and its refresh token can still be used. The connection is
    *  anonymous for every purpose except `runner:token-refresh` and

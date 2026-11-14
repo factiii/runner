@@ -15,6 +15,7 @@ import { isFailedPasswordAttempt } from './password-throttle';
 import { redactor } from './secrets-bridge';
 import type { SecretsGate } from './secrets-gate';
 import {
+  type SessionWindows,
   unlockMinutes,
   type UnlockWindow,
   type WindowActor
@@ -169,10 +170,11 @@ async function wipeDir(dir: string): Promise<void> {
  * Decrypting all of it to inject part of it is deliberate: the store is one
  * sops file, and the values that do NOT go in still feed the redactor.
  *
- * A free command (no `job`) prompts every time, even while an unlock window is
- * open: the window covers jobs only (.specs/runner-secrets-gate.md). Its
- * answer can still OPEN a window, for the jobs that follow. A job spawn inside
- * an open window runs without a prompt.
+ * A job spawn inside an open unlock window runs without a prompt. A free
+ * command (no `job`) never reads that window: it runs without a prompt only
+ * inside a SESSION window of its own session that covers every name it asks
+ * for, and its answer can open one of those (never a jobs window)
+ * (.specs/runner-secrets-gate.md "Session window").
  */
 export async function authorizeAndRun(opts: {
   configDir: string;
@@ -193,6 +195,13 @@ export async function authorizeAndRun(opts: {
   window?: UnlockWindow;
   /** The job this spawn runs, when it is one. Only a job can ride a window. */
   job?: string;
+  /** The space's session windows, for a free command. With `sessionToken`,
+   *  the prompt offers a duration and a covered request runs unasked. */
+  sessionWindows?: SessionWindows;
+  /** The asking session's secrets token: what a session window is keyed on. */
+  sessionToken?: string;
+  /** That session as the audit log names it (`tab:…`, `run:…`, `deploy`). */
+  session?: string;
   /** Who asked, server-vouched, when it is not the owner's own session. */
   caller?: WindowActor;
   /** Who a free command's audit line names when no `caller` is set: the
@@ -254,9 +263,23 @@ export async function authorizeAndRun(opts: {
     opts.auditActor ?? { userId: '', name: 'Owner' };
   let approvedBy: WindowActor | null = null;
 
-  // A job inside an open window needs nobody. A free command never looks.
-  let identity = forJob ? (opts.window?.identity() ?? null) : null;
-  let unlockedBy = identity ? (opts.window?.holder()?.name ?? null) : null;
+  // A job inside an open window needs nobody. A free command never looks at
+  // that one; it looks for a session window of its own session instead.
+  const sessionToken = forJob ? '' : (opts.sessionToken ?? '');
+  const sessionWindows = sessionToken ? opts.sessionWindows : undefined;
+  const windowScope = { keys: scope, files };
+  const covered = sessionWindows?.cover(sessionToken, windowScope) ?? null;
+  const lockGeneration = sessionWindows?.generation() ?? 0;
+  let identity: string | null = covered?.identity ?? null;
+  let unlockedBy: string | null = covered?.by.name ?? null;
+  if (forJob) {
+    identity = opts.window?.identity() ?? null;
+    unlockedBy = identity ? (opts.window?.holder()?.name ?? null) : null;
+  }
+  /** The session window a free command ran under, for its audit line. */
+  let windowNote = covered
+    ? `session window until ${new Date(covered.until).toISOString()}, opened by ${covered.by.name}`
+    : '';
 
   if (!identity) {
     opts.onPhase?.('waiting-auth');
@@ -278,6 +301,7 @@ export async function authorizeAndRun(opts: {
       error,
       caller: opts.caller,
       job: opts.job,
+      sessionWindow: Boolean(sessionWindows),
       tag,
       // A job waits its turn rather than bumping (or being bumped by) a
       // session's prompt; see secrets-gate.ts.
@@ -350,7 +374,36 @@ export async function authorizeAndRun(opts: {
     }
     approvedBy = auth.by ?? null;
     const minutes = unlockMinutes(auth.unlockFor, forJob);
-    if (opts.window && minutes > 0) {
+    if (!forJob) {
+      // A free command's duration opens a window for this session and these
+      // names only - never the jobs window.
+      if (sessionWindows && minutes > 0) {
+        const by = auth.by ?? sessionActor;
+        const until = sessionWindows.open(sessionToken, identity, minutes, {
+          scope: windowScope,
+          by,
+          origin: opts.origin,
+          session: opts.session ?? '',
+          generation: lockGeneration
+        });
+        unlockedBy = by.name;
+        windowNote = until
+          ? `session window until ${new Date(until).toISOString()}, opened by ${by.name}`
+          : 'no session window: the runner locked while this prompt waited';
+        if (until) await audit({
+          actor: by,
+          via: auth.via ?? 'data-channel',
+          action: 'unlock',
+          job: null,
+          keys: shown,
+          command: null,
+          exitCode: null,
+          durationMs: minutes * 60_000,
+          unlockedBy: by.name,
+          detail: `session window for ${opts.session || opts.origin} (${opts.origin}): these keys only`
+        });
+      }
+    } else if (opts.window && minutes > 0) {
       const by = auth.by ?? opts.caller ?? { userId: '', name: 'Owner' };
       opts.window.open(identity, minutes, by);
       unlockedBy = by.name;
@@ -467,7 +520,13 @@ export async function authorizeAndRun(opts: {
         exitCode: res.code,
         durationMs: Date.now() - started,
         unlockedBy,
-        detail: `free command from ${opts.origin}; caller: ${sessionActor.name}; approved`
+        // A run under a session window names it; one answered on its own
+        // says approved, as before (and names the window it opened).
+        detail: `free command from ${opts.origin}; caller: ${sessionActor.name}; ${
+          covered
+            ? windowNote
+            : ['approved', windowNote].filter(Boolean).join(', ')
+        }`
       });
     }
     const output = redact(res.output);

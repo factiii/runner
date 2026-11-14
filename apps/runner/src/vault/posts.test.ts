@@ -13,7 +13,7 @@ import type { VouchedScope } from '@shared/all/helpers/board-agent-core/runner-a
 import { RUNNER_FILE_TEXT_CHARS } from '@shared/all/validators';
 
 import { openVaultDb, type VaultDb } from './db';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 
 // A runner file's page and the notes kept from Ask (.specs/runner-vault-ask.md "A
@@ -77,7 +77,9 @@ describe('the Vault’s posts', () => {
   before(async () => {
     db = await openVaultDb({ dataDir: 'memory://', engineDir: ENGINE });
     const store = new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-vault-posts-')));
-    vault = new RunnerVault(db, store, '1', () => {}, null, null, null);
+    // Runner Cloud, so a member is let in and still refused the owner's
+    // reading; the Vault refuses them outright (vault.md rule 2).
+    vault = new RunnerVault(db, store, '1', () => {}, null, null, null, null, { storeName: 'runner' });
     await vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
   });
   after(async () => {

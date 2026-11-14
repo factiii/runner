@@ -4,12 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { newMasterKey, VaultCryptoError } from './crypto';
-import { openSealedVaultDb } from './sealedDb';
+import { newMasterKey, VaultCryptoError } from '@shared/vault-core/crypto';
+import { openSealedVaultDb } from '@shared/vault-core/sealedDb';
+
+import { openVaultDb } from './db';
 
 // The encrypted Vault's database (.specs/vault.md "Encryption and the
 // Vault key"): PGlite in memory, on disk only an encrypted dump, flushed after
-// writes on a debounce, skipped when nothing changed, and on close.
+// writes on a debounce, skipped when nothing changed, and on close. The sealing
+// is vault-core's (shared/vault-core/sealedDb.ts, whose own test runs it on a
+// fake database); this one runs it on the runner's real PGlite child.
 
 const ENGINE = path.resolve(__dirname, '../..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-sealed-db-'));
@@ -19,7 +23,14 @@ describe('the sealed database', () => {
   const vk = newMasterKey();
   const dumpPath = path.join(tmp, 'db.sealed');
   const open = (key: () => Buffer = () => vk) =>
-    openSealedVaultDb({ engineDir: ENGINE, dumpPath, key, log: () => undefined, quietMs: 50, maxMs: 400 });
+    openSealedVaultDb({
+      open: (load) => openVaultDb({ dataDir: 'memory://', engineDir: ENGINE, load }),
+      dumpPath,
+      key,
+      log: () => undefined,
+      quietMs: 50,
+      maxMs: 400
+    });
 
   it('writes an encrypted dump after writes, none after reads, and reopens from it', async () => {
     const db = await open();

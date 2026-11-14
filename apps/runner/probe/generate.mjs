@@ -18,7 +18,7 @@ const ADAPTER = '0.7.2';
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Already CommonJS (moduleFormat in schemaGen.ts).
 const schema = fs.readFileSync(
-  path.join(here, '../../../shared/vault-router/vault.prisma'),
+  path.join(here, '../../../shared/vault-core/vault.prisma'),
   'utf-8'
 );
 fs.writeFileSync(path.join(here, 'vault.prisma'), schema);

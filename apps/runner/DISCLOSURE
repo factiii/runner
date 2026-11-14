@@ -38,8 +38,11 @@ CAPABILITIES THAT RESEMBLE MALWARE
    release from GitHub, checks its SHA-256 against the value frp publishes
    (pinned in the runner's source), and refuses it if they differ. A runner
    that never shares a port never has frpc. Tunnels go only to Factiii's own
-   tunnel server, with the runner's own access token. Each tunnel is listed
-   in the app and can be stopped.
+   tunnel server, each with a tunnel-only credential (7 days, renewed daily
+   while the tunnel runs) that nothing else on the server accepts; the
+   runner's access token never reaches frpc. A tunnel keeps running after
+   the session that opened it ends, until it is stopped. Each tunnel is
+   listed in the app and can be stopped.
 
 4. Starting at login (persistence)
    Off by default. Only the person at the machine turns it on, in its own
@@ -90,10 +93,23 @@ CAPABILITIES THAT RESEMBLE MALWARE
    unless the owner turns it on.
 
 8. Updating itself
-   The runner checks npm for a newer @factiii/runner but installs it only
-   after a person clicks "Approve update" in the Factiii app. It installs
-   only a version newer than the one running. It never downloads code from
-   anywhere but the npm registry.
+   The runner checks npm and its GitHub Releases (github.com/factiii/runner)
+   for a newer @factiii/runner. By default it installs one by itself when
+   nothing is running, about every 6 hours; "factiii-runner update auto off"
+   turns that off, and then it installs only after a person clicks "Approve
+   update" in the Factiii app. It installs only a version newer than the one
+   running, only from the npm registry or a GitHub Release tarball that
+   matches its published SHA-256 and carries a valid signature (its .sig)
+   by Factiii's release key, an Ed25519 public key built into the runner
+   (src/releaseKey.ts). A GitHub Release with no signature, or one that
+   does not verify, is refused, so whoever can publish a release on that
+   repository still cannot make a runner install it without the key. From
+   npm it installs only what npm serves: each version is published from
+   Factiii's release workflow over npm's trusted publishing, and goes live
+   only when the owner approves it with two-factor authentication. Before
+   installing it keeps a copy of the
+   running version, and if the new one fails to start it puts that copy
+   back and does not install the failed version by itself again.
 
 9. Other downloads
    On request, the runner installs developer tools the owner asks for: the
@@ -121,8 +137,8 @@ CAPABILITIES THAT RESEMBLE MALWARE
    member's level closes their terminals and video at once. Setting them to
    None on every board closes their link. A card AI session or a job they
    already started keeps running until the owner ends it.
-   How long: the runner's access token expires after 30 days and is
-   renewed daily. Its refresh token changes on every use and stops working
+   How long: the runner's access token expires after at most 30 days (7
+   for a current runner once it has renewed) and is renewed daily. Its refresh token changes on every use and stops working
    after 90 days unused. If an old refresh token is reused, the server
    ends the pairing, cuts live connections and alerts the owner. Terminal
    sessions have no idle timeout: they run until someone ends them from

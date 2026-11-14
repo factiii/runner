@@ -23,7 +23,7 @@ import { askTerms, type VaultCaller } from './service';
 // server (askMcp.ts), Ollama as function tools (askEngines.ts); every call is
 // labelled in Ask's work line as the cloud labels it.
 //
-// Whose rows a tool reads is the caller's Vault access (access.ts): the
+// Whose rows a tool reads is the caller's Vault access (vault-core/access.ts): the
 // files of everyone it reads (`readers`), and its own notes. The tag and
 // category tools name categories from Factiii's tree, which the app sends
 // with the turn (the runner keeps only ids); without it they are not

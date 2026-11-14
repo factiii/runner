@@ -148,6 +148,28 @@ export function paramEnvName(name: string): string {
 }
 
 /**
+ * Which call a job's process belongs to, in its env beside the params. A
+ * script that reaches prod with the ops key hands these to prod, whose
+ * forced command alerts the owner (scripts/deploy-lib.sh prod_key_opts,
+ * .specs/ops-user.md "Prod key alert"). Not secret, and a param cannot set
+ * them (params arrive only as JOB_PARAM_*).
+ */
+export function jobCallEnv(
+  job: string,
+  callId: string,
+  caller: WindowActor,
+  via: AuditVia
+): Record<string, string> {
+  return {
+    FACTIII_JOB: job,
+    FACTIII_JOB_CALL: callId,
+    FACTIII_JOB_CALLER: caller.name,
+    FACTIII_JOB_CALLER_ID: caller.userId,
+    FACTIII_JOB_VIA: via
+  };
+}
+
+/**
  * Check a call against its job and build the param env. Refuses an unknown
  * job, an undeclared param, and a value its pattern rejects. A declared param
  * the caller left out is tested as '' - so a pattern that rejects the empty
@@ -603,7 +625,10 @@ export class JobRunner {
       return;
     }
     if (!call.abort.signal.aborted) {
-      this.push(call, `\n${def.name}: the runner owner did not approve this call.\n`);
+      this.push(
+        call,
+        `\n${def.name}: the runner owner did not approve this call.\n`
+      );
     }
     await this.end(
       call,
@@ -635,7 +660,10 @@ export class JobRunner {
         callId: call.callId,
         signal: call.abort.signal,
         def,
-        env,
+        env: {
+          ...env,
+          ...jobCallEnv(def.name, call.callId, opts.caller, opts.via)
+        },
         cwd,
         caller: opts.caller,
         via: opts.via,

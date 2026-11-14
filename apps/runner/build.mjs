@@ -28,12 +28,12 @@ await build({
 });
 
 // The shared vault router's Prisma client (src/vault/vaultRouter.ts), generated
-// from shared/vault-router/vault.prisma. Its runtime stays external: adding the
+// from shared/vault-core/vault.prisma. Its runtime stays external: adding the
 // Vault part installs @prisma/client into the engine folder and copies this
 // file beside it (src/vault/engine.ts), so it resolves the runtime from there
 // and cli.js never carries the client.
 await build({
-  entryPoints: ['../../shared/vault-router/generated/client.ts'],
+  entryPoints: ['../../shared/vault-core/generated/client.ts'],
   bundle: true,
   platform: 'node',
   target: 'node20',

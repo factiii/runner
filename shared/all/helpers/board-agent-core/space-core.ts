@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'crypto';
 import { chmod, copyFile, mkdir, readFile } from 'fs/promises';
 import path from 'path';
 
@@ -11,6 +12,7 @@ import {
   SETUP_LOG_PREFIX,
   type TerminalDefault
 } from '../../domains/electron';
+import { tunnelHasNonce } from '../card-ai/frpc';
 import { likelyStoredAs } from '../similarSecretKey';
 import { TERMINAL_FP_OPTION, terminalDigest } from '../terminal-ai/digest';
 import { terminalInitScript } from '../terminal-ai/initScript';
@@ -22,15 +24,17 @@ import { writeCodexConfig } from './codex-config';
 import { type CodexAccess, resolveCodexAccess } from './codex-permissions';
 import { removeDefaultHomeLeftovers } from './default-home-cleanup';
 import {
-  cleanTerminalCommand,
-  resolveTerminalDefault
-} from './git-connections';
-import {
   allocateSpacePorts,
   type ExecTarget,
   hostTarget,
   isSessionToken,
-  spaceSecret
+  newTunnelNonce,
+  readLegacySpaceSecret,
+  removeLegacySpaceSecret,
+  tabOfSecretsToken,
+  tabSecretsToken,
+  tunnelOfRenewToken,
+  tunnelRenewToken
 } from './exec';
 import {
   buildCloneUrl,
@@ -43,6 +47,10 @@ import {
   setSessionCredentialHelper,
   stripCloneUrlCredentials
 } from './git';
+import {
+  cleanTerminalCommand,
+  resolveTerminalDefault
+} from './git-connections';
 import { checkDeployStatus, stripWorkspaceOriginToken } from './host-deploy';
 import {
   adoptRunnerKey,
@@ -53,6 +61,7 @@ import {
   storedSecretKeys
 } from './host-secrets';
 import { loginCredentialsExist } from './login-exec';
+import { OPS_FREE_COMMAND_REFUSED } from './ops-link';
 import {
   BOARD_MCP_BIN,
   MARKETPLACE_NAME,
@@ -79,14 +88,13 @@ import {
   secretsSocketPath,
   startSecretsBridge
 } from './secrets-bridge';
-import { OPS_FREE_COMMAND_REFUSED } from './ops-link';
-import { SecretsGate, UNATTRIBUTED } from './secrets-gate';
+import { type SecretsCaller, SecretsGate, UNATTRIBUTED } from './secrets-gate';
 import {
   writeClaudeSecretsRules,
   writeCodexSecretsRules
 } from './secrets-permission';
 import { authorizeAndRun, containedCwd } from './secrets-run';
-import { UnlockWindow } from './secrets-window';
+import { SessionWindows, UnlockWindow } from './secrets-window';
 import type { AgentEventSink, CardAIConfig, ConfigProvider } from './session';
 import { ActivityTracker } from './session';
 import { type SessionLinks, withSessionCardTools } from './session-card-tools';
@@ -98,13 +106,27 @@ import {
   respawnTmuxPane,
   resurrectRestore,
   safeTmuxName,
+  setTmuxSessionEnv,
   setTmuxSessionOption,
   sourceTmuxConf,
   tmuxPanePaths,
+  tmuxSessionEnvHas,
+  tmuxSessionEnvValue,
   unclaimedTmuxRestores,
   withTmuxRestoreTurn
 } from './tmux';
 import { ensureToolchain, type RequestSudo } from './toolchain';
+
+/** What the owner's prompt names as the asker for a session's token. */
+const SESSION_ORIGIN = 'A session on this board';
+/** What `factiii-expose` takes for a tunnel name. */
+const TUNNEL_NAME = /^[a-zA-Z0-9-]{1,80}$/;
+/** Thrown at a renewal whose tunnel is gone or was replaced. */
+export const TUNNEL_GONE =
+  'That tunnel is no longer up here, so its credential is not renewed.';
+
+/** How long a positive legacy-token check stands (space-core legacyTokenLive). */
+const LEGACY_RECHECK_MS = 60_000;
 
 /** Thrown at a board MCP caller whose session token is not the session's. */
 const SESSION_MISMATCH =
@@ -128,14 +150,18 @@ export interface SpaceCoreOptions {
   spaceId?: number;
   emitter: AgentEventSink;
   configProvider: ConfigProvider;
-  /** The runner's access token: what the server's board MCP and frps take.
-   *  Set on the headless runner; unset on desktop. A function when the token
-   *  can change under a running engine (the runner refreshes it), so each use
+  /** The runner's access token: what the server's board MCP takes. Set on
+   *  the headless runner; unset on desktop. A function when the token can
+   *  change under a running engine (the runner refreshes it), so each use
    *  reads the current one. It is never copied into a session: the board MCP
-   *  is relayed by this process over the secrets socket, and a tunnel asks
-   *  for it over the same socket when it opens (.specs/runner-link.md, "Runner
-   *  credential service"). */
+   *  is relayed by this process over the secrets socket (.specs/runner-link.md,
+   *  "Runner credential service"). */
   runnerToken?: string | (() => string);
+  /** A frp-only credential for one tunnel, minted by the server
+   *  (`runner:tunnel-token`), which `factiii-expose` asks for over the
+   *  secrets socket when it opens one. Absent: the access token (a host or a
+   *  server from before it). */
+  tunnelCredential?: () => Promise<string>;
   /** factiii API base URL, for the server-hosted board MCP. */
   serverUrl?: string;
   /** Ask the owner for their sudo password when Initialize must install a
@@ -191,6 +217,7 @@ export class SpaceCore {
   readonly emitter: AgentEventSink;
   readonly configProvider: ConfigProvider;
   private readonly runnerTokenSource?: string | (() => string);
+  private readonly tunnelCredential?: () => Promise<string>;
   readonly serverUrl?: string;
   readonly requestSudo?: RequestSudo;
   /** Everything this space's runner does that isn't a card session — Ask Board,
@@ -207,9 +234,9 @@ export class SpaceCore {
   }
 
   /** The runner's access token as it is right now. Private: nothing outside
-   *  reads it, and the two things in here that do (the `board-mcp` and
-   *  `tunnel-token` ops of the secrets socket) read it per request and keep
-   *  no copy. */
+   *  reads it, and what in here does (the `board-mcp` op of the secrets
+   *  socket, and `tunnel-token` on a server from before the tunnel
+   *  credential) reads it per request and keeps no copy. */
   private accessToken(): string | undefined {
     const source = this.runnerTokenSource;
     return typeof source === 'function' ? source() : source;
@@ -227,6 +254,7 @@ export class SpaceCore {
     this.emitter = options.emitter;
     this.configProvider = options.configProvider;
     this.runnerTokenSource = options.runnerToken;
+    this.tunnelCredential = options.tunnelCredential;
     this.serverUrl = options.serverUrl;
     this.requestSudo = options.requestSudo;
     this.activity = new ActivityTracker(this.emitter);
@@ -245,6 +273,13 @@ export class SpaceCore {
       }
       this.emitter.emitSecretsAuth({ pending: this.gate.pending() !== null });
     });
+    // A session window opening or ending changes the unlock line too.
+    this.sessionWindows.subscribe(() => {
+      this.emitter.emitSecretsAuth({ pending: this.gate.pending() !== null });
+    });
+    // A session window is scoped to its session: a revoked token (a run or
+    // deploy that ended) ends its windows at once.
+    this.gate.onRevoke((token) => this.sessionWindows.drop(token));
     // A row survives the modal being dismissed, so a command blocked on the
     // owner's password is never invisible; the event drives the modal itself.
     this.gate.subscribe(() => this.publishGate(this.gate.pending()));
@@ -292,6 +327,14 @@ export class SpaceCore {
    *  one board's jobs never lets another board's jobs run unasked. */
   readonly window = new UnlockWindow();
 
+  /** The space's session windows (secrets-window.ts SessionWindows): free
+   *  commands from ONE session, for the keys approved in one prompt. A tab's
+   *  token is never revoked here, so the sweep asks whether it still lives. */
+  readonly sessionWindows = new SessionWindows(
+    Date.now,
+    async (token) => (await this.callerOf(token)) !== null
+  );
+
   private readonly onGateOpen?: (request: PendingSecretsAuth) => void;
   private readonly ownerActor?: () => { userId: string; name: string };
   private readonly hypervisor?: HypervisorHost;
@@ -303,12 +346,125 @@ export class SpaceCore {
    *  (.specs/ops-user.md): `list` answers from there and `run` is refused. */
   ops: { keyNames: () => Promise<SecretsKeyInfo[]> } | null = null;
 
-  /** The session behind a bridge token, or a thrown refusal: only a session
-   *  this runner spawned may call a job through the socket. */
-  private bridgeOrigin(token: string): string {
-    const origin = token ? this.gate.originFor(token) : null;
-    if (!origin) throw new Error(UNATTRIBUTED);
-    return origin;
+  /** The session behind a bridge token, or a thrown refusal: only a live
+   *  session this runner spawned may use the socket. */
+  private async bridgeOrigin(token: string): Promise<SecretsCaller> {
+    const caller = await this.callerOf(token);
+    if (!caller) throw new Error(UNATTRIBUTED);
+    return caller;
+  }
+
+  /**
+   * Who holds a FACTIII_SECRETS_TOKEN, or null when nothing live does. Each
+   * session has its own token (.specs/runner-link.md "Runner credential
+   * service"):
+   * - an agent run or a deploy run: minted for that process and revoked when
+   *   it ends (`withRunTokens`, host-run.ts), so the gate knows it;
+   * - a terminal tab: minted for its tmux session (exec.ts
+   *   tabSecretsToken) and good while that exact session holds it in its own
+   *   environment, so a tab survives a runner restart, dies when it is
+   *   closed, and a new tab under a closed one's name has its own;
+   * - the old space-wide token: only while a tab from before per-session
+   *   tokens still carries it (`legacyTokenLive`).
+   */
+  private async callerOf(token: string): Promise<SecretsCaller | null> {
+    if (!token) return null;
+    const issued = this.gate.callerFor(token);
+    if (issued) return issued;
+    const tab = tabOfSecretsToken(this.spaceDir(), token);
+    if (tab) {
+      return (await tmuxSessionEnvValue(
+        this.target(),
+        tab,
+        SECRETS_TOKEN_ENV
+      )) === token
+        ? { origin: SESSION_ORIGIN, session: `tab:${tab}` }
+        : null;
+    }
+    return (await this.legacyTokenLive(token))
+      ? { origin: SESSION_ORIGIN, session: 'legacy' }
+      : null;
+  }
+
+  /** The caller behind a tunnel's renewal handle (exec.ts
+   *  tunnelRenewToken), or a thrown refusal: only a tunnel that is up with
+   *  the handle's nonce renews (frpc.ts tunnelHasNonce). */
+  private async renewOrigin(handle: string): Promise<SecretsCaller> {
+    const tunnel = tunnelOfRenewToken(this.spaceDir(), handle);
+    if (
+      !tunnel ||
+      !(await tunnelHasNonce(this.target(), tunnel.name, tunnel.nonce))
+    ) {
+      throw new Error(TUNNEL_GONE);
+    }
+    return { origin: SESSION_ORIGIN, session: `renew:${tunnel.name}` };
+  }
+
+  /** Until when a positive legacy check stands (see legacyTokenLive). */
+  private legacyCheckedUntil = 0;
+
+  /**
+   * Whether `token` is the old space-wide token AND a tmux session still
+   * carries it: a terminal opened before per-session tokens, which keeps the
+   * env it was spawned with. Once none does, the file goes, and the token is
+   * refused from then on. A positive answer stands for LEGACY_RECHECK_MS, so
+   * a busy old tab does not cost a tmux sweep per request.
+   */
+  private async legacyTokenLive(token: string): Promise<boolean> {
+    const legacy = readLegacySpaceSecret(this.spaceDir());
+    if (!legacy) return false;
+    const a = Buffer.from(token);
+    const b = Buffer.from(legacy);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+    if (Date.now() < this.legacyCheckedUntil) return true;
+    const targets = new Set([this.target(), this.hostTarget()]);
+    for (const target of targets) {
+      if (await tmuxSessionEnvHas(target, SECRETS_TOKEN_ENV, legacy)) {
+        this.legacyCheckedUntil = Date.now() + LEGACY_RECHECK_MS;
+        return true;
+      }
+    }
+    await removeLegacySpaceSecret(this.spaceDir()).catch(() => undefined);
+    return false;
+  }
+
+  /**
+   * A token for one process this space spawns (an agent run), revoked when it
+   * exits. `session` is the FACTIII_SESSION it runs for, '' for none.
+   */
+  issueRunToken(session = ''): string {
+    return this.gate.issueToken(
+      SESSION_ORIGIN,
+      session ? `run:${session}` : 'run'
+    );
+  }
+
+  /**
+   * `target` with a token of its own on every process it spawns with the
+   * space's env (FACTIII_SPACE in it: where the space-wide token used to go),
+   * unless the caller set one (a deploy run, a tab). Revoked when the process
+   * exits, so a run's token is dead once the run is.
+   */
+  private withRunTokens(target: ExecTarget): ExecTarget {
+    const spawn: ExecTarget['spawn'] = async (argv, opts) => {
+      const env = opts?.env;
+      if (!env || env.FACTIII_SPACE === undefined || env[SECRETS_TOKEN_ENV]) {
+        return target.spawn(argv, opts);
+      }
+      const token = this.issueRunToken(env.FACTIII_SESSION ?? '');
+      try {
+        const proc = await target.spawn(argv, {
+          ...opts,
+          env: { ...env, [SECRETS_TOKEN_ENV]: token }
+        });
+        proc.once('close', () => this.gate.revokeToken(token));
+        return proc;
+      } catch (err) {
+        this.gate.revokeToken(token);
+        throw err;
+      }
+    };
+    return { ...target, spawn };
   }
 
   /**
@@ -324,6 +480,33 @@ export class SpaceCore {
       throw new Error(SESSION_MISMATCH);
     }
     return true;
+  }
+
+  /** One audit line for a credential a session took over the socket: who
+   *  (the owner, every session here is theirs), which session, when (the
+   *  log's own `ts`). A failed write is logged, not thrown: the session's
+   *  git push or tunnel must not fail on the log. */
+  private async auditCredential(
+    action: 'tunnel-token' | 'git-credential',
+    caller: SecretsCaller
+  ): Promise<void> {
+    await this.audit
+      .append({
+        actor: this.ownerActor?.() ?? { userId: '', name: 'Owner' },
+        via: 'owner-terminal',
+        action,
+        job: null,
+        keys: [],
+        exitCode: null,
+        durationMs: null,
+        unlockedBy: null,
+        detail: caller.session || caller.origin
+      })
+      .catch((err: unknown) => {
+        console.error(
+          `[secrets-bridge] audit line for ${action} failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      });
   }
 
   private jobsOrThrow(): LocalJobs {
@@ -376,11 +559,9 @@ export class SpaceCore {
     await adoptRunnerKey(path.dirname(spaceDir), spaceDir).catch(
       () => undefined
     );
-    // Adopt the space token (persisted in <space>/.secret) before the socket
-    // takes its first caller. It used to be adopted only when a session
-    // spawned, so after a restart a terminal from before it - still holding
-    // that token - was refused until something new was opened.
-    this.secretsToken();
+    // No space token to adopt any more: each session carries its own
+    // (callerOf), and a terminal from before that still works while it lives
+    // (legacyTokenLive).
     this.secretsBridge = await startSecretsBridge({
       spaceDir,
       handlers: {
@@ -388,8 +569,9 @@ export class SpaceCore {
           // Identity first: a request with no token this runner issued never
           // becomes a prompt, because an unattributable password ask is
           // indistinguishable from a real one.
-          const origin = token ? this.gate.originFor(token) : null;
-          if (!origin) {
+          const caller = await this.callerOf(token);
+          const origin = caller?.origin;
+          if (!caller || !origin) {
             // status() only: stdout carries the COMMAND's output and nothing
             // else, so a caller doing `x=$(factiii-secrets run ...)` must not
             // capture our refusal. 3 is the CLI's "nothing ran".
@@ -415,9 +597,12 @@ export class SpaceCore {
             files,
             origin,
             gate: this.gate,
-            // Read only for jobs; a free command here always prompts. Passed
-            // so its answer can still open a window for the jobs after it.
+            // Read only for jobs; a free command never rides it.
             window: this.window,
+            // A free command's own window: this session, these keys.
+            sessionWindows: this.sessionWindows,
+            sessionToken: token,
+            session: caller.session || caller.origin,
             audit: this.audit,
             // Every session here is the owner's; the line names the owner.
             auditActor: this.ownerActor?.(),
@@ -428,16 +613,45 @@ export class SpaceCore {
           });
         },
         list: () => (this.ops ? this.ops.keyNames() : this.secretsKeyInfo()),
-        // `factiii-expose` asks for the runner's access token at the moment
-        // it opens a tunnel: frps checks it (routers/frpAuth.ts on the
-        // server). Only a session this runner spawned gets it, it is read
-        // now and not kept here, and the op does nothing else. Desktop has
-        // no runner token and so no tunnels.
-        tunnelToken: async (token) => {
-          this.bridgeOrigin(token);
+        // Is this token a live session's? For the dev VM's narrow path
+        // (apps/runner/src/devVm/narrowPath.ts), which checks before it
+        // serves an op of its own. Answers nothing but yes or a refusal.
+        whoami: async (token) => {
+          await this.bridgeOrigin(token);
+        },
+        // `factiii-expose` asks for a tunnel credential at the moment it
+        // opens a tunnel: frps checks it (routers/frpAuth.ts on the server).
+        // A frp-only one the server mints, not the access token, unless the
+        // server predates it. Only a live session of this runner gets it, it
+        // is not kept here, and the op does nothing else. Desktop has no
+        // runner token and so no tunnels.
+        //
+        // A tunnel's keeper renews with the handle it was given at open
+        // (`renew`), not a session token: the session that opened it (a
+        // Ports-panel shell, an agent run) may be gone, and the tunnel must
+        // not die with it. The handle is good while that tunnel is up with
+        // its nonce, and for this op only.
+        tunnelToken: async (token, ask) => {
+          const caller = ask.renew
+            ? await this.renewOrigin(ask.renew)
+            : await this.bridgeOrigin(token);
           const access = this.accessToken();
           if (!access) throw new Error(NO_TUNNELS);
-          return access;
+          const credential = await (this.tunnelCredential
+            ? this.tunnelCredential()
+            : access);
+          // Who took one, which session, when (finding 3). Only once it
+          // was handed out; never the credential itself. A renewal's line
+          // names the tunnel (`renew:<name>`).
+          await this.auditCredential('tunnel-token', caller);
+          const name = !ask.renew && ask.tunnel;
+          if (name && TUNNEL_NAME.test(name)) {
+            return {
+              token: credential,
+              renew: tunnelRenewToken(this.spaceDir(), name, newTunnelNonce())
+            };
+          }
+          return { token: credential };
         },
         // git's credential helper in a session (`factiii-secrets
         // git-credential`, set in the primary clone's config): the board's
@@ -445,9 +659,10 @@ export class SpaceCore {
         // nothing once GitHub is disconnected, so git fails at once
         // everywhere. Read per request, never kept here.
         gitCredential: async (token) => {
-          this.bridgeOrigin(token);
+          const caller = await this.bridgeOrigin(token);
           const github = this.readConfig().githubToken;
           if (!github) throw this.notConnectedError(NO_GITHUB);
+          await this.auditCredential('git-credential', caller);
           return github;
         },
         // The board's tools for one agent (`factiii-board-mcp`, the plugin's
@@ -455,7 +670,7 @@ export class SpaceCore {
         // a paired runner: both refusals come before any call to the server.
         // The relay reads the access token for each message it forwards.
         boardMcp: async (token, channel, session, sessionToken) => {
-          this.bridgeOrigin(token);
+          await this.bridgeOrigin(token);
           // Which session is asking: proven by its FACTIII_SESSION_TOKEN, or
           // only claimed by a session from before the token (none sent).
           const verified = this.verifySessionClaim(session, sessionToken);
@@ -495,20 +710,20 @@ export class SpaceCore {
         // window - are the same as for a call relayed by the server.
         jobs: {
           list: async (token) => {
-            this.bridgeOrigin(token);
+            await this.bridgeOrigin(token);
             return this.jobsOrThrow().list();
           },
           call: async (token, job, params) => {
-            const origin = this.bridgeOrigin(token);
+            const { origin } = await this.bridgeOrigin(token);
             const actor = this.ownerActor?.() ?? { userId: '', name: 'Owner' };
             return this.jobsOrThrow().call(job, params, actor, origin);
           },
           status: async (token, callId, afterSeq) => {
-            this.bridgeOrigin(token);
+            await this.bridgeOrigin(token);
             return this.jobsOrThrow().status(callId, afterSeq);
           },
           cancel: async (token, callId) => {
-            this.bridgeOrigin(token);
+            await this.bridgeOrigin(token);
             const actor = this.ownerActor?.() ?? { userId: '', name: 'Owner' };
             return this.jobsOrThrow().cancel(callId, actor);
           }
@@ -577,29 +792,6 @@ export class SpaceCore {
     return [...withStoredAs(keys), ...withStoredAs(files)];
   }
 
-  private spaceSecretsToken = '';
-
-  /**
-   * The token every session this space spawns carries, so `factiii-secrets`
-   * inside one is attributable and everything else is refused.
-   *
-   * One per space, not per session: `extraEnv` is the only place every spawn
-   * passes through and it cannot tell which session it is building for. A run
-   * that DOES know itself - the deploy run - mints its own and overrides this.
-   */
-  secretsToken(): string {
-    if (this.spaceSecretsToken) return this.spaceSecretsToken;
-    // From disk, so it is the same value in every process. Terminals outlive
-    // the one that spawned them (tmux is its own server) and keep the token
-    // they were spawned with; a minted one left them unattributed after every
-    // restart.
-    this.spaceSecretsToken = this.gate.adoptToken(
-      spaceSecret(this.spaceDir()),
-      'A session on this board'
-    );
-    return this.spaceSecretsToken;
-  }
-
   readConfig(): CardAIConfig {
     return this.configProvider.readConfig(this.spaceSlug);
   }
@@ -618,7 +810,7 @@ export class SpaceCore {
    *  Memoized: the VM's wraps the host's, and both keep state. */
   target(): ExecTarget {
     this.sessionExecTarget ??= this.sessionTargetOf
-      ? this.sessionTargetOf(this.hostTarget())
+      ? this.withRunTokens(this.sessionTargetOf(this.hostTarget()))
       : this.hostTarget();
     return this.sessionExecTarget;
   }
@@ -629,37 +821,42 @@ export class SpaceCore {
    *  of times per run. */
   hostTarget(): ExecTarget {
     // The codex MCP entry stores the env var NAME, so the token has to be in
-    // the environment at run time. Every var here must resolve the same on
+    // the environment at run time: each spawn gets its own (withRunTokens),
+    // each tab its own (terminal.ts sessionEnv). Every var here must resolve the same on
     // every call: a spawn freezes what it is handed, and a tmux session keeps
     // it for as long as the tab lives, so a var that is merely LATE is one that
     // terminal never gets.
-    this.execTarget ??= hostTarget(
-      this.spaceDir(),
-      () => {
-        const env: Record<string, string> = {};
-        // The one check that answers "am I inside a runner, and for which
-        // board": the plugin's SessionStart hook (bin/session-context.sh)
-        // prints the workspace facts only when this is set, and names it.
-        env.FACTIII_SPACE = this.spaceSlug;
-        // The board's id, which a rename does not change. A terminal keeps the
-        // env it started with, so after a rename FACTIII_SPACE is the old slug;
-        // the CLI and the plugin's programs look this id up in the runner's
-        // spaces.json for the slug and the name the board has now
-        // (apps/runner/src/boardRegistry.ts). Absent on a host that never
-        // learned the id.
-        if (this.spaceId) env.FACTIII_SPACE_ID = String(this.spaceId);
-        // The session's one credential, for both things it reaches over the
-        // secrets socket: `factiii-secrets` and the board MCP
-        // (`factiii-board-mcp`). Never the runner's access token.
-        env[SECRETS_TOKEN_ENV] = this.secretsToken();
-        // Where that socket is. Both programs can also find it from inside the
-        // space tree, but an agent started somewhere else could not.
-        env.FACTIII_SECRETS_SOCK = secretsSocketPath(this.spaceDir());
-        return env;
-        // The token for the runner's own git calls to origin, read per call so
-        // a reconnect is used at once. Not in the env above: no session gets it.
-      },
-      () => this.readConfig().githubToken || ''
+    this.execTarget ??= this.withRunTokens(
+      hostTarget(
+        this.spaceDir(),
+        () => {
+          const env: Record<string, string> = {};
+          // The one check that answers "am I inside a runner, and for which
+          // board": the plugin's SessionStart hook (bin/session-context.sh)
+          // prints the workspace facts only when this is set, and names it.
+          env.FACTIII_SPACE = this.spaceSlug;
+          // The board's id, which a rename does not change. A terminal keeps the
+          // env it started with, so after a rename FACTIII_SPACE is the old slug;
+          // the CLI and the plugin's programs look this id up in the runner's
+          // spaces.json for the slug and the name the board has now
+          // (apps/runner/src/boardRegistry.ts). Absent on a host that never
+          // learned the id.
+          if (this.spaceId) env.FACTIII_SPACE_ID = String(this.spaceId);
+          // Where the secrets socket is, for both things a session reaches over
+          // it: `factiii-secrets` and the board MCP (`factiii-board-mcp`). Both
+          // programs can also find it from inside the space tree, but an agent
+          // started somewhere else could not. The session's credential for it
+          // (FACTIII_SECRETS_TOKEN) is not here: this env is the space's, and
+          // each session gets a token of its own on top of it (withRunTokens,
+          // and terminal.ts sessionEnv for a tab). Never the runner's access
+          // token.
+          env.FACTIII_SECRETS_SOCK = secretsSocketPath(this.spaceDir());
+          return env;
+          // The token for the runner's own git calls to origin, read per call so
+          // a reconnect is used at once. Not in the env above: no session gets it.
+        },
+        () => this.readConfig().githubToken || ''
+      )
     );
     return this.execTarget;
   }
@@ -1382,6 +1579,10 @@ export class SpaceCore {
       const ports = blocks.find(([prefix]) => session.startsWith(prefix))?.[1];
       unclaimed.delete(session);
       await keepOneTmuxPane(target, session);
+      // The tab's own secrets token (exec.ts tabSecretsToken), on the pane
+      // and on the session, so a pane split later carries it too.
+      const tabToken = tabSecretsToken(target.paths.root, session);
+      await setTmuxSessionEnv(target, session, SECRETS_TOKEN_ENV, tabToken);
       await respawnTmuxPane({
         target,
         session,
@@ -1396,7 +1597,8 @@ export class SpaceCore {
         cwd: paths.get(session) || target.paths.workspace,
         env: {
           ...target.stateEnv(),
-          ...(ports ? { FACTIII_PORTS: ports.join(',') } : {})
+          ...(ports ? { FACTIII_PORTS: ports.join(',') } : {}),
+          [SECRETS_TOKEN_ENV]: tabToken
         }
       }).catch(() => {});
       if (digest) {
@@ -1447,6 +1649,7 @@ export class SpaceCore {
     this.gate.destroy();
     // The key must not outlive the space that held it.
     this.window.destroy();
+    this.sessionWindows.destroy();
     void this.secretsBridge?.close();
     this.secretsBridge = null;
     // Nothing survives the process, so no row should claim it is still going.

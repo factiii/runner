@@ -14,6 +14,7 @@ import {
 } from './localAiModel';
 import {
   containerEngine,
+  darwinMemoryPressure,
   darwinPressureLevel,
   embedderHealth,
   engineDownRow,
@@ -21,7 +22,9 @@ import {
   type HealthIo,
   isEmbedderScript,
   meminfoLevel,
+  meminfoPressure,
   meminfoUse,
+  memoryConsumers,
   mergeServices,
   nameListeners,
   parseDockerPs,
@@ -40,9 +43,10 @@ import { storePaths, vaultPaths } from './vault/engine';
 
 // The real machine behind machineHealth.ts and cleanup.ts: statfs on the
 // runner's folders, the OS's own memory pressure, `du` for sizes, and for
-// the Status tab the load average, memory in use, `docker ps`, `pm2 jlist`,
-// `launchctl list`, `lsof` and the embedder's `/health`. Read-only but for
-// `remove`, which cleanup.ts calls only on a path its guard passed.
+// the Status tab the load average, memory in use, the biggest memory users
+// (`ps`), `docker ps`, `pm2 jlist`, `launchctl list`, `lsof` and the
+// embedder's `/health`. Read-only but for `remove`, which cleanup.ts calls
+// only on a path its guard passed.
 
 type Run = (
   bin: string,
@@ -61,8 +65,16 @@ export function machineHealth(run: Run): Promise<RunnerMachineHealth> {
     ...levelsIo(run),
     cpu: () => ({ load1: os.loadavg()[0], cores: os.cpus().length }),
     memoryUse: () => memoryInUse(run),
+    memoryTop: () => memoryTop(run),
     services: () => runningServices(run)
   });
+}
+
+/** Every process's resident memory and command line, grouped
+ *  (memoryConsumers). `-A` and `args` mean the same on macOS and Linux. */
+async function memoryTop(run: Run) {
+  const res = await run('ps', ['-A', '-o', 'rss=,args='], { timeoutMs: READ_TIMEOUT_MS });
+  return res.code === 0 ? memoryConsumers(res.output) : [];
 }
 
 /** Only what sets the level: the disks, memory pressure and the process
@@ -81,7 +93,7 @@ function levelsIo(run: Run): HealthIo {
       { use: 'Vault', dir: vaultPaths(CONFIG_DIR).objects },
       // Once it has a file (vault/daemonVault.ts makes it on the first).
       ...(fs.existsSync(storePaths(CONFIG_DIR, 'runner').objects)
-        ? [{ use: 'Runner Storage', dir: storePaths(CONFIG_DIR, 'runner').objects }]
+        ? [{ use: 'Runner Cloud', dir: storePaths(CONFIG_DIR, 'runner').objects }]
         : []),
       { use: 'Ollama models', dir: ollamaModelsDir() }
     ],
@@ -99,6 +111,16 @@ function levelsIo(run: Run): HealthIo {
       }
       if (process.platform === 'linux') {
         return meminfoLevel(fs.readFileSync('/proc/meminfo', 'utf-8'));
+      }
+      return null;
+    },
+    async memoryPressure() {
+      if (process.platform === 'darwin') {
+        const res = await run('sysctl', ['-n', 'kern.memorystatus_level']);
+        return res.code === 0 ? darwinMemoryPressure(res.output) : null;
+      }
+      if (process.platform === 'linux') {
+        return meminfoPressure(fs.readFileSync('/proc/meminfo', 'utf-8'));
       }
       return null;
     },
@@ -248,11 +270,13 @@ export const diskSize =
 export function cleanupIo(run: Run, model: LocalAiModelIo): CleanupIo {
   return {
     runnerDir: CONFIG_DIR,
+    home: os.homedir(),
+    modelsDir: ollamaModelsDir(),
     protectedDirs: [
       vaultPaths(CONFIG_DIR).db,
       vaultPaths(CONFIG_DIR).objects,
       vaultPaths(CONFIG_DIR).engine,
-      // Runner Storage, the runner's second store (vault/engine.ts).
+      // Runner Cloud, the runner's second store (vault/engine.ts).
       storePaths(CONFIG_DIR, 'runner').db,
       storePaths(CONFIG_DIR, 'runner').objects,
       embedderPaths(CONFIG_DIR).root,

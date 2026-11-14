@@ -43,6 +43,8 @@ import { worktreeFor } from '../board-agent-core/spacePaths';
 import type { CardRecord } from '../board-agent-core/state';
 import {
   getTerminalAck,
+  redisBins,
+  redisCliCommand,
   redisSocketPath,
   setTerminalAck
 } from '../board-agent-core/state';
@@ -268,7 +270,7 @@ export class TerminalModeEngine implements ModeEngine {
     const target = this.core.target();
     const child = await target
       .spawn([
-        'redis-cli',
+        redisBins().cli,
         '-s',
         redisSocketPath(target),
         'subscribe',
@@ -326,7 +328,7 @@ export class TerminalModeEngine implements ModeEngine {
     const target = this.core.target();
     const read = (key: string) =>
       target
-        .sh(`redis-cli -s ${redisSocketPath(target)} get '${key}'`)
+        .sh(`${redisCliCommand()} -s ${redisSocketPath(target)} get '${key}'`)
         .catch(() => '');
     const touched = new Set<TerminalSession>();
     for (const [paneId, name] of this.paneSessions) {
@@ -951,6 +953,7 @@ export class TerminalModeEngine implements ModeEngine {
         cardId: r.cardId,
         startedBy: r.startedBy,
         startedVia: r.startedVia,
+        startedByRunner: r.startedByRunner,
         openedFiles: [],
         buffers: {}
       };

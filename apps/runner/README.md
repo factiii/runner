@@ -91,7 +91,7 @@ factiii-runner service remove    # stop it and delete what install wrote
 
 - The service runs `factiii-runner start` with the node and the runner that were installed when you ran `service install`, and the PATH of that terminal. If you move to another Node version or reinstall the runner somewhere else, run `service install` again: it rewrites its file and restarts the service.
 - It restarts the runner after a crash, not after a stop: a runner you disconnect from your account in Settings stays down.
-- Updates approved from the app work as before. The runner relaunches itself; the service is not involved.
+- Updates approved from the app work as before, and the runner also updates itself when nothing is running (on by default; `factiii-runner update auto off`). It relaunches itself; the service is not involved. A new version that fails to start is rolled back to the one before (`factiii-runner update status`).
 - Output goes to `~/.factiii-runner/logs/runner.log`. When it passes 10 MB the runner copies it to `runner.log.1` (replacing the last one) and empties it, at start and once an hour, so the two files are all it ever keeps.
 - If a runner is already running when you install the service (started by hand, or under another process manager), the service is written but not started, so there are never two. Stop the old one and run `service install` again.
 - `install` refuses to overwrite a file of the same name that it did not write, and `remove` deletes only what `install` wrote.

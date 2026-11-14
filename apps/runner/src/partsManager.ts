@@ -4,6 +4,7 @@ import type {
   RunnerDiskUse,
   RunnerLocalAi,
   RunnerMachineHealth,
+  RunnerMemoryStop,
   RunnerModuleAction,
   RunnerModuleId,
   RunnerModuleJob,
@@ -71,6 +72,9 @@ export type PartsMachine = {
     run(ids: readonly string[], onLine: (line: string) => void): Promise<number>;
     /** The biggest folders (diskCaches.ts), for a dry run. */
     usage?(): Promise<RunnerDiskUse[]>;
+    /** Free memory: `simulators` shuts the booted iOS simulators down.
+     *  Resolves whether it ran. */
+    stop?(what: RunnerMemoryStop, onLine: (line: string) => void): Promise<boolean>;
   };
 };
 
@@ -218,20 +222,41 @@ export class PartsManager {
 
   /** Free up space: the dry run, or with `confirm` a run of the `ids` the
    *  owner saw, and only those still in a fresh plan (cleanup.ts). With
-   *  `usage`, the biggest folders instead of the plan. */
+   *  `usage`, the biggest folders beside the plan. With `stop` and
+   *  `confirm`, frees memory instead (the top consumers' one safe stop). */
   async cleanup(
     payload: unknown,
     onLine: (line: string) => void = () => {}
   ): Promise<RunnerCleanup> {
-    const { confirm, ids, usage } = machineCleanupSchema.parse(payload ?? {});
+    const { confirm, ids, usage, stop } = machineCleanupSchema.parse(payload ?? {});
     const cleanup = this.machine.cleanup;
     if (!cleanup) {
       return { items: [], bytes: 0, ran: false, lines: ['This runner cannot free up space.'] };
     }
-    // The biggest folders alone: `du` walks every file, so a minute on a
-    // full home folder, and the plan does not wait for it.
+    if (stop) {
+      if (!confirm) throw new Error('Stopping needs confirm.');
+      const lines: string[] = [];
+      const ran = (await cleanup.stop?.(stop, (line) => {
+        lines.push(line);
+        onLine(line);
+      })) ?? false;
+      if (!cleanup.stop) lines.push('This runner cannot free up memory.');
+      this.forget();
+      return { items: [], bytes: 0, ran, lines };
+    }
+    // The biggest folders: `du` walks every file, so a minute on a full
+    // home folder, and Free up space's own plan does not wait for it. The
+    // plan rides along, so each folder can offer what of it can go.
     if (usage && !confirm) {
-      return { items: [], bytes: 0, ran: false, lines: [], usage: (await cleanup.usage?.()) ?? [] };
+      const found = (await cleanup.usage?.()) ?? [];
+      const items = await cleanup.plan();
+      return {
+        items,
+        bytes: items.reduce((sum, i) => sum + i.bytes, 0),
+        ran: false,
+        lines: [],
+        usage: found
+      };
     }
     const lines: string[] = [];
     if (confirm) {
@@ -459,9 +484,24 @@ export class PartsManager {
     for (const step of res.manual) line(`Needs you: ${step}`);
     this.forget();
     const after = resolveRequirements(part, await this.results());
-    if (after.installed) line(`${part.title} is installed.`);
-    else line(`Still missing: ${after.missing.map((r) => r.title).join(', ')}.`);
-    return after.installed;
+    if (!after.installed) {
+      line(`Still missing: ${after.missing.map((r) => r.title).join(', ')}.`);
+      return false;
+    }
+    line(`${part.title} is installed.`);
+    // A part that runs something is started as part of its add (Ollama:
+    // installed, then serving, card a9bec1e7 step 10), so the owner is not
+    // asked a second time. A start that fails leaves it installed, with
+    // Turn it on offered as before.
+    const service = this.machine.service(part.id);
+    if (part.service && service && !(await serviceState(service))?.running) {
+      try {
+        await service.start(line);
+      } catch (err) {
+        line(err instanceof Error ? err.message : String(err));
+      }
+    }
+    return true;
   }
 
   private async remove(

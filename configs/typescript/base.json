@@ -8,7 +8,15 @@
     "forceConsistentCasingInFileNames": true,
     "inlineSources": false,
     "isolatedModules": true,
-    "moduleResolution": "node",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    // The repo root (this path is relative to this file). From TypeScript 6/7
+    // rootDir defaults to the project's own folder and must contain every
+    // file the program reaches, which breaks shared/all (it reaches into
+    // apps/server for the router types, TS6059) and ts-jest, which sets an
+    // outDir and then fails on the common source directory (TS5011).
+    // Nothing here emits through tsc, so the wider root changes no output.
+    "rootDir": "../..",
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "preserveWatchOutput": true,

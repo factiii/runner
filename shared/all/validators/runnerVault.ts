@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { MAX_TRANSCRIPT_CHARS } from '../domains/mediaTranscript';
 import {
   MAX_VAULT_FILE_BYTES,
   VAULT_SEARCH_MIN_CHARS
@@ -27,9 +28,9 @@ const MAX_NAME_CHARS = 1024;
 const uploadId = z.string().uuid();
 
 /** Which of a runner's two stores an action acts on (.specs/runner-vault.md
- *  "Two stores"): the Vault (Local AI only) or Runner Storage (outside AI
+ *  "Two stores"): the Vault (Local AI only) or Runner Cloud (outside AI
  *  allowed). Every action's payload may carry it; none is the Vault, so an
- *  app from before Runner Storage keeps working. */
+ *  app from before Runner Cloud keeps working. */
 export const RUNNER_STORES = ['vault', 'runner'] as const;
 export const runnerStoreSchema = z.enum(RUNNER_STORES);
 
@@ -38,11 +39,40 @@ export const runnerStoreSchema = z.enum(RUNNER_STORES);
  *  the turn's MCP server. One string the app matches (`isVaultOllamaOnly`),
  *  as `AI_NO_CLI_SIGNED_IN` is. */
 export const VAULT_OLLAMA_ONLY =
-  'Your Vault is read by Local AI on this runner only, never by Claude or Codex. They read Runner Storage. Pick a Local AI model to ask about your Vault.';
+  'Your Vault is read by Local AI on this runner only, never by Claude or Codex. They read Runner Cloud. Pick a Local AI model to ask about your Vault.';
 
 /** Is this error the runner's Vault refusal? */
-export const isVaultOllamaOnly = (message: string | null | undefined): boolean =>
-  message?.startsWith(VAULT_OLLAMA_ONLY) ?? false;
+export const isVaultOllamaOnly = (
+  message: string | null | undefined
+): boolean => message?.startsWith(VAULT_OLLAMA_ONLY) ?? false;
+
+/** The runner's other refusals about its two stores, said by the runner
+ *  (shared/vault-core/access.ts, shared/vault-core/runnerCloudSeal.ts) and matched by the apps
+ *  (`friendlyStoreError`, helpers/storeErrors.ts), so both read one string. */
+/** A member at the Vault (.specs/vault.md rule 2). */
+export const VAULT_NEVER_SHARED =
+  'This Vault is not shared with you: a Vault is never shared, only its owner opens it.';
+/** A store asked for a file it does not hold (the runner's service.ts
+ *  NOT_HERE): the app matches it to tell "not in Runner Cloud" from a
+ *  failure (runnerFileCall). */
+export const RUNNER_FILE_NOT_HERE = 'That file is not in this vault.';
+/** Claude or Codex asked on a runner with no Runner Cloud yet. */
+export const NO_RUNNER_STORAGE =
+  'This runner has no Runner Cloud yet, so Claude and Codex have nothing to read. Add files to Runner Cloud first.';
+/** Runner Cloud's key cannot be read (vault-core's runnerCloudSeal.ts). */
+export const RUNNER_CLOUD_KEY_MISSING =
+  'This runner cannot read the key its Runner Cloud is encrypted with, so Runner Cloud is closed. Nothing was deleted.';
+/** Runner Cloud from before encryption, being encrypted in place. */
+export const RUNNER_CLOUD_SEALING =
+  'This runner is encrypting its Runner Cloud. Try again in a minute.';
+/** A file the runner's disk has no room for (vaultUploadStart checks the
+ *  free space before a byte is sent). */
+export const RUNNER_DISK_FULL =
+  'This runner does not have room on its disk for this file.';
+/** A recording's trim on the runner needs ffmpeg there
+ *  (.specs/screen-recording.md → Where a recording is stored). */
+export const RUNNER_NO_FFMPEG =
+  'This runner cannot trim a recording: ffmpeg is not installed on it.';
 
 /** The `store` a payload names, or null for none. A payload whose `store` is
  *  not one of the two is refused, never read as the Vault. */
@@ -92,7 +122,31 @@ export const vaultUploadStartSchema = z.object({
     .refine((name) => !/[\u0000-\u001f\u007f]/.test(name), 'Bad file name.')
     .refine((name) => !name.split('/').includes('..'), 'Bad file name.'),
   size: z.number().int().min(0).max(MAX_VAULT_FILE_BYTES),
-  contentType: z.string().min(1).max(255)
+  contentType: z.string().min(1).max(255),
+  // A screen recording posted to this store (.specs/screen-recording.md →
+  // Where a recording is stored): the words of the part kept, written as the
+  // file's own rows so the runner embeds and searches them, and the trim the
+  // runner cuts (with its ffmpeg) before the file is stored.
+  recording: z
+    .object({
+      transcript: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAX_TRANSCRIPT_CHARS)
+        .refine((text) => !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(text), {
+          message: 'A transcript is plain text.'
+        })
+        .optional(),
+      trim: z
+        .object({
+          startSec: z.number().finite().min(0),
+          endSec: z.number().finite().positive()
+        })
+        .refine((trim) => trim.endSec > trim.startSec, 'Bad trim.')
+        .optional()
+    })
+    .optional()
 });
 
 export const vaultWriteSchema = z.object({
@@ -131,7 +185,7 @@ const VAULT_RPC_PATHS = [
 export type VaultRpcPath = (typeof VAULT_RPC_PATHS)[number];
 
 /** One call of the shared vault router on a runner. `input` is the
- *  procedure's own, checked by the procedure (@shared/vault-router/inputs). */
+ *  procedure's own, checked by the procedure (@shared/vault-core/inputs). */
 export const vaultRpcSchema = z.object({
   path: z.enum(VAULT_RPC_PATHS),
   input: z.unknown().optional()

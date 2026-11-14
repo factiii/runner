@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 
 import type {
   BoardAgentAction,
@@ -12,7 +13,11 @@ import type {
 } from '@shared/all/domains/electron';
 import { MAX_VAULT_FILE_BYTES, VAULT_SEARCH_MIN_CHARS } from '@shared/all/domains/oakbox';
 import type { VouchedScope } from '@shared/all/helpers/board-agent-core/runner-access';
+import { chunkPages } from '@shared/all/helpers/postContent';
 import {
+  RUNNER_DISK_FULL,
+  RUNNER_FILE_NOT_HERE,
+  RUNNER_NO_FFMPEG,
   vaultCategorizeStartSchema,
   vaultDeleteSchema,
   vaultDownloadSchema,
@@ -31,6 +36,7 @@ import {
 import {
   deletableRows,
   storeEngineAllowed,
+  VAULT_NEVER_SHARED,
   VAULT_OLLAMA_ONLY,
   VAULT_REFUSAL,
   vaultActionAllowed,
@@ -38,16 +44,20 @@ import {
   type VaultRole,
   vaultReaders,
   vaultRole
-} from './access';
+} from '@shared/vault-core/access';
 import { VaultChats } from './askChats';
 import { VaultAskTools } from './askTools';
 import type { VaultCategorize } from './categorize';
 import type { VaultDb } from './db';
 import type { Embedder } from './embedder';
-import { VaultEngagement } from './engagement';
+import { type FindingsRun, VaultEngagement } from './engagement';
+import type { FetchTagChanges, TagFeedSync } from './tagFeed';
+import type { PrivateTagModel } from './privateTags';
 import type { VaultIngest } from './ingest';
-import type { FsObjectStore } from './objectStore';
+import type { FsObjectStore } from '@shared/vault-core/objectStore';
 import { VaultPosts } from './posts';
+import { type FfmpegTools, findFfmpeg, type RunTool, trimRecordingFile, trimWorkspace } from './recordingTrim';
+import type { JobHandle, StartJob } from '../activity/registry';
 import type { RunnerVaultRouter } from './vaultRouter';
 
 // The Vault's actions (.specs/runner-vault.md "Actions"): the cloud vault's
@@ -69,15 +79,19 @@ import type { RunnerVaultRouter } from './vaultRouter';
 //
 // One class, two stores (.specs/runner-vault.md "Two stores"): the daemon
 // makes one RunnerVault on the Vault's database and folder, and one on Runner
-// Storage's, the same code on its own paths (`storeName`). Every row it
-// answers carries its store. Who is let in is kept once, in the Vault's
-// share table: Runner Storage reads it from there (`members`).
+// Cloud's, the same code on its own paths (`storeName`). Every row it
+// answers carries its store. Who is let in is kept in Runner Cloud's share
+// table; the Vault is the owner's only (.specs/vault.md rule 2), so its
+// members are always none and it refuses to let anyone in.
 
 const PAGE = 50;
+/** How much of a stored take is read at a time on its way to ffmpeg. */
+const TRIM_READ_BYTES = 8 * 1024 * 1024;
 const CATEGORIZE_RUNNING =
   'Categorize is running on this runner. Add files once it has finished, or stop it in Organize.';
 const DOWNLOAD_EXPIRES_S = 900;
-export const NOT_HERE = 'That file is not in this vault.';
+// One string with the app's (runnerFileCall matches it).
+export const NOT_HERE = RUNNER_FILE_NOT_HERE;
 export const VAULT_ROUTER_UPDATING =
   'This runner is still updating its Vault. Try again in a minute.';
 /** The files one Ask turn reads, and how much of each. About 6k tokens in
@@ -108,10 +122,49 @@ export const askTerms = (question: string): string[] =>
 export type RunnerVaultOptions = {
   /** Which store this is. The Vault when absent. */
   storeName?: RunnerStoreName;
-  /** Who the owner let in, read from another store's share table (Runner
-   *  Storage reads the Vault's). Absent: this store's own. */
-  members?: () => Promise<Set<string>>;
+  /** The bytes free on the disk this store's files are on; null when it
+   *  cannot be read (no check then). */
+  freeBytes?: () => number | null;
+  /** The ffmpeg a recording's trim runs with (recordingTrim.ts). */
+  ffmpeg?: () => FfmpegTools | null;
+  runTool?: RunTool;
+  /** Registers a recording's save in the runner's Activity. */
+  startJob?: StartJob;
 };
+
+/** Room left on the disk after a file, so a save never fills it. */
+export const DISK_HEADROOM_BYTES = 512 * 1024 * 1024;
+/** How long a recording's save may wait for its last range: the put
+ *  ticket's own life (objectStore.ts, 15 min), plus a minute. */
+const RECORDING_SAVE_MS = 16 * 60_000;
+
+/** A screen recording on its way into this store (vaultUploadStart's
+ *  `recording`), by its object key: its words, its trim, its Activity job. */
+type PendingRecording = {
+  transcript?: string;
+  trim?: { startSec: number; endSec: number };
+  job: JobHandle | null;
+  expire: ReturnType<typeof setTimeout>;
+};
+
+/** The bytes free under `dir` (or its nearest folder that exists). */
+export function diskFreeBytes(dir: string): number | null {
+  let at = dir;
+  for (;;) {
+    try {
+      const stats = fs.statfsSync(at);
+      return stats.bavail * stats.bsize;
+    } catch {
+      const up = at.slice(0, Math.max(at.lastIndexOf('/'), 1));
+      if (up === at) return null;
+      at = up;
+    }
+  }
+}
+
+/** The owner asked to let someone into the Vault. */
+export const VAULT_SHARE_REFUSED =
+  'Your Vault is never shared. Let people into Runner Cloud instead.';
 
 /** Where `files` starts after: a row of another store, by its time and id. */
 export type FilesCursor = { at: string; id: string };
@@ -151,6 +204,7 @@ export class RunnerVault {
   private postStore: VaultPosts | null = null;
   private engagementStore: VaultEngagement | null = null;
   private toolStore: VaultAskTools | null = null;
+  private readonly recordings = new Map<string, PendingRecording>();
 
   constructor(
     private readonly db: VaultDb,
@@ -212,6 +266,24 @@ export class RunnerVault {
     return (this.engagementStore ??= new VaultEngagement(this.db));
   }
 
+  /** The scheduled Findings job's run on this store (findingsJob.ts), over
+   *  the owner's viewing data: only the owner pushes it (vault-core/access.ts). */
+  runFindings(now: number = Date.now()): Promise<FindingsRun> {
+    return this.engagement.runFindings(Number(this.ownerId), now);
+  }
+
+  /** Download the public tag-changes feed for the owner's history
+   *  (tagFeed.ts), before the Findings job runs. */
+  syncTagFeed(fetchPage: FetchTagChanges): Promise<TagFeedSync> {
+    return this.engagement.syncTagFeed(Number(this.ownerId), fetchPage);
+  }
+
+  /** The owner's private tags (privateTags.ts), with this runner's Ollama,
+   *  before the Findings job runs. */
+  runPrivateTags(model: PrivateTagModel): Promise<number> {
+    return this.engagement.runPrivateTags(Number(this.ownerId), model);
+  }
+
   /** The ingest's counts over the owner's readers (the owner and whoever
    *  they let in), for the owner's Remote connections. Null with no ingest. */
   async ingestCounts(): Promise<RunnerVaultIngest | null> {
@@ -224,16 +296,12 @@ export class RunnerVault {
     this.ingest?.kick();
   }
 
-  /** The accounts the owner let in: the runner's own half of the share. */
+  /** The accounts the owner let in: the runner's own half of the share.
+   *  Always none in the Vault, which is the owner's only. */
   memberIds(): Promise<Set<string>> {
-    if (this.options.members) return this.options.members();
+    if (this.storeName === 'vault') return Promise.resolve(new Set());
     if (!this.members) {
-      this.members = this.db
-        .query<{ memberId: number }>(
-          'SELECT "memberId" FROM "VaultShare" WHERE "ownerId" = $1 AND "status" = \'ACCEPTED\'',
-          [Number(this.ownerId)]
-        )
-        .then((rows) => new Set(rows.map((row) => String(row.memberId))));
+      this.members = this.shareRows().then((ids) => new Set(ids));
       this.members.catch(() => {
         this.members = null;
       });
@@ -241,12 +309,49 @@ export class RunnerVault {
     return this.members;
   }
 
-  /** Who the channel behind `scope` is in this vault: its role, whose files
-   *  it reads, and the account it acts as. Throws the refusal. */
+  /** The ids in this store's share table, as they are. The Vault's are
+   *  left from before it was owner only: the daemon moves them to Runner
+   *  Cloud (daemonVault.ts `moveVaultShares`). */
+  async shareRows(): Promise<string[]> {
+    const rows = await this.db.query<{ memberId: number }>(
+      'SELECT "memberId" FROM "VaultShare" WHERE "ownerId" = $1 AND "status" = \'ACCEPTED\'',
+      [Number(this.ownerId)]
+    );
+    return rows.map((row) => String(row.memberId));
+  }
+
+  /** Let these accounts in at once (the share moved out of the Vault). */
+  async letIn(memberIds: readonly string[]): Promise<void> {
+    if (this.storeName === 'vault') throw new Error(VAULT_SHARE_REFUSED);
+    const ids = memberIds.filter((id) => id !== this.ownerId).map(Number).filter(Number.isSafeInteger);
+    if (ids.length === 0) return;
+    await this.db.batch(
+      ids.map((id) => ({
+        sql: `INSERT INTO "VaultShare" ("ownerId", "memberId", "status", "acceptedAt")
+              VALUES ($1, $2, 'ACCEPTED', CURRENT_TIMESTAMP)
+              ON CONFLICT ("ownerId", "memberId") DO UPDATE SET "status" = 'ACCEPTED'`,
+        params: [Number(this.ownerId), id]
+      }))
+    );
+    this.members = null;
+    this.onMembers([...(await this.memberIds())]);
+  }
+
+  /** Empty this store's share table (the Vault's, once moved). */
+  async clearShares(): Promise<void> {
+    await this.db.batch([
+      { sql: 'DELETE FROM "VaultShare" WHERE "ownerId" = $1', params: [Number(this.ownerId)] }
+    ]);
+    this.members = null;
+  }
+
+  /** Who the channel behind `scope` is in this store: its role, whose files
+   *  it reads, and the account it acts as. Throws the refusal; in the Vault
+   *  anyone but the owner is refused. */
   async enter(scope: VouchedScope): Promise<VaultCaller> {
     const members = await this.memberIds();
-    const role = vaultRole(scope, members);
-    if (!role) throw new Error(VAULT_REFUSAL);
+    const role = vaultRole(scope, members, this.storeName);
+    if (!role) throw new Error(this.storeName === 'vault' ? VAULT_NEVER_SHARED : VAULT_REFUSAL);
     return {
       role,
       members,
@@ -283,6 +388,15 @@ export class RunnerVault {
         // The cloud's ontology lock: no new file while a run sorts them.
         if (this.categorizer?.running()) throw new Error(CATEGORIZE_RUNNING);
         const file = vaultUploadStartSchema.parse(payload);
+        const trim = file.recording?.trim;
+        // Refused before a byte is sent: a disk without room for it (a
+        // trim also needs the take in the clear and the cut beside it), and
+        // a trim with no ffmpeg here to cut it.
+        const tools = trim ? (this.options.ffmpeg ?? findFfmpeg)() : null;
+        if (trim && !tools) throw new Error(RUNNER_NO_FFMPEG);
+        const free = this.options.freeBytes?.() ?? null;
+        const needs = file.size * (trim ? 3 : 1) + DISK_HEADROOM_BYTES;
+        if (free !== null && free < needs) throw new Error(RUNNER_DISK_FULL);
         const key = `vault/${caller}/${randomUUID()}/${file.name}`;
         const put = await this.store.presignPut(
           key,
@@ -290,6 +404,7 @@ export class RunnerVault {
           file.size,
           MAX_VAULT_FILE_BYTES
         );
+        if (file.recording) this.holdRecording(key, file.recording);
         return { ticket: put.url } satisfies BoardAgentActionMap['vaultUploadStart']['result'];
       }
       case 'vaultWrite':
@@ -312,9 +427,9 @@ export class RunnerVault {
         const { memberId, shared } = vaultShareSetSchema.parse(payload);
         return this.share(memberId, shared);
       }
-      // The owner's alone (access.ts), so the caller is the owner.
+      // The owner's alone (vault-core/access.ts), so the caller is the owner.
       // The Vault's own run is Local AI only: Claude and Codex are not
-      // offered on it, and refused if asked for (access.ts).
+      // offered on it, and refused if asked for (vault-core/access.ts).
       case 'vaultCategorizeStatus':
         return this.categorizeView(await this.categorize().status(Number(caller)));
       case 'vaultCategorizeStart': {
@@ -324,7 +439,7 @@ export class RunnerVault {
       }
       case 'vaultCategorizeCancel':
         return this.categorizeView(await this.categorize().cancel(Number(caller)));
-      // The owner's too (access.ts).
+      // The owner's too (vault-core/access.ts).
       case 'vaultFilePost': {
         const { uploadId } = vaultFilePostSchema.parse(payload);
         const [row] = await this.db.query<UploadRow>(
@@ -344,7 +459,7 @@ export class RunnerVault {
         return {
           deleted: await this.posts.deleteNote(vaultNoteDeleteSchema.parse(payload).noteId, Number(caller))
         };
-      // The owner's viewing data (engagement.ts), owner only (access.ts).
+      // The owner's viewing data (engagement.ts), owner only (vault-core/access.ts).
       case 'engagementPush':
         return this.engagement.push(payload, Number(caller));
       case 'engagementQuery':
@@ -374,6 +489,15 @@ export class RunnerVault {
     return this.files(input, readers, caller, true, cursor);
   }
 
+  /** The account that added this file, or null when it is not here: Move
+   *  to… takes the owner's own only (daemonVault.ts `move`). */
+  async uploaderOf(uploadId: string): Promise<string | null> {
+    const [row] = await this.db.query<{ userId: number }>('SELECT "userId" FROM "Upload" WHERE "id" = $1', [
+      uploadId
+    ]);
+    return row ? String(row.userId) : null;
+  }
+
   /** Where a page after this file starts, or null when it is not here. */
   async cursorOf(uploadId: string): Promise<FilesCursor | null> {
     const [row] = await this.db.query<FilesCursor>(
@@ -385,7 +509,7 @@ export class RunnerVault {
 
   /**
    * Keep a note for Ask's save tool (ask.ts), the owner's alone as every
-   * note is (access.ts), then kick the ingest to embed it. An embedder that
+   * note is (vault-core/access.ts), then kick the ingest to embed it. An embedder that
    * is not there leaves the row for a later run (ingest.ts `drainNotes`);
    * with none installed the note is found by its words only.
    */
@@ -674,13 +798,25 @@ export class RunnerVault {
     if (!head) return { received, file: null };
     const name = key.split('/').slice(3).join('/');
     const id = randomUUID();
+    const recording = this.recordings.get(key) ?? null;
+    if (recording) {
+      clearTimeout(recording.expire);
+      this.recordings.delete(key);
+    }
+    let sha256 = head.sha256;
     try {
-      // Upload, Post, its one content row and the link, together.
+      if (recording?.trim) sha256 = (await this.trimStored(key, head.contentType, recording.trim)).sha256;
+      // The kept words, as the file's own rows after its path: the ingest
+      // embeds every row of a file it does not open (a video), so Oakbox's
+      // search and Ask find the recording by what was said, on this runner
+      // only (.specs/screen-recording.md → Where a recording is stored).
+      const words = recording?.transcript ? chunkPages([{ text: recording.transcript }]) : [];
+      // Upload, Post, its content rows and the link, together.
       await this.db.batch([
         {
           sql: `INSERT INTO "Upload" ("id", "key", "name", "userId", "type", "uploadSource", "ingestStatus", "sha256")
                 VALUES ($1, $2, $3, $4, $5::"UploadType", 'S3', 'PENDING', $6)`,
-          params: [id, key, name, Number(caller), typeOf(head.contentType), head.sha256]
+          params: [id, key, name, Number(caller), typeOf(head.contentType), sha256]
         },
         {
           sql: `WITH post AS (
@@ -692,18 +828,85 @@ export class RunnerVault {
                 )
                 INSERT INTO "_postUploads" ("A", "B") SELECT "id", $3 FROM post`,
           params: [Number(caller), name, id]
-        }
+        },
+        ...(words.length > 0
+          ? [
+              {
+                sql: `INSERT INTO "PostContent" ("postId", "seq", "text", "page")
+                      SELECT pu."A", t.seq, t.text, t.page
+                        FROM "_postUploads" pu,
+                             unnest($2::int[], $3::text[], $4::int[]) AS t(seq, text, page)
+                       WHERE pu."B" = $1`,
+                params: [id, words.map((_, i) => i + 2), words.map((w) => w.text), words.map((w) => w.page)]
+              },
+              {
+                sql: `UPDATE "Upload" SET "transcriptSource" = 'SPEECH' WHERE "id" = $1`,
+                params: [id]
+              }
+            ]
+          : [])
       ]);
     } catch (err) {
       await this.store.delete(key);
+      recording?.job?.end('failed', err instanceof Error ? err.message : String(err));
       throw err;
     }
+    recording?.job?.end('done');
     this.ingest?.kick();
     const [row] = await this.db.query<UploadRow>(
       `SELECT ${UPLOAD_COLUMNS} FROM "Upload" u WHERE u."id" = $1`,
       [id]
     );
     return { received, file: await this.toFile(row, caller) };
+  }
+
+  /** A recording's save begins: its words and trim wait for the last range,
+   *  and Activity shows it (a Vault one as its type alone). One that never
+   *  finishes is dropped with its ticket. */
+  private holdRecording(key: string, recording: { transcript?: string; trim?: { startSec: number; endSec: number } }): void {
+    const job =
+      this.options.startJob?.({
+        type: 'recording',
+        title: 'Saving a screen recording',
+        vault: this.storeName === 'vault'
+      }) ?? null;
+    const expire = setTimeout(() => {
+      if (this.recordings.get(key)?.job === job) this.recordings.delete(key);
+      job?.end('failed', 'The recording did not finish arriving.');
+    }, RECORDING_SAVE_MS);
+    expire.unref?.();
+    this.recordings.set(key, { ...recording, job, expire });
+  }
+
+  /** Cut the stored take to its trim with this machine's ffmpeg, and store
+   *  the cut in its place under the same key. */
+  private async trimStored(
+    key: string,
+    contentType: string,
+    trim: { startSec: number; endSec: number }
+  ): Promise<{ sha256: string }> {
+    const tools = (this.options.ffmpeg ?? findFfmpeg)();
+    if (!tools) throw new Error(RUNNER_NO_FFMPEG);
+    const work = trimWorkspace();
+    try {
+      // Out of the store a range at a time, so a long take is never whole
+      // in memory on its way to ffmpeg.
+      const head = await this.store.head(key);
+      if (!head) throw new Error(NOT_HERE);
+      const fd = fs.openSync(work.source, 'w', 0o600);
+      try {
+        for (let offset = 0; offset < head.size; offset += TRIM_READ_BYTES) {
+          fs.writeSync(fd, await this.store.getRange(key, offset, Math.min(TRIM_READ_BYTES, head.size - offset)));
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      await trimRecordingFile(work.source, work.output, trim, tools, this.options.runTool);
+      const cut = await this.store.put(key, fs.readFileSync(work.output), contentType);
+      return { sha256: cut.sha256 };
+    } finally {
+      work.done();
+    }
   }
 
   private async download(
@@ -755,8 +958,9 @@ export class RunnerVault {
 
   private async share(memberId: string, shared: boolean): Promise<RunnerVaultStatus> {
     if (memberId === this.ownerId) throw new Error('The owner already opens this vault.');
-    // Who is let in is kept once, in the Vault (the daemon sends this there).
-    if (this.options.members) throw new Error('Who opens this runner is set on its Vault.');
+    // Who is let in is kept in Runner Cloud (the daemon sends this there);
+    // the Vault is never shared.
+    if (this.storeName === 'vault') throw new Error(VAULT_SHARE_REFUSED);
     await this.db.batch([
       shared
         ? {

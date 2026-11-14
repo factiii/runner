@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 
 import type { RunnerStoreName } from '@shared/all/domains/electron';
 
-import { VAULT_OLLAMA_ONLY } from './access';
+import { VAULT_OLLAMA_ONLY } from '@shared/vault-core/access';
 import type { AskTools } from './ask';
 
 // The Vault as MCP tools, for Claude and Codex answering an Ask turn
@@ -17,8 +17,8 @@ import type { AskTools } from './ask';
 // is one JSON-RPC message, answered with one JSON body; there is no SSE
 // stream, so GET is refused (the spec's way of saying so).
 //
-// Only Claude and Codex use this server, and they read Runner Storage only
-// (access.ts `storeEngineAllowed`): a server over the Vault is never started.
+// Only Claude and Codex use this server, and they read Runner Cloud only
+// (vault-core/access.ts `storeEngineAllowed`): a server over the Vault is never started.
 
 export const VAULT_MCP_NAME = 'factiii-vault';
 

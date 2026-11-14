@@ -1,4 +1,7 @@
-import type { HypervisorSession } from '@shared/all/helpers/board-agent-core/session-hypervisor';
+import {
+  type HypervisorSession,
+  lastAnswer
+} from '@shared/all/helpers/board-agent-core/session-hypervisor';
 import type { ChatEvent } from '@shared/all/helpers/terminal-ai/chatTranscript';
 import {
   ROUTINE_OUTPUT_MAX,
@@ -29,20 +32,11 @@ export type RoutineWatchDeps = {
 type Result = Pick<RoutineResultFrame, 'status' | 'output' | 'error'>;
 
 /** What the session said after the last message it was given: its answer.
- *  Empty while it has not answered yet. */
-export function sessionAnswer(events: ChatEvent[]): string {
-  let lastUser = -1;
-  events.forEach((e, i) => {
-    if (e.type === 'user') lastUser = i;
-  });
-  if (lastUser < 0) return '';
-  const said = events
-    .slice(lastUser + 1)
-    .flatMap((e) => (e.type === 'assistant' ? [e.text.trim()] : []))
-    .filter(Boolean);
-  // The end of a long answer is its summary: keep that when it must be cut.
-  return said.join('\n\n').slice(-ROUTINE_OUTPUT_MAX);
-}
+ *  Empty while it has not answered yet. read_session's `wait` reads the same
+ *  (session-hypervisor.ts lastAnswer); the end of a long answer is its
+ *  summary, so that is what is kept when it must be cut. */
+export const sessionAnswer = (events: ChatEvent[]): string =>
+  lastAnswer(events, ROUTINE_OUTPUT_MAX);
 
 export async function watchRoutineSession(
   deps: RoutineWatchDeps,

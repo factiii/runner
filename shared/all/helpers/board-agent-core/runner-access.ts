@@ -43,7 +43,8 @@ export function parseKnownAccessLevel(raw: unknown): RunnerAccessLevel | null {
   const level = RUNNER_ACCESS_LEVELS.find((l) => l === raw);
   if (level) return level;
   // hasOwn: a level called "constructor" is not a key of the map.
-  return typeof raw === 'string' && Object.hasOwn(LEGACY_RUNNER_ACCESS_LEVELS, raw)
+  return typeof raw === 'string' &&
+    Object.hasOwn(LEGACY_RUNNER_ACCESS_LEVELS, raw)
     ? LEGACY_RUNNER_ACCESS_LEVELS[raw]
     : null;
 }
@@ -196,7 +197,11 @@ const SCREEN_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>(
     'simulatorStatus',
     'simulatorAttach',
     'simulatorDetach',
-    'simulatorInput'
+    'simulatorInput',
+    // Booting or adding a simulator is the same machine's devices, not a shell.
+    'simulatorBoot',
+    'simulatorCatalog',
+    'simulatorCreate'
   ]
 );
 
@@ -207,8 +212,17 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
   new Set<BoardAgentAction>([
     'auditRead',
     'auditClear',
+    // The desktop app's own sessions for the server's relay. A runner's
+    // engine refuses both: its sessions cross only over its own socket.
+    'localRelaySessions',
+    'localSessionOp',
     // The machine's sleep: runner-wide, so the owner's (daemon.ts).
     'keepAwakeSet',
+    // The runner's own automatic update (Software > Update automatically):
+    // runner-wide, so the owner's (daemon.ts). A switch and the last
+    // outcome's version numbers; the relay may carry both.
+    'autoUpdateGet',
+    'autoUpdateSet',
     'runnerAccessSet',
     // A member's dangerous job call waits on the runner owner, and only the
     // owner sees or answers it (owner-approval.ts). The engine checks the
@@ -271,7 +285,8 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultBackupList',
     'vaultBackupReadChunk',
     'vaultBackupDelete',
-    // The Vault's members are the owner's to choose (vault/access.ts).
+    // Who is let into Runner Cloud is the owner's to choose; the Vault is
+    // never shared (vault/access.ts).
     'vaultShareSet',
     // Oakbox > Account > Backend's models (LOCAL_AI_ACTIONS): answered before
     // any board, owner only there too.
@@ -306,6 +321,10 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     // .specs/analytics.md): the owner's own, from their own devices.
     'engagementPush',
     'engagementQuery',
+    // Scan this computer (.specs/runner-vault.md): the runner's machine,
+    // read-only, never on the relay (relaySecretsRefusal). It names the
+    // owner's browsers, extensions and login items, so it is theirs alone.
+    'machineScan',
     // Move to…: files from one of the runner's stores to the other
     // (VAULT_ACTIONS), which decides what AI may read them.
     'vaultMove',
@@ -318,12 +337,14 @@ export const OWNER_ONLY_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultLock',
     'vaultKeySettings',
     'vaultKeyChangeStart',
-    'vaultKeyChange'
+    'vaultKeyChange',
+    'vaultErase'
   ]);
 
 /** The runner's Vault (.specs/runner-vault.md "Actions"). The daemon answers
- *  these before any board, for the owner and the vault members the owner let
- *  in, and never on a relayed link: vault files travel device to runner only. */
+ *  these before any board, for the owner, and in Runner Cloud for the
+ *  members the owner let in (never in the Vault), and never on a relayed
+ *  link: vault files travel device to runner only. */
 export const VAULT_ACTIONS: ReadonlySet<BoardAgentAction> =
   new Set<BoardAgentAction>([
     'vaultStatus',
@@ -359,10 +380,10 @@ export const VAULT_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultFilePost',
     'vaultNotes',
     'vaultNoteDelete',
-    // Move to… between the Vault and Runner Storage: a copy, then the
+    // Move to… between the Vault and Runner Cloud: a copy, then the
     // original deleted. Never on the relay. The owner's alone.
     'vaultMove',
-    // Viewing history and mood from the owner's devices: never on the relay,
+    // Viewing history and its Findings from the owner's devices: never on the relay,
     // which is Factiii's server, and Factiii never sees it.
     'engagementPush',
     'engagementQuery',
@@ -375,7 +396,8 @@ export const VAULT_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultLock',
     'vaultKeySettings',
     'vaultKeyChangeStart',
-    'vaultKeyChange'
+    'vaultKeyChange',
+    'vaultErase'
   ]);
 
 /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
@@ -393,6 +415,21 @@ export const LOCAL_AI_ACTIONS: ReadonlySet<BoardAgentAction> =
  *  and running it on the runner is the point of not sending it to Factiii. */
 export const RUNNER_AI_ACTIONS: ReadonlySet<BoardAgentAction> =
   new Set<BoardAgentAction>(['aiPrompt', 'aiPromptInfo']);
+
+/** The runner's Activity (.specs/runner.md "Activity"): its AI jobs, their
+ *  logs, Stop and History. The daemon answers them before any board, for the
+ *  owner (every job) and members at Shell (the jobs of the boards they have
+ *  Shell on); everyone else is refused (apps/runner/src/activity/access.ts).
+ *  The relay may carry them, but a log: an `aiPrompt`'s prompt is the
+ *  person's words and never goes through Factiii (RUNNER_AI_ACTIONS). */
+export const RUNNER_ACTIVITY_ACTIONS: ReadonlySet<BoardAgentAction> =
+  new Set<BoardAgentAction>([
+    'runnerActivity',
+    'runnerJobHistory',
+    'runnerJobLog',
+    'runnerJobStop',
+    'runnerActivitySettings'
+  ]);
 
 /** Claude's and Codex's sign-ins (.specs/runner-vault-ask.md "Oakbox's backend: setup, sign-ins, models").
  *  With a board they are that board's engine's, as factiii.com sends them.
@@ -551,7 +588,12 @@ export const RELAY_AI_PROMPT_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is r
 
 export const RELAY_SIGNIN_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. Claude and Codex are signed in only on a direct link to your runner.`;
 
+export const RELAY_GITHUB_SIGNIN_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. GitHub is connected only on a direct link to your runner.`;
+
 export const RELAY_CLEANUP_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. Free up space deletes files on your runner, so it only runs on a direct link.`;
+
+export const RELAY_SCAN_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server, which could read what it carries. Scan this computer only runs on a direct link to your runner.`;
+export const RELAY_JOB_LOG_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. A job’s log can hold your prompts, so it only opens on a direct link.`;
 
 export const RELAY_NUKE_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. A nuke erases everything on your runner, so it only runs on a direct link.`;
 
@@ -603,6 +645,17 @@ export function relaySecretsRefusal(
   if (VAULT_ACTIONS.has(action)) return RELAY_VAULT_REFUSAL;
   if (LOCAL_AI_ACTIONS.has(action)) return RELAY_LOCAL_AI_REFUSAL;
   if (RUNNER_AI_ACTIONS.has(action)) return RELAY_AI_PROMPT_REFUSAL;
+  if (action === 'runnerJobLog') return RELAY_JOB_LOG_REFUSAL;
+  // A sign-in code (Claude's pasted code, Codex's device code) travels only
+  // on a direct link, with a board or without (RUNNER_SIGNIN_ACTIONS;
+  // .specs/runner-security-review.md finding 1).
+  if (action === 'claudeLoginCode' || action === 'codexLoginStart') {
+    return RELAY_SIGNIN_REFUSAL;
+  }
+  // GitHub's device sign-in hands back a user code: whoever reads it off the
+  // relay can approve it with their own GitHub account, and the board then
+  // pushes as them. Same rule as the two above.
+  if (action === 'githubStartDeviceCode') return RELAY_GITHUB_SIGNIN_REFUSAL;
   const p = (payload ?? {}) as Record<string, unknown>;
   if (
     (action === 'secretsAuthAnswer' || action === 'secretsInboxAnswer') &&
@@ -622,6 +675,9 @@ export function relaySecretsRefusal(
   // Not a secret, but it erases every one, and its plan names every board:
   // a server that relays the link must never reach it, plan or run.
   if (action === 'runnerNuke') return RELAY_NUKE_REFUSAL;
+  // What a scan finds on the machine is the owner's, like the Vault the
+  // report may be kept in: the server that relays the link never sees it.
+  if (action === 'machineScan') return RELAY_SCAN_REFUSAL;
   return null;
 }
 

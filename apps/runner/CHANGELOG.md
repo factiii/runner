@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A session's free commands can skip the password for a while.** The "A command needs your secrets" prompt offers the job prompt's durations (Once, 30m, 2h, 8h, 12h). A duration opens a session window: later `factiii-secrets run` commands from that same session that name only keys approved in that prompt run without asking until it ends; any other key, or any other session, asks again. Each run is still on the audit log, naming the window. It ends at expiry, at Lock now (`secretsLock` now ends the jobs window and every session window), at a password change, when the session ends, or at a restart. The runner marks such a request `sessionWindow` on `PendingSecretsAuth`, and `secretsAuthState` lists the open ones as `sessionWindows`; an app shows the durations on a free command only when the runner set `sessionWindow`. A free command's `unlockFor` no longer opens the jobs window.
+
+## [0.44.0] - 2026-11-14
+
+### Added
+
+- **A release reaches the runner within a minute.** The server sends `runner:release` when a new runner version is published (`POST /webhooks/release`, the last step of the release workflow), and the runner looks for the update within 0–60 s instead of waiting for its next check. The GitHub Release is now the first place the runner updates from; npm is the fallback. The regular check runs daily.
+- **`aiPrompt` says which model answered.** Its answer carries `model` beside `engine`: the Ollama tag, Claude's model as its CLI names it (an alias like "sonnet" resolved), Codex's when one is set (else null). A Dark Patterns suggestion made on the runner then names that model on the post. Older apps ignore the field.
+
+### Fixed
+
+- **A tunnel whose credential is refused for good no longer retries every 20 seconds.** When frps refuses a tunnel's credential and the runner has no new one (it was revoked or unpaired), the tunnel's keeper stops frpc instead of leaving it retrying the login, and starts it again once the runner gives a credential (asked on the same back-off, 5 min doubling to 1 h). `factiii-unexpose` still stops it.
+- **A Vault lock while the Vault was still opening could leave its decrypted database running.** A second lock no longer runs beside one already under way; it waits for it, so the last dump is written and the database process ends.
+
+## [0.43.0] - 2026-11-12
+
+Supported on macOS. Linux and Windows (WSL2) ship the same version and are in beta: tested less often. Works with the web, phone and server of the same day and with older ones: what a side lacks is turned off, so this release needs nothing updated first.
+
+### Added
+
+- **Erase a Vault whose key is lost.** `vaultErase` (owner only, direct link only, with `confirm: 'ERASE'`, protocol feature `vaultErase`) deletes the Vault's key file, sealed database and files, and leaves an empty, unencrypted Vault to set up again. Runner Cloud, its key, the engine and who is let in are not touched.
+- **A versioned protocol with the apps and the server.** The runner says what it supports when a link opens (`runner-info` now carries `protocol` and `features`) and when it connects to the server (`runner:hello`, acked with the server's own features; `features` on every heartbeat too). The apps read the app's hello (`client-hello`). Something the other side lacks is turned off cleanly: the runner stops sending the session directory and job-stopped notices to a server without them, and refuses a cross-runner call at once instead of after 60 s; an app hides Activity and refuses an action a runner is too old for, with "Update the runner", before sending it. An `aiPrompt` with a field this runner does not know now says the runner is too old instead of "needs a prompt".
+- **Automatic updates, on by default, with a rollback.** The runner looks for a newer release 10 minutes after it starts and every 6 hours, and installs it when no session, job or AI request is running. Before npm replaces anything it packs the running version and copies its folder's own files into `updates/previous/`; if the new version dies before it is up (connected, or 2 minutes alive), the supervisor installs the old one again, puts the files back (never `config.json`, whose token may have rotated) and skips that version from then on. `factiii-runner update status` and `factiii-runner update auto on|off`; `FACTIII_RUNNER_AUTO_UPDATE=0` turns it off. An update the owner approves still runs without a copy, and says so.
+- **Linux and Windows say beta** in `setup`, `doctor` (and its `--json`, as `platform.support`), the add-a-runner guide and the release notes.
+- **Every simulator in the Simulator panel, not just the running ones:** `simulatorList` lists shut-down iOS simulators too (`booted` on each), `simulatorBoot` boots one, and `simulatorCatalog` / `simulatorCreate` add a new one (an iOS version + device type). The web and phone apps' panels need this version to boot or add a simulator.
+- **status.factiii.com hears the machine's health within 30 s.** The status-page heartbeat takes its level from the 30 s low disk and memory watch (it read a full machine health every 10 minutes before) and beats at once when the level changes, so the page shows the runner degraded at warn and critical at critical, and alerts through ntfy, without waiting for the next 2 minute beat.
+- **A 24 h chart of memory pressure and disk free.** The health watch's 30 s readings are kept as one slot per 10 minutes (the least disk free, the most memory pressure and the worst level in it), the last 24 hours only, in `health-history.json` in the runner folder (at most 145 slots). `partsList.health` carries `history`, and `memoryPressure` (macOS 100 less `kern.memorystatus_level`, Linux 100 less the MemAvailable share).
+- **Top memory consumers.** `partsList.health.memoryTop`: `ps` grouped by what each process is (Claude Code, Codex, dev servers, iOS Simulator, Android emulator, containers, virtual machines, Chrome, ...), biggest first, at most 8, names only. `machineCleanup` with `stop: 'simulators'` and `confirm` shuts the booted iOS simulators down (`xcrun simctl shutdown all`; apps and data stay).
+- **What's using space offers each folder's own Free up.** A `usage` dry run now answers the plan too, and every plan item carries `dir` (where it is, from `~`), so the apps offer on a folder exactly the items inside it. On a Mac the simulator runtimes macOS keeps outside the home folder are listed as well (`xcrun simctl runtime list`), as a reading with how to remove one in Xcode.
+
+### Changed
+
+- **Preview links are `https://<name>.factiii.org`, through a Cloudflare Tunnel.** `factiii-expose` connects frpc over WebSocket+TLS to `frp.factiii.org:443` (it was raw TCP to `dev.factiii.com:7443`, a forwarded home port) and prints factiii.org links. factiii.org is not under factiii.com, so a preview never receives a visitor's Factiii sign-in cookies. Links an older runner printed (`*.dev.factiii.com`) keep working until every runner has this release.
+
+- **A public preview link stays up past a week.** Each tunnel's frpc now runs under a keeper that renews its 7-day tunnel credential once a day without restarting it, and logs it in again with a fresh one when frps refuses a login after a drop. The keeper renews with a handle of the tunnel's own, so a link opened from the Ports panel or by an agent that has since ended keeps renewing; it stops with `factiii-unexpose`. Each renewal is one `tunnel-token` audit line (`renew:<name>`).
+- **"Runner Storage" is now "Runner Cloud"** in what the runner says (Ask's "Searching Runner Cloud on this runner", the machine health list); the store, its folder and its API are unchanged.
+
+### Fixed
+
+- **Claude's pasted sign-in code and Codex's device sign-in are refused on a relayed board link,** as they already were with no board.
+- **The Vault key confirm compares in constant time, and an unlock refuses a key file asking for an unbounded scrypt cost.**
+
 ## [0.42.0] - 2026-11-10
 
 Needed by the web and phone apps released the same day: the Vault key and unlock screens, the Dark Patterns screenshot suggestion (`aiPromptInfo`, images on `aiPrompt`), member access None / Jobs / Shell, the runner settings' Accounts / Software / Server tabs and the old-secrets-copy card all call actions only this version answers. Update factiii.com's server before this runner (member levels).

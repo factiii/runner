@@ -18,7 +18,7 @@ import { startVaultMcp } from './askMcp';
 import { askResearchTools, type AskToolsContext } from './askTools';
 import { openVaultDb, type VaultDb } from './db';
 import type { Embedder, EmbedderState } from './embedder';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault, type VaultCaller } from './service';
 
 // Ask's research tools on a runner (askTools.ts), on a real Vault database:
@@ -125,7 +125,11 @@ async function turn(scope: VouchedScope, over: Partial<AskToolsContext> = {}) {
 
 before(async () => {
   db = await openVaultDb({ dataDir: 'memory://', engineDir: ENGINE });
-  vault = new RunnerVault(db, new FsObjectStore(path.join(tmp, 'objects')), '1', () => {}, null, embedder);
+  // Runner Cloud: the store a member is let into (the Vault is never
+  // shared, vault.md rule 2). The tools are the same code on either.
+  vault = new RunnerVault(db, new FsObjectStore(path.join(tmp, 'objects')), '1', () => {}, null, embedder, null, null, {
+    storeName: 'runner'
+  });
   await vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
   xray = await add('Health/xray.txt', 'Chest x-ray, clear. Dr Patel.', OWNER, 0, [10, 11]);
   await add('Taxes/2025.txt', 'Tax return 2025. Refund 120.', OWNER, 5, [20]);
@@ -272,7 +276,7 @@ describe('Ask research tools on a runner', () => {
     ]);
   });
 
-  it('never serves the Vault over MCP: Claude and Codex read Runner Storage only', async () => {
+  it('never serves the Vault over MCP: Claude and Codex read Runner Cloud only', async () => {
     const { tools } = await turn(OWNER, { categories: undefined });
     await assert.rejects(startVaultMcp(tools, 'vault'), /read by Local AI on this runner only/);
   });

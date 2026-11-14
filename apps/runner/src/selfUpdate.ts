@@ -6,6 +6,9 @@ import path from 'node:path';
 
 import { isRunnerBehind } from '@shared/all/helpers/runningJobs';
 
+import { RELEASE_PUBLIC_KEY, verifyReleaseSignature } from './releaseKey';
+import { cancelPendingUpdate, prepareRollback } from './updateSafety';
+
 const PACKAGE_NAME = '@factiii/runner';
 
 // Exit code the daemon worker uses to ask the supervisor to relaunch it after a
@@ -144,11 +147,17 @@ function publishedLatest(): string | null {
   }
 }
 
-// ── GitHub Releases: the way in while npm will not serve a version ─────────
+// ── GitHub Releases: the primary way in ────────────────────────────────────
 //
 // npm deleted or blocked every release after 0.27.0 (GHSA-9j83-qj34-g5vc), so
 // each release is also a GitHub Release on the public source mirror, with the
-// same tarball and a .sha256 beside it (.github/workflows/release-runner.yml).
+// same tarball, a .sha256 and an Ed25519 .sig beside it
+// (.github/workflows/release-runner.yml). It ships on every merge to main,
+// while npm serves a version only once the owner approves it there (npm has no
+// automated approval for a staged release), so it is the one runners prefer
+// (`pickUpdateSource`). The .sig must verify against the
+// key pinned in releaseKey.ts: whoever can publish a release on that repo
+// still cannot make a runner install it without the signing key.
 // The runner looks that release up itself: the approving client still decides
 // only whether to update, never which version or from where.
 
@@ -160,11 +169,16 @@ export type GithubRelease = {
   version: string;
   tarballUrl: string;
   sha256Url: string;
+  /** Null on a release with no .sig (every one before signing began):
+   *  downloadVerified then refuses it, saying why. */
+  sigUrl: string | null;
 };
 
-/** The newest release's version and its two assets, from the GitHub API's
- *  `releases/latest` body. Null unless the tag is a plain `vX.Y.Z` and both
- *  assets are there under this repo's own download path. */
+/** The newest release's version and its assets, from the GitHub API's
+ *  `releases/latest` body. Null unless the tag is a plain `vX.Y.Z` and the
+ *  tarball and .sha256 are there under this repo's own download path; the
+ *  .sig is read the same way, and its absence is downloadVerified's to
+ *  refuse. */
 export function parseGithubRelease(body: unknown): GithubRelease | null {
   if (!body || typeof body !== 'object') return null;
   const { tag_name: tag, assets } = body as {
@@ -184,12 +198,17 @@ export function parseGithubRelease(body: unknown): GithubRelease | null {
   };
   const tarballUrl = url(tarballName);
   const sha256Url = url(`${tarballName}.sha256`);
-  return tarballUrl && sha256Url ? { version, tarballUrl, sha256Url } : null;
+  const sigUrl = url(`${tarballName}.sig`);
+  return tarballUrl && sha256Url ? { version, tarballUrl, sha256Url, sigUrl } : null;
 }
 
-/** Where an update comes from: npm when it has the newest version, else the
- *  GitHub Release when that is newer than this runner; null when neither is
- *  ahead. A tie goes to npm (its own install, nothing to download). */
+/** Where an update comes from: the signed GitHub Release when it is newer
+ *  than this runner and at least as new as npm, else npm when that is newer
+ *  than this runner; null when neither is ahead. A tie goes to GitHub: it
+ *  ships on every merge with no step anyone has to take, and its .sig is
+ *  checked against the pinned key, while npm serves a version only after the
+ *  owner approves it there (Jon, 2026-11-13: the GitHub Release is the
+ *  primary channel, npm the secondary). */
 export function pickUpdateSource(
   current: string,
   npmLatest: string | null,
@@ -199,7 +218,7 @@ export function pickUpdateSource(
   const githubAhead =
     githubLatest !== null &&
     isRunnerBehind(current, githubLatest) &&
-    (npmLatest === null || isRunnerBehind(npmLatest, githubLatest));
+    (npmLatest === null || !isRunnerBehind(githubLatest, npmLatest));
   if (githubAhead) return 'github';
   return npmAhead ? 'npm' : null;
 }
@@ -226,13 +245,26 @@ async function githubLatestRelease(fetchImpl: Fetch = fetch): Promise<GithubRele
   }
 }
 
-/** Download the release tarball and check it against its .sha256. Returns the
- *  local file, or null (and says why) when anything does not match. */
-async function downloadVerified(
+/** Download the release tarball and check it against its .sha256 and its
+ *  .sig (an Ed25519 signature by `publicKey`, the pinned release key unless a
+ *  test passes its own). Returns the local file, or null (and says why) when
+ *  anything is missing or does not match. */
+export async function downloadVerified(
   release: GithubRelease,
-  fetchImpl: Fetch = fetch
+  fetchImpl: Fetch = fetch,
+  publicKey: string = RELEASE_PUBLIC_KEY
 ): Promise<string | null> {
   try {
+    const sigRes = release.sigUrl
+      ? await fetchImpl(release.sigUrl, { signal: AbortSignal.timeout(30_000) })
+      : null;
+    const sig = sigRes?.ok ? await sigRes.text() : null;
+    if (!sig) {
+      console.error(
+        `[update] the ${release.version} release is not signed (no .sig); not installing it.`
+      );
+      return null;
+    }
     const sumRes = await fetchImpl(release.sha256Url, { signal: AbortSignal.timeout(30_000) });
     const want = sumRes.ok ? parseSha256File(await sumRes.text()) : null;
     if (!want) {
@@ -248,6 +280,13 @@ async function downloadVerified(
     const got = crypto.createHash('sha256').update(bytes).digest('hex');
     if (got !== want) {
       console.error('[update] the download does not match its .sha256; not installing it.');
+      return null;
+    }
+    if (!verifyReleaseSignature(bytes, sig, publicKey)) {
+      console.error(
+        `[update] the ${release.version} release's signature does not verify against ` +
+          'the pinned release key; not installing it.'
+      );
       return null;
     }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'factiii-runner-update-'));
@@ -274,18 +313,46 @@ function tarballEngines(file: string): string {
   }
 }
 
+/** The installed package's folder, or null on a source run (tsx), which has
+ *  no package to pack for a rollback. */
+function installedPackageDir(): string | null {
+  return __filename.endsWith('.ts') ? null : path.join(__dirname, '..');
+}
+
+/** The version an update would install now, or null when nothing newer is
+ *  out (or this runner updates with Factiii Desktop). For the automatic
+ *  update's check; `installLatest` looks again itself. */
+export async function latestAvailable(): Promise<string | null> {
+  if (process.env.FACTIII_BUNDLED_RUNNER === '1') return null;
+  const current = currentVersion();
+  const npmLatest = publishedLatest();
+  const github = await githubLatestRelease();
+  const source = pickUpdateSource(current, npmLatest, github?.version ?? null);
+  if (source === 'github') return github?.version ?? null;
+  return source === 'npm' ? npmLatest : null;
+}
+
 /**
- * Install the newest release: npm's `latest`, or the GitHub Release when npm
- * is behind it (see the GitHub Releases note above). Resolves true on success,
+ * Install the newest release: the GitHub Release, or npm's `latest` when npm
+ * is ahead of it (see the GitHub Releases note above). Resolves true on success,
  * and the daemon then exits for the supervisor to relaunch on the new code.
+ *
+ * Before npm replaces anything, the running version is packed and the runner
+ * folder's files copied (updateSafety.ts `prepareRollback`), so the
+ * supervisor can put them back when the new version fails to start. With
+ * `requireRollback` (the automatic update) no copy means no update; an update
+ * the owner approved goes on without one, and says so.
  *
  * Never a version handed in over the wire: the approving client only decides
  * *whether* to update, never *which* version or from where, so no peer can pin
  * an arbitrary or old build or inject into the npm argument. The GitHub path
  * installs only a tarball under this repo's own download URL whose SHA-256
- * matches the release's .sha256.
+ * matches the release's .sha256 and whose .sig verifies against the pinned
+ * release key (releaseKey.ts).
  */
-export async function installLatest(): Promise<boolean> {
+export async function installLatest(
+  opts: { runnerDir?: string; requireRollback?: boolean } = {}
+): Promise<boolean> {
   // The runner Factiii Desktop carries (Contents/Resources/runner, on the
   // app's Electron) updates with the app: npm would install a second runner
   // beside it that nothing runs.
@@ -294,7 +361,7 @@ export async function installLatest(): Promise<boolean> {
     return false;
   }
   // Only ever forward. A release unpublished from npm stays "latest" in the
-  // server's cache for up to an hour, so the app offers it while npm's own
+  // server's cache until its next read, so the app offers it while npm's own
   // latest is older: installing then put 0.33.0 runners back on 0.27.0, and
   // the banner offered the update again after every relaunch.
   const current = currentVersion();
@@ -314,7 +381,7 @@ export async function installLatest(): Promise<boolean> {
   let engines = '';
   let tarball: string | null = null;
   if (source === 'github' && github) {
-    console.log(`[update] npm does not have ${github.version}; downloading it from GitHub...`);
+    console.log(`[update] downloading ${github.version} from the GitHub Release...`);
     tarball = await downloadVerified(github);
     if (!tarball) return false;
     target = tarball;
@@ -332,6 +399,18 @@ export async function installLatest(): Promise<boolean> {
     );
     return false;
   }
+  if (opts.runnerDir) {
+    const pending = prepareRollback(opts.runnerDir, current, installedPackageDir());
+    if (!pending.tarball) {
+      if (opts.requireRollback) {
+        cancelPendingUpdate(opts.runnerDir);
+        if (tarball) fs.rmSync(path.dirname(tarball), { recursive: true, force: true });
+        console.error(`[update] could not keep a copy of ${current} to roll back to; not updating automatically.`);
+        return false;
+      }
+      console.warn(`[update] could not keep a copy of ${current}: a failed start cannot be rolled back.`);
+    }
+  }
   console.log(`[update] installing ${source === 'github' ? `${PACKAGE_NAME} ${github?.version} from GitHub` : `${PACKAGE_NAME}@latest`}...`);
   const res = spawnSync('npm', ['install', '-g', target], {
     stdio: 'inherit',
@@ -342,6 +421,7 @@ export async function installLatest(): Promise<boolean> {
   // EAGAIN: the OS refused a new process, so the user is at the per-user
   // process limit (processWatch.ts), not npm failing.
   if ((res.error as NodeJS.ErrnoException | undefined)?.code === 'EAGAIN') {
+    if (opts.runnerDir) cancelPendingUpdate(opts.runnerDir);
     console.error(
       `[update] process limit reached: the OS would not start npm. ` +
         `Close terminals and sessions you no longer use, then update. ` +
@@ -350,6 +430,8 @@ export async function installLatest(): Promise<boolean> {
     return false;
   }
   if (res.status !== 0) {
+    // npm leaves the old version in place when an install fails.
+    if (opts.runnerDir) cancelPendingUpdate(opts.runnerDir);
     console.error(
       `[update] npm install failed (exit ${res.status ?? 'signal'}). ` +
         `Staying on ${current}.`

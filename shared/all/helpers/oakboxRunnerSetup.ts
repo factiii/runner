@@ -6,6 +6,7 @@ import type {
 } from '../domains/electron';
 import type { RunnerPartId } from '../validators/runnerParts';
 import { RUNNER_UNKNOWN_ACTION_PREFIX } from './runnerVaultBackup';
+import { storeErrorText } from './storeErrors';
 
 // Setting up a runner from Oakbox > Account > Backend (.specs/oakbox.md
 // "Backend", "Setting up a runner"): the parts of the runner Oakbox uses, as
@@ -34,10 +35,11 @@ const isRunnerOutdated = (message: string | null | undefined): boolean =>
 export const RUNNER_OUTDATED =
   'This computer runs an older Factiii runner. Approve its update on the computer’s board in Factiii, then come back.';
 
-/** A Backend failure in words: the update for an outdated runner, else the
- *  runner's own message. */
+/** A Backend failure in words: the update for an outdated runner, a store
+ *  refusal in plain words (storeErrors.ts: a locked Vault, an empty or
+ *  closed Runner Cloud), else the runner's own message. */
 export const runnerSetupError = (message: string): string =>
-  isRunnerOutdated(message) ? RUNNER_OUTDATED : message;
+  isRunnerOutdated(message) ? RUNNER_OUTDATED : storeErrorText(message);
 
 /** The parts Oakbox uses, in install order. Vault search is offered only
  *  where the runner has it (a Mac with Apple silicon, or Linux). `vault` is
@@ -282,4 +284,35 @@ export function pairingCodeInput(raw: string): string {
     .replace(/[^A-Z0-9]/g, '')
     .slice(0, 8);
   return plain.length > 4 ? `${plain.slice(0, 4)}-${plain.slice(4)}` : plain;
+}
+
+/** A question asked before a part's button runs, in Backend's words. */
+export type SetupConfirm = {
+  title: string;
+  body: string;
+  confirmLabel: string;
+};
+
+/** Private AI is installed only after a yes (card a9bec1e7 step 10): Set it
+ *  up on the research agent on this computer asks first, saying what lands
+ *  on the computer. The runner adds Ollama only through Homebrew, with no
+ *  administrator password, and starts it as part of the add
+ *  (partsManager.ts). Every other button runs at once, as before. */
+export function setupConfirm(
+  button: PartButton,
+  rows: SetupPartRow[]
+): SetupConfirm | null {
+  if (button.id !== 'local-ai' || button.action !== 'add') return null;
+  const size = rows.find((r) => r.id === 'local-ai')?.line;
+  return {
+    title: 'Set up private AI on this computer?',
+    body: [
+      'The runner installs Ollama with Homebrew, with no administrator password, and starts it.',
+      size,
+      'Then add a model that fits this computer. Nothing it reads leaves the computer.'
+    ]
+      .filter(Boolean)
+      .join(' '),
+    confirmLabel: 'Set it up'
+  };
 }

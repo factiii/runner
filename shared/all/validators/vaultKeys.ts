@@ -16,6 +16,10 @@ export const VAULT_LOCKED_CODE = 'VAULT_LOCKED';
 export const isVaultLocked = (message: string | null | undefined): boolean =>
   message?.startsWith(VAULT_LOCKED) ?? false;
 
+/** The runner's answer while the Vault is being encrypted in place. */
+export const VAULT_SEALING =
+  'Your Vault is being encrypted. Try again in a moment.';
+
 /** The runner's answer to a Vault key that does not open the Vault: the app
  *  matches it to drop a remembered copy that went stale (the key was
  *  changed on another device). */
@@ -60,6 +64,16 @@ export const vaultKeyChangeStartSchema = z.object({
   vaultKey: vaultKey.optional()
 });
 
+/** The word typed to erase a Vault whose key is lost: the app's typed
+ *  confirmation, and checked again by the runner. */
+export const VAULT_ERASE_PHRASE = 'ERASE';
+
+/** Erase the Vault (the owner forgot its key): its data and key file go,
+ *  Runner Cloud stays. */
+export const vaultEraseSchema = z.object({
+  confirm: z.literal(VAULT_ERASE_PHRASE)
+});
+
 export const vaultKeySettingsSchema = z.object({
   lockIdleMinutes: z
     .number()
@@ -85,5 +99,6 @@ export function normalizeVaultKey(typed: string): string | null {
 
 /** The key as shown and saved: groups of four joined by dashes. */
 export const formatVaultKey = (canonical: string): string =>
-  canonical.match(new RegExp(`.{1,${VAULT_KEY_GROUP_CHARS}}`, 'g'))?.join('-') ??
-  canonical;
+  canonical
+    .match(new RegExp(`.{1,${VAULT_KEY_GROUP_CHARS}}`, 'g'))
+    ?.join('-') ?? canonical;

@@ -5,6 +5,8 @@ import path from 'node:path';
 import type { RunnerCleanupItem } from '@shared/all/domains/electron';
 import { bytesLabel } from '@shared/all/helpers/runnerPartsCopy';
 
+import { tilde } from './diskCaches';
+
 // Free up space (.specs/runner-setup.md "Machine health and Free up space"): what the runner
 // made and makes again on its own, and the caches of the tools boards use.
 // Old build output in a board's `builds`, a board's job checkout (`jobs`,
@@ -85,6 +87,11 @@ export function cleanableRefusal(
 
 export type CleanupIo = {
   runnerDir: string;
+  /** The home folder and Ollama's models folder: each item's `dir`, so
+   *  What's using space offers it on the folder that holds it. Left out,
+   *  items have no `dir`. */
+  home?: string;
+  modelsDir?: string;
   /** Never removed, even through a link: the vault, its search models and
    *  Ollama's models folder. */
   protectedDirs: string[];
@@ -147,18 +154,21 @@ export async function planCleanup(io: CleanupIo): Promise<RunnerCleanupItem[]> {
     found.push({ id: `log:${log}`, title: 'Old runner log', rel: log });
   }
 
+  const dirOf = (p: string | undefined) =>
+    io.home && p ? { dir: tilde(io.home, p) } : {};
   const items: RunnerCleanupItem[] = [];
   for (const { id, title, rel } of found) {
     const full = path.join(io.runnerDir, rel);
     if (cleanableRefusal(io.runnerDir, full, io.protectedDirs)) continue;
-    items.push({ id, title, path: rel, bytes: await io.size(full) });
+    items.push({ id, title, path: rel, bytes: await io.size(full), ...dirOf(full) });
   }
   for (const model of io.unusedModels()) {
     items.push({
       id: `${MODEL_PREFIX}${model.id}`,
       title: 'Ollama model no longer picked',
       path: model.id,
-      bytes: model.bytes
+      bytes: model.bytes,
+      ...dirOf(io.modelsDir)
     });
   }
   return [...items, ...((await io.caches?.().catch(() => [])) ?? [])];

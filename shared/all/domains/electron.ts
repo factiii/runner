@@ -16,17 +16,22 @@ import type {
 } from '../helpers/terminal-ai/chatRun';
 import type { ChatTranscript } from '../helpers/terminal-ai/chatTranscript';
 import type {
+  EngagementPush,
+  EngagementPushResult,
+  EngagementQuery,
+  EngagementQueryResult
+} from '../validators/engagementVault';
+import type {
   AiPromptInfo,
   AiPromptInfoPayload,
   AiPromptPayload,
   CliAskSettings
 } from '../validators/oakboxBackend';
 import type {
-  EngagementPush,
-  EngagementPushResult,
-  EngagementQuery,
-  EngagementQueryResult
-} from '../validators/engagementVault';
+  RunnerActivitySettingsPayload,
+  RunnerJobHistoryPayload,
+  RunnerJobIdPayload
+} from '../validators/runnerActivity';
 import type { BareGitOp } from '../validators/runnerGit';
 import type {
   LocalAiActPayload,
@@ -43,6 +48,15 @@ import type {
   RunnerCategorizePayload,
   RunnerCategoryTree
 } from '../validators/runnerVault';
+import type { SessionOp } from '../validators/sessionRelay';
+import type { MachineScanReport } from './machineScan';
+import type {
+  RunnerActivityView,
+  RunnerJobHistoryPage,
+  RunnerJobLog
+} from './runnerActivity';
+import type { RunnerAutoUpdateState } from './runnerAutoUpdate';
+import type { RelaySession, SessionOpAck } from './sessionRelay';
 
 export type {
   LocalAiActPayload,
@@ -280,7 +294,12 @@ export type RunnerActivityKind =
   /** A member's call of a dangerous job waiting on the runner owner's yes
    *  (owner-approval.ts). One row per request, keyed by its id. */
   | 'dangerous-approval'
-  | 'signin';
+  | 'signin'
+  /** The analytics runner's scheduled Findings job over the owner's viewing
+   *  data in the Vault (apps/runner/src/vault/findingsJob.ts). Runner-wide:
+   *  shown on every board the runner serves; its label and detail carry no
+   *  data. */
+  | 'findings';
 
 /** One command waiting on the owner's store password, as the global
  *  authorization modal renders it. No secret value ever appears here: a
@@ -304,6 +323,11 @@ export type PendingSecretsAuth = {
   /** The job this spawn belongs to. Only a job may be covered by an unlock
    *  window, so the prompt offers a duration only when this is set. */
   job?: string;
+  /** A free command whose answer may keep a session window open
+   *  (`unlockFor` on the answer): this session, these keys. Set by a runner
+   *  that has session windows, so an app offers the durations only to one
+   *  that will read them as that, never as a jobs window. */
+  sessionWindow?: boolean;
   /** Set when approving writes a secret from the inbox rather than running a
    *  command: which key, env value or file blob, and whether it replaces one. */
   inbox?: { id: string; key: string; kind: 'env' | 'file'; replaces: boolean };
@@ -334,6 +358,22 @@ export type PendingDangerousApproval = {
 
 /** Who opened the current unlock window and until when (ISO). */
 export type SecretsUnlockWindow = {
+  until: string;
+  byUserId: string;
+  byName: string;
+};
+
+/** One open session window: free `factiii-secrets run` commands from one
+ *  session, asking for no more than `keys`, run without a prompt until
+ *  `until` (.specs/runner-secrets-gate.md "Session window"). */
+export type SecretsSessionWindow = {
+  /** The label the prompt showed ("Terminal · <card>", "Deploy run"). */
+  origin: string;
+  /** Which session, as the audit log names it (`tab:<tmux session>`,
+   *  `run:<session id>`, `deploy`). */
+  session: string;
+  /** The key and file names approved in that prompt. */
+  keys: string[];
   until: string;
   byUserId: string;
   byName: string;
@@ -387,7 +427,21 @@ export type AuditEntry = {
      *  session acted on and the session that asked. */
     | 'session-start'
     | 'session-message'
-    | 'session-end';
+    | 'session-end'
+    /** A file a session sent to one on another runner (or another board),
+     *  or refused to: on the sending board. And the same file as the
+     *  calling board got it: where it landed, or why not
+     *  (session-files.ts). `detail` names both sessions, the size and the
+     *  sha256. */
+    | 'session-file-send'
+    | 'session-file-receive'
+    /** A session took a tunnel credential (`factiii-secrets tunnel-token`,
+     *  for `factiii-expose`). `detail` names the session (`tab:<tmux
+     *  session>`, `run:<session>`, `deploy`, `legacy`). */
+    | 'tunnel-token'
+    /** A session took the board's GitHub token through git's credential
+     *  helper (`factiii-secrets git-credential`). `detail` as above. */
+    | 'git-credential';
   job: string | null;
   /** Key names (and file-blob names) only. */
   keys: string[];
@@ -578,6 +632,18 @@ export type RunnerMachineHealth = {
   /** Memory in use, for the Status tab's reading beside the pressure
    *  level. Absent from an older runner; null where it cannot read it. */
   memoryUse?: RunnerMemoryUse | null;
+  /** Memory pressure as a share in use, 0 to 100 (macOS 100 less
+   *  `kern.memorystatus_level`, Linux 100 less the MemAvailable share): the
+   *  24 h chart's memory line. Absent from an older runner; null where it
+   *  cannot read it. */
+  memoryPressure?: number | null;
+  /** What holds the most memory, biggest first (Status's top consumers).
+   *  Absent from an older runner and from the alert's cheap read. */
+  memoryTop?: RunnerMemoryConsumer[];
+  /** The last 24 hours of the alert watch's readings, one per 10 minutes,
+   *  oldest first (Status's chart). Kept on the runner, bounded. Absent from
+   *  an older runner. */
+  history?: RunnerHealthSample[];
   /** What is running on the machine for every board: Docker containers,
    *  pm2 processes, login agents and servers listening on a port. Absent
    *  from an older runner. */
@@ -589,6 +655,40 @@ export type RunnerMachineHealth = {
    *  `criticalGb` refuses. */
   warnGb: number;
   criticalGb: number;
+};
+
+/** One 10 minute slot of the machine's health, for Status's 24 h chart:
+ *  the worst of the readings in it (least disk free, most memory pressure,
+ *  worst level). */
+export type RunnerHealthSample = {
+  /** The slot's start, ms since epoch. */
+  at: number;
+  /** The disk with the least free, of those the runner writes to. */
+  diskFreeGb: number | null;
+  /** Memory pressure, 0 to 100 (RunnerMachineHealth.memoryPressure). */
+  memoryPressure: number | null;
+  level: RunnerHealthLevel;
+};
+
+/** What a top memory consumer can be stopped with, behind a confirmation
+ *  (`machineCleanup` with `stop`). Only what is clearly safe: shutting
+ *  down the iOS simulators keeps their apps and data. */
+export type RunnerMemoryStop = 'simulators';
+
+/** One of the biggest memory users: processes grouped by what they are
+ *  ("Claude Code", "iOS Simulator", "Dev servers"). Names only, never a
+ *  command line. */
+export type RunnerMemoryConsumer = {
+  label: string;
+  /** Resident memory of the group's processes summed (`ps` RSS). */
+  bytes: number;
+  /** How many processes. */
+  count: number;
+  /** The safe clean-up for it, where one exists. */
+  stop?: RunnerMemoryStop;
+  /** Where the owner frees it up by hand, where there is no stop
+   *  ("End the sessions you are done with in Running now"). */
+  hint?: string;
 };
 
 /** What a runner tells the server about its machine for alerts (card
@@ -724,9 +824,10 @@ export type DesktopSetupStepState =
   | 'failed'
   | 'skipped';
 
-/** A fix the page can offer on a failed step. The main process owns what
- *  each one does; the page only names it. */
-export type DesktopSetupStepActionId = 'move-to-applications';
+/** A fix the page can offer on a step (a failed one, or one waiting on the
+ *  person: the AI's sign-in). The main process owns what each one does; the
+ *  page only names it. */
+export type DesktopSetupStepActionId = 'move-to-applications' | 'ai-sign-in';
 
 export type DesktopSetupStepView = {
   id: string;
@@ -742,6 +843,12 @@ export type DesktopSetupStepView = {
   /** A step the person does (switch to the Factiii account): never run,
    *  and not waited on for the list to be finished. */
   manual?: boolean;
+  /** Offered, not run by Approve: its own button runs it (keep it running
+   *  after a restart, the macOS power settings). Not waited on either. */
+  optional?: boolean;
+  /** What it costs, shown up front: about how long, and how much it adds
+   *  to the disk. Absent: next to nothing. */
+  estimate?: { minutes?: number; mb?: number };
 };
 
 export type DesktopSetupMode = 'setup' | 'repair';
@@ -767,8 +874,15 @@ export type DesktopSetupView = {
   /** This macOS user (who gets the app and, set up here, the runner), and
    *  whether it is an admin. Absent from an older shell. */
   user?: { name: string; admin: boolean };
+  /** "Connect your AI": the CLI the first step installs, Claude Code by
+   *  default. Absent from an older shell (no AI step). */
+  ai?: DesktopSetupAi;
   steps: DesktopSetupStepView[];
 };
+
+/** The AI CLI "Connect your AI" installs and signs in (toolchain.ts
+ *  SetupAi). */
+export type DesktopSetupAi = 'claude' | 'codex';
 
 /** One line of Software > Recommended setup (desktop setup/recommend.ts):
  *  what is not as it should be on this Mac, and the fix, or the steps when
@@ -804,7 +918,9 @@ export type DesktopSetupActionId =
   | 'place-here'
   | 'place-here-anyway'
   | 'place-account'
-  | 'account-password-saved';
+  | 'account-password-saved'
+  | 'ai-claude'
+  | 'ai-codex';
 
 /** The runner's launchd job as Factiii Desktop last read it
  *  (`launchctl print gui/<uid>/<label>`, desktop helpers/launchd.ts). */
@@ -945,6 +1061,11 @@ export type RunnerCleanupItem = {
   /** A prune: `bytes` is what the cache holds, and only what no project
    *  uses goes, so it frees up to that. */
   upTo?: boolean;
+  /** Where it is on disk, as the owner reads it ("~/.npm/_cacache"), so
+   *  What's using space can offer it on the folder that holds it. Absent
+   *  where it has no one place (the container build cache) and from an
+   *  older runner. */
+  dir?: string;
 };
 
 /** One of the biggest folders on the machine, for the owner to see. A
@@ -952,9 +1073,13 @@ export type RunnerCleanupItem = {
 export type RunnerDiskUse = {
   /** What it is ("Tart virtual machines", "factiii-board: worktrees (one per session)"). */
   label: string;
-  /** Where, under the home folder ("~/.tart"). */
+  /** Where, under the home folder ("~/.tart"), or what holds it outside
+   *  it ("xcrun simctl runtime"). */
   path: string;
   bytes: number;
+  /** How the owner frees it by hand, where the runner offers no clean-up
+   *  ("Xcode > Settings > Components removes a runtime"). */
+  hint?: string;
 };
 
 /** A dry run (`ran: false`) or what a confirmed run did, and what is left. */
@@ -964,7 +1089,8 @@ export type RunnerCleanup = {
   ran: boolean;
   lines: string[];
   /** The biggest folders, answered to a dry run with `usage` (then `items`
-   *  is empty). Absent otherwise, and from an older runner. */
+   *  is the plan, for each folder's own Free up). Absent otherwise, and from
+   *  an older runner. */
   usage?: RunnerDiskUse[];
 };
 
@@ -1161,7 +1287,9 @@ export const RUNNER_JOB_END_STATES = [
 export type RunnerJobEndState = (typeof RUNNER_JOB_END_STATES)[number];
 
 /** Whether a state (or any string, e.g. off the wire) is an end state. */
-export function isRunnerJobEndState(state: unknown): state is RunnerJobEndState {
+export function isRunnerJobEndState(
+  state: unknown
+): state is RunnerJobEndState {
   return (RUNNER_JOB_END_STATES as readonly unknown[]).includes(state);
 }
 
@@ -1517,9 +1645,9 @@ export type RunnerVaultBackupItem = {
 
 /** The two stores on a runner (.specs/runner-vault.md "Two stores"), each its
  *  own database and files folder behind the same actions. `vault`: private,
- *  read by Local AI (Ollama) only. `runner`: Runner Storage, which Claude and
+ *  read by Local AI (Ollama) only. `runner`: Runner Cloud, which Claude and
  *  Codex may read too. A payload with no `store` means the Vault, so an app
- *  from before Runner Storage keeps working. */
+ *  from before Runner Cloud keeps working. */
 export type RunnerStoreName = 'vault' | 'runner';
 
 /** One file in a runner's Vault (.specs/runner-vault.md "Database"): its
@@ -1546,7 +1674,7 @@ export type RunnerVaultFile = {
    *  opens with `vaultNotes`, never as a download. */
   note?: true;
   /** Which of the runner's stores holds it. Absent from a runner from before
-   *  Runner Storage: its Vault. */
+   *  Runner Cloud: its Vault. */
   store?: RunnerStoreName;
 };
 
@@ -1578,9 +1706,9 @@ export type RunnerAskModels = {
   /** Of `cli`, the ones not signed in, so Ask's menu says so. Absent from an
    *  older runner: every CLI it lists reads as signed in. */
   signedOut?: Exclude<RunnerAskEngine, 'ollama'>[];
-  /** The runner has Runner Storage, the only store Claude and Codex read
+  /** The runner has Runner Cloud, the only store Claude and Codex read
    *  (the Vault is Local AI only). False: they have nothing to read yet.
-   *  Absent from a runner from before Runner Storage, where they read its
+   *  Absent from a runner from before Runner Cloud, where they read its
    *  Vault. */
   runnerStorage?: boolean;
 };
@@ -1619,7 +1747,7 @@ export type RunnerAskChat = {
    *  Absent from a runner from before the stop. */
   stopped?: boolean;
   /** The store the chat is kept in and asks about. Absent from a runner
-   *  from before Runner Storage: its Vault. */
+   *  from before Runner Cloud: its Vault. */
   store?: RunnerStoreName;
 };
 
@@ -1652,11 +1780,12 @@ export type RunnerVaultStatus = {
   role: 'owner' | 'member';
   files: number;
   bytes: number;
-  /** Owner only: the accounts the owner let into this vault. */
+  /** Owner only: the accounts the owner let into Runner Cloud (the Vault
+   *  is never shared, .specs/vault.md rule 2). */
   members: string[];
   /** Absent from a runner from before the embedder. */
   ingest?: RunnerVaultIngest;
-  /** Runner Storage beside the Vault, on a status read with no `store`:
+  /** Runner Cloud beside the Vault, on a status read with no `store`:
    *  null while the runner has none yet. Absent from a runner from before
    *  it. */
   runnerStorage?: { files: number; bytes: number } | null;
@@ -1769,13 +1898,26 @@ export type RunnerCategorizeStatus = {
   run: RunnerCategorizeRun | null;
 };
 
-/** A running simulator. Only booted devices are listed — a shutdown one has no
- *  display to attach to. See .specs/simulator-panel.md. */
+/** An iOS simulator on the runner, running or not. Only a booted one has a
+ *  display to attach to; a shutdown one is listed so the panel can boot it.
+ *  See .specs/simulator-panel.md. */
 export type SimulatorDevice = {
   udid: string;
   name: string;
   /** Trimmed for display: "iOS 26 4", not the full reverse-DNS runtime id. */
   runtime: string;
+  booted: boolean;
+};
+
+/** What a new simulator can be made from: each installed iOS runtime and the
+ *  device types it runs, newest runtime first. */
+export type SimulatorCatalog = {
+  runtimes: {
+    id: string;
+    /** "iOS 27.0" */
+    name: string;
+    deviceTypes: { id: string; name: string }[];
+  }[];
 };
 
 /**
@@ -1942,6 +2084,10 @@ export type BoardAgentActionMap = {
     payload: { key: 'githubToken' };
     result: { success: boolean };
   };
+  /** The person continued past the one-time Codex notice
+   *  (validators/codexNotice.ts): recorded on the runner for them, so it
+   *  never asks them again there. */
+  codexNoticeAcknowledge: { payload: void; result: { success: boolean } };
   ask: {
     payload: {
       question: string;
@@ -2350,6 +2496,9 @@ export type BoardAgentActionMap = {
       pending: PendingSecretsAuth | null;
       /** The open unlock window (jobs only), or null when locked. */
       unlocked: SecretsUnlockWindow | null;
+      /** Open session windows (free commands). Absent from a runner that
+       *  has none. */
+      sessionWindows?: SecretsSessionWindow[];
     };
   };
   /** Answer a specific pending request. Omitting `password` denies it. The id
@@ -2359,7 +2508,9 @@ export type BoardAgentActionMap = {
   secretsAuthAnswer: {
     /** `unlockFor` (minutes, default 120, max 720) opens an unlock window
      *  when the request is a job: later job spawns run without a prompt until
-     *  it ends. 0 or absent on a free command = this one spawn only. */
+     *  it ends. On a free command marked `sessionWindow` it opens a session
+     *  window instead (that session, those keys); 0 or absent there = this
+     *  one spawn only. */
     payload: { id: string; password?: string; unlockFor?: number };
     result: { success: boolean };
   };
@@ -2376,7 +2527,8 @@ export type BoardAgentActionMap = {
     payload: { id: string; approve: boolean };
     result: { success: boolean };
   };
-  /** End the unlock window now: the runner wipes the age key from memory. */
+  /** End the unlock window and every session window now: the runner wipes
+   *  the age key from memory. */
   secretsLock: {
     payload: Record<string, never>;
     result: { success: boolean };
@@ -2479,18 +2631,50 @@ export type BoardAgentActionMap = {
     payload: { source: RunnerLogSource; lines?: number };
     result: RunnerLogTail;
   };
+  /** The runner's Activity (.specs/runner.md "Activity"): its AI jobs
+   *  running now and the last ones finished, and its Ollama service. Runner-
+   *  wide, for the owner and members at Shell (who see their boards' jobs
+   *  only); the daemon answers it. */
+  runnerActivity: { payload: void; result: RunnerActivityView };
+  /** Finished jobs, newest first, searchable, a page at a time. */
+  runnerJobHistory: {
+    payload: RunnerJobHistoryPayload;
+    result: RunnerJobHistoryPage;
+  };
+  /** A background job's read-only log (prompt and streamed answer). A Vault
+   *  job has none. */
+  runnerJobLog: { payload: RunnerJobIdPayload; result: RunnerJobLog };
+  /** Stop a running job. Its starter gets a socket message. */
+  runnerJobStop: {
+    payload: RunnerJobIdPayload;
+    result: { stopped: boolean };
+  };
+  /** How many days History keeps (owner only). */
+  runnerActivitySettings: {
+    payload: RunnerActivitySettingsPayload;
+    result: RunnerActivityView;
+  };
   /** Start one part's or one module's action in the background and answer
    *  at once with the list; the part's (or module's) `job` then reports it. */
   partsAct: {
     payload: RunnerPartsActPayload;
     result: RunnerPartsState;
   };
-  /** Free up space: a dry run by default, a run with `confirm`. Owner only,
-   *  and a run is refused on the relay. */
+  /** Free up space: a dry run by default, a run with `confirm`. With
+   *  `stop` and `confirm`, frees memory instead (RunnerMemoryStop). Owner
+   *  only, and a run is refused on the relay. */
   machineCleanup: {
     payload: MachineCleanupPayload;
     result: RunnerCleanup;
   };
+  /** The desktop app's local sessions, for the server's session directory
+   *  (.specs/card-sessions.md "Across runners"): the app sends them on its
+   *  socket. Desktop only: a runner reports its own over its socket. */
+  localRelaySessions: { payload: void; result: RelaySession[] };
+  /** A call the server relayed from a session on a runner to one of the
+   *  desktop app's sessions: read it, or put a message in its inbox. Desktop
+   *  only, and never a start. */
+  localSessionOp: { payload: SessionOp; result: SessionOpAck };
   /** Nuke this runner (.specs/runner-setup.md "Nuke a runner"): without
    *  `confirm` the plan only; with it and `phrase` exactly NUKE_PHRASE, the
    *  erase starts. Owner only, never on the relay, runner-wide. */
@@ -2563,6 +2747,20 @@ export type BoardAgentActionMap = {
       auto?: boolean;
     };
     result: RunnerKeepAwake;
+  };
+  /** Software > "Update automatically": whether the runner updates itself,
+   *  what forces it, and the last update's outcome (runnerAutoUpdate.ts).
+   *  Runner-wide and the owner's alone; needs `autoUpdateSetting`. */
+  autoUpdateGet: {
+    payload: Record<string, never>;
+    result: RunnerAutoUpdateState;
+  };
+  /** Turn it on or off, as `factiii-runner update auto on|off` does.
+   *  Refused while FACTIII_RUNNER_AUTO_UPDATE forces it, and on the runner
+   *  Factiii Desktop carries. */
+  autoUpdateSet: {
+    payload: { auto: boolean };
+    result: RunnerAutoUpdateState;
   };
   auditRead: {
     payload: {
@@ -3337,6 +3535,13 @@ export type BoardAgentActionMap = {
       contentType: string;
       /** Where the file goes; none is the Vault. */
       store?: RunnerStoreName;
+      /** A screen recording (.specs/screen-recording.md → Where a recording
+       *  is stored): the words of the part kept, stored as the file's rows,
+       *  and the trim the runner cuts with its ffmpeg before it stores it. */
+      recording?: {
+        transcript?: string;
+        trim?: { startSec: number; endSec: number };
+      };
     };
     result: { ticket: string };
   };
@@ -3368,7 +3573,7 @@ export type BoardAgentActionMap = {
     payload: { uploadIds: string[]; store?: RunnerStoreName };
     result: { deleted: number; kept: number };
   };
-  /** One procedure of the shared vault router (@shared/vault-router,
+  /** One procedure of the shared vault router (@shared/vault-core,
    *  .specs/vault-router.md → Transports), answered by the runner's adapter:
    *  the same procedure, input and output as on the server. `result` is
    *  SuperJSON-encoded, as the server's tRPC transformer encodes it, so one
@@ -3543,6 +3748,13 @@ export type BoardAgentActionMap = {
     payload: { pendingId: string; vaultKey: string };
     result: RunnerVaultKeyStatus;
   };
+  /** "I forgot my Vault key": the Vault's data and key file erased, an empty
+   *  unencrypted Vault left to set up again; Runner Cloud untouched. Owner
+   *  only, never on the relay, with VAULT_ERASE_PHRASE typed. */
+  vaultErase: {
+    payload: { confirm: string };
+    result: RunnerVaultKeyStatus;
+  };
   /** A device's viewing data into the owner's Vault (.specs/analytics.md
    *  "The runner's Vault"), owner only, never on the relay: an upsert on
    *  each row's id, so a re-send is harmless. */
@@ -3554,6 +3766,16 @@ export type BoardAgentActionMap = {
   engagementQuery: {
     payload: EngagementQuery;
     result: EngagementQueryResult;
+  };
+  /** "Scan this computer" (.specs/runner-vault.md "Scan this computer"):
+   *  the runner's own machine, read-only: tracker cookie counts per browser
+   *  (never values), extensions' wide permissions, login items and their
+   *  signatures, and screen, mic and camera permissions. Owner only, never
+   *  on the relay. Saved nowhere: the app keeps it in the Vault only when
+   *  the owner asks. */
+  machineScan: {
+    payload: Record<string, never>;
+    result: MachineScanReport;
   };
   /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
    *  backend: setup, sign-ins, models"): what Ollama holds, the table with its fit, machine health
@@ -3572,10 +3794,16 @@ export type BoardAgentActionMap = {
   /** A Factiii AI feature run on the owner's runner instead of on Trons
    *  (.specs/oakbox.md "Backend" → AI features): a prompt in, the answer's
    *  text out, no tools and no Vault. Owner only, runner-wide, never on the
-   *  relay. */
+   *  relay. `model` is the model that answered (the Ollama tag, Claude's as
+   *  its CLI names it, Codex's when set), null when not known; absent from an
+   *  older runner. */
   aiPrompt: {
     payload: AiPromptPayload;
-    result: { text: string; engine: 'claude' | 'codex' | 'ollama' };
+    result: {
+      text: string;
+      engine: 'claude' | 'codex' | 'ollama';
+      model?: string | null;
+    };
   };
   /** Which of the runner's engines read images with an `aiPrompt`, so the
    *  client offers only those for an image feature. A runner from before it
@@ -3616,6 +3844,18 @@ export type BoardAgentActionMap = {
   };
   simulatorDetach: { payload: Record<string, never>; result: void };
   simulatorInput: { payload: SimulatorInput; result: void };
+  /** Boot a shutdown simulator. Resolves once it is booted; booting one that
+   *  is already running is not an error. */
+  simulatorBoot: { payload: { udid: string }; result: void };
+  simulatorCatalog: {
+    payload: Record<string, never>;
+    result: SimulatorCatalog;
+  };
+  /** Make a new simulator (shut down; the panel boots it next). */
+  simulatorCreate: {
+    payload: { name: string; deviceTypeId: string; runtimeId: string };
+    result: SimulatorDevice;
+  };
 
   // ── Credential store (runner-wide, owner only) ──
   //

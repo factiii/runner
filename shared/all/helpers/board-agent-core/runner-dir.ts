@@ -53,3 +53,20 @@ export function keychainAccount(env: NodeJS.ProcessEnv = process.env): string {
     .slice(0, 12);
   return `${DEFAULT_KEYCHAIN_ACCOUNT}:${hash}`;
 }
+
+/** The suffix a second runner's service name carries (service.ts
+ *  serviceName): a short hash of its dir, so two runners on one machine never
+ *  share a launchd label, systemd unit or scheduled task. */
+export function serviceNameSuffix(dir: string): string {
+  return crypto.createHash('sha256').update(dir).digest('hex').slice(0, 8);
+}
+
+/** The macOS LaunchAgent label of this env's runner, as `service install`
+ *  names it: `com.factiii.runner` for the default dir, suffixed for any other.
+ *  Factiii Dev (FACTIII_RUNNER_DIR=~/.factiii-runner-dev) watches its own job
+ *  with this, never the real app's. */
+export function launchdLabel(env: NodeJS.ProcessEnv = process.env): string {
+  const dir = overrideDir(env);
+  if (!dir || dir === defaultRunnerDir()) return 'com.factiii.runner';
+  return `com.factiii.runner.${serviceNameSuffix(dir)}`;
+}

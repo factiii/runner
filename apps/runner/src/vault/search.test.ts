@@ -20,7 +20,7 @@ import type { CategorizeEngines } from './categorize';
 import { createDaemonVault } from './daemonVault';
 import { openVaultDb, type VaultDb } from './db';
 import type { Embedder, EmbedderState } from './embedder';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 
 // Oakbox's search on a runner (.specs/runner-vault.md "Search across vaults"),
@@ -80,7 +80,9 @@ beforeEach(async () => {
   ]);
   embedder = new QueryEmbedder();
   const store = new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-vault-search-')));
-  vault = new RunnerVault(db, store, '1', () => {}, null, embedder);
+  // Runner Cloud, where a member is let in (the Vault never is, vault.md
+  // rule 2); the search is the same code on either store.
+  vault = new RunnerVault(db, store, '1', () => {}, null, embedder, null, null, { storeName: 'runner' });
 });
 
 async function add(name: string, vector?: number[], scope: VouchedScope = OWNER) {

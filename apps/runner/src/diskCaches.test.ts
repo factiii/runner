@@ -13,7 +13,8 @@ import {
   duBytes,
   MIN_CACHE_BYTES,
   diskUseCandidates,
-  diskUseLabel
+  diskUseLabel,
+  simRuntimeUses
 } from './diskCaches';
 
 const GB = 1024 ** 3;
@@ -91,6 +92,10 @@ describe('caches Free up space can clear', () => {
     );
     // The npm cache, under MIN_CACHE_BYTES, is not worth a line.
     assert.ok(items.every((i) => i.kind === 'cache' && i.bytes >= MIN_CACHE_BYTES));
+    // Each one folder says where it is, for What's using space; the
+    // container build cache has no one folder.
+    assert.equal(items.find((i) => i.id === 'cache:xcode')?.dir, '~/Library/Developer/Xcode/DerivedData');
+    assert.equal(items.find((i) => i.id === 'cache:containers-build')?.dir, undefined);
   });
 
   it('clears by id with the tool’s own command, and Xcode’s one folder', async () => {
@@ -215,5 +220,40 @@ describe('what is using space', () => {
         ['pnpm stores', '~/Library/pnpm']
       ]
     );
+  });
+
+  it('lists the simulator runtimes macOS keeps outside the home folder, as a reading', async () => {
+    const list = JSON.stringify({
+      a: {
+        runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-27-1',
+        version: '27.1',
+        sizeBytes: 7.8 * GB,
+        lastUsedAt: '2026-10-31T22:39:30Z'
+      },
+      small: { runtimeIdentifier: 'x', version: '1', sizeBytes: 1024 },
+      bad: 'nope'
+    });
+    assert.deepEqual(simRuntimeUses(list), [
+      {
+        label: 'iOS 27.1 simulator runtime, last used 2026-10-31',
+        path: 'xcrun simctl runtime',
+        bytes: 7.8 * GB,
+        hint: 'Xcode > Settings > Components removes a runtime you no longer test on.'
+      }
+    ]);
+    assert.deepEqual(simRuntimeUses('not json'), []);
+    const { io } = machine();
+    const use = await diskUse({
+      ...io,
+      run: async (bin, args) =>
+        bin === 'xcrun' ? { code: 0, output: list } : { code: 0, output: `0\t${args[1]}\n` }
+    });
+    assert.deepEqual(
+      use.map((u) => u.label),
+      ['iOS 27.1 simulator runtime, last used 2026-10-31']
+    );
+    // Off a Mac there is no simctl to ask.
+    const linux = await diskUse({ ...io, platform: 'linux', run: async () => ({ code: 0, output: list }) });
+    assert.deepEqual(linux, []);
   });
 });

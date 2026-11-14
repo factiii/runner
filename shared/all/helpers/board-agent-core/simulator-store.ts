@@ -5,7 +5,11 @@
 
 import { z } from 'zod';
 
-import type { SimulatorDevice, SimulatorInput } from '../../domains/electron';
+import type {
+  SimulatorCatalog,
+  SimulatorDevice,
+  SimulatorInput
+} from '../../domains/electron';
 import type { ExecTarget } from './exec';
 
 type Helper = 'simstream' | 'simhid';
@@ -102,6 +106,108 @@ const simulatorAttachSchema = z.object({
     .transform((n) => Math.min(20_000_000, Math.max(100_000, n)))
 });
 
+/** simctl takes these as argv, never through a shell; the bounds keep a
+ *  device name readable and an identifier the shape simctl writes. */
+const simulatorCreateSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  deviceTypeId: z
+    .string()
+    .regex(/^com\.apple\.CoreSimulator\.SimDeviceType\.[\w.-]+$/),
+  runtimeId: z
+    .string()
+    .regex(/^com\.apple\.CoreSimulator\.SimRuntime\.iOS-[\w-]+$/)
+});
+
+const IOS_RUNTIME = /\.SimRuntime\.iOS-/;
+/** "iPhone 18 Pro", not "iPhone Air": a model number right after the family. */
+const NUMBERED = /^iP(hone|ad) \d/;
+
+/** `simctl list devices -j`: iOS devices only (the panel's HID and buttons are
+ *  a phone's and a tablet's), booted first, then by name. */
+export function parseDevices(out: string): SimulatorDevice[] {
+  let parsed: {
+    devices?: Record<string, { udid: string; name: string; state: string }[]>;
+  };
+  try {
+    parsed = JSON.parse(out) as typeof parsed;
+  } catch {
+    return [];
+  }
+
+  const devices: SimulatorDevice[] = [];
+  for (const [runtime, entries] of Object.entries(parsed.devices ?? {})) {
+    if (!IOS_RUNTIME.test(runtime)) continue;
+    for (const entry of entries) {
+      devices.push({
+        udid: entry.udid,
+        name: entry.name,
+        // "com.apple.CoreSimulator.SimRuntime.iOS-26-4" reads badly in a 190px
+        // panel; the tail is the part anyone recognises.
+        runtime: runtime.split('.').pop()?.replace(/-/g, ' ') ?? runtime,
+        booted: entry.state === 'Booted'
+      });
+    }
+  }
+  return devices.sort(
+    (a, b) =>
+      Number(b.booted) - Number(a.booted) || a.name.localeCompare(b.name)
+  );
+}
+
+/** `simctl list runtimes -j` and `devicetypes -j`, as the catalog: iOS
+ *  runtimes newest first, each with the iPhones and iPads it supports. */
+export function parseCatalog(
+  runtimesOut: string,
+  typesOut: string
+): SimulatorCatalog {
+  type Type = { identifier: string; name: string; productFamily?: string };
+  let runtimes: {
+    runtimes?: {
+      identifier: string;
+      name: string;
+      version: string;
+      isAvailable?: boolean;
+      supportedDeviceTypes?: Type[];
+    }[];
+  };
+  let types: { devicetypes?: Type[] };
+  try {
+    runtimes = JSON.parse(runtimesOut) as typeof runtimes;
+    types = JSON.parse(typesOut) as typeof types;
+  } catch {
+    return { runtimes: [] };
+  }
+  const phoneOrTablet = (t: Type) =>
+    t.productFamily === 'iPhone' || t.productFamily === 'iPad';
+  const allTypes = (types.devicetypes ?? []).filter(phoneOrTablet);
+
+  return {
+    runtimes: (runtimes.runtimes ?? [])
+      .filter((r) => r.isAvailable !== false && IOS_RUNTIME.test(r.identifier))
+      .sort((a, b) =>
+        b.version.localeCompare(a.version, undefined, { numeric: true })
+      )
+      .map((r) => ({
+        id: r.identifier,
+        name: r.name,
+        // Older simctl leaves supportedDeviceTypes out: offer every phone and
+        // tablet, and let create report a pairing it refuses.
+        deviceTypes: (r.supportedDeviceTypes ?? allTypes)
+          .filter(phoneOrTablet)
+          // simctl's order is no order: iPhones before iPads, numbered models
+          // newest first, then the named ones (Air, SE).
+          .sort(
+            (a, b) =>
+              Number(b.productFamily === 'iPhone') -
+                Number(a.productFamily === 'iPhone') ||
+              Number(NUMBERED.test(b.name)) - Number(NUMBERED.test(a.name)) ||
+              b.name.localeCompare(a.name, undefined, { numeric: true })
+          )
+          .map((t) => ({ id: t.identifier, name: t.name }))
+      }))
+  };
+}
+
 export class SimulatorStore {
   private video: { proc: ChildLike; options: SimulatorAttachOptions } | null =
     null;
@@ -127,7 +233,8 @@ export class SimulatorStore {
     private nativeDir: string
   ) {}
 
-  /** Running simulators only — a shutdown one has no display to attach to.
+  /** Every iOS simulator on the Mac, booted ones first. A shutdown one has no
+   *  display to attach to, but listing it is how the panel boots it.
    *
    *  `run`, not `sh`: the watcher asks this every few seconds while a session
    *  window is open, and `sh` sources a whole login profile per call. */
@@ -135,37 +242,54 @@ export class SimulatorStore {
     const out = await this.target()
       .run(['xcrun', 'simctl', 'list', 'devices', 'available', '-j'])
       .catch(() => '');
-    if (!out.trim()) return [];
-
-    let parsed: {
-      devices?: Record<string, { udid: string; name: string; state: string }[]>;
-    };
-    try {
-      parsed = JSON.parse(out) as typeof parsed;
-    } catch {
-      return [];
-    }
-
-    const devices: SimulatorDevice[] = [];
-    for (const [runtime, entries] of Object.entries(parsed.devices ?? {})) {
-      for (const entry of entries) {
-        if (entry.state !== 'Booted') continue;
-        devices.push({
-          udid: entry.udid,
-          name: entry.name,
-          // "com.apple.CoreSimulator.SimRuntime.iOS-26-4" reads badly in a 190px
-          // panel; the tail is the part anyone recognises.
-          runtime: runtime.split('.').pop()?.replace(/-/g, ' ') ?? runtime
-        });
-      }
-    }
-    return devices.sort((a, b) => a.name.localeCompare(b.name));
+    return parseDevices(out);
   }
 
   /** A set rather than "the first one": with two up, picking by sort order
    *  makes the auto-open land on an arbitrary device and never fire again. */
   async status(): Promise<{ booted: string[] }> {
-    return { booted: (await this.list()).map((d) => d.udid) };
+    return {
+      booted: (await this.list()).filter((d) => d.booted).map((d) => d.udid)
+    };
+  }
+
+  /** `bootstatus -b` boots the device if it is down and returns once it has
+   *  finished, so the panel's attach that follows finds a display. On one
+   *  already booted it returns at once. */
+  async boot(raw: { udid: string }): Promise<void> {
+    const { udid: id } = z.object({ udid }).parse(raw);
+    await this.target().run(['xcrun', 'simctl', 'bootstatus', id, '-b']);
+  }
+
+  /** The installed iOS runtimes and the device types each can run. */
+  async catalog(): Promise<SimulatorCatalog> {
+    const [runtimes, types] = await Promise.all([
+      this.target().run(['xcrun', 'simctl', 'list', 'runtimes', 'available', '-j']),
+      this.target().run(['xcrun', 'simctl', 'list', 'devicetypes', '-j'])
+    ]);
+    return parseCatalog(runtimes, types);
+  }
+
+  /** Make a simulator from a runtime and device type the catalog offered. */
+  async create(raw: {
+    name: string;
+    deviceTypeId: string;
+    runtimeId: string;
+  }): Promise<SimulatorDevice> {
+    const p = simulatorCreateSchema.parse(raw);
+    const made = (
+      await this.target().run([
+        'xcrun',
+        'simctl',
+        'create',
+        p.name,
+        p.deviceTypeId,
+        p.runtimeId
+      ])
+    ).trim();
+    const device = (await this.list()).find((d) => d.udid === made);
+    if (!device) throw new Error('The simulator was made but is not listed');
+    return device;
   }
 
   /** Start pushing frames. Idempotent for the same options; different ones

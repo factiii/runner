@@ -17,11 +17,15 @@ import type { VouchedScope } from '@shared/all/helpers/board-agent-core/runner-a
 import type { AskEngines } from './ask';
 import type { CategorizeEngines } from './categorize';
 import { createDaemonVault, type DaemonVault, mergePages, mergeSearches } from './daemonVault';
+import { openVaultDb } from './db';
 import type { Embedder } from './embedder';
 import { storePaths, VAULT_ENGINE_PACKAGE } from './engine';
+import { FsObjectStore, RUNNER_STORAGE_TICKET_SCHEME } from '@shared/vault-core/objectStore';
+import { RUNNER_CLOUD_KEY_FILE } from './runnerCloudKey';
+import { RunnerVault } from './service';
 
 // The runner's two stores (.specs/runner-vault.md "Two stores") as the daemon
-// holds them: the Vault and Runner Storage, each its own database process and
+// holds them: the Vault and Runner Cloud, each its own database process and
 // files folder, one API. A row lands in the store named, a list and a search
 // with none answer from both with each row tagged, and Ask reads the Vault
 // with Local AI only.
@@ -51,7 +55,7 @@ const engines: AskEngines = {
   },
   cli: async (_engine, _prompt, mcp) => {
     cliTurns.push(mcp.tools);
-    return '<p>From Runner Storage.</p>';
+    return '<p>From Runner Cloud.</p>';
   }
 };
 const categorizeEngines: CategorizeEngines = {
@@ -118,11 +122,11 @@ describe('a runner with only its Vault', () => {
     assert.deepEqual(models.cli, ['claude', 'codex']);
     await assert.rejects(
       call('vaultAsk', { engine: 'claude', question: 'refund?', store: 'runner' }),
-      /no Runner Storage yet, so Claude and Codex have nothing to read/
+      /no Runner Cloud yet, so Claude and Codex have nothing to read/
     );
     // A read does not make it.
     assert.deepEqual(await call('vaultFiles', { store: 'runner' }), { files: [], more: false });
-    assert.equal(fs.existsSync(storePaths(runnerDir, 'runner').db), false);
+    assert.equal(fs.existsSync(path.dirname(storePaths(runnerDir, 'runner').db)), false);
     const status = (await call('vaultStatus', {})) as RunnerVaultStatus;
     assert.equal(status.runnerStorage, null);
   });
@@ -160,7 +164,11 @@ describe('a runner with both stores', () => {
   it('lands each row in the store named, in its own folder and database', async () => {
     assert.equal(inVault.store, 'vault');
     assert.equal(inRunner.store, 'runner');
-    assert.ok(fs.existsSync(storePaths(runnerDir, 'runner').db));
+    // Sealed from its first file (runnerCloudKey.ts): a key file, the
+    // encrypted dump, no plaintext database.
+    const runnerRoot = path.dirname(storePaths(runnerDir, 'runner').db);
+    assert.ok(fs.existsSync(path.join(runnerRoot, 'keys.json')));
+    assert.equal(fs.existsSync(storePaths(runnerDir, 'runner').db), false);
     const vaultOnly = await call('vaultFiles', { store: 'vault' });
     assert.ok(vaultOnly.files.every((f) => f.store === 'vault'));
     assert.ok(vaultOnly.files.some((f) => f.id === inVault.id));
@@ -170,7 +178,7 @@ describe('a runner with both stores', () => {
       runnerOnly.files.map((f) => [f.id, f.store]),
       [[inRunner.id, 'runner']]
     );
-    // The Vault's file is not in Runner Storage's folder.
+    // The Vault's file is not in Runner Cloud's folder.
     const runnerObjects = fs.readdirSync(storePaths(runnerDir, 'runner').objects);
     const vaultObjects = fs.readdirSync(storePaths(runnerDir, 'vault').objects);
     assert.equal(runnerObjects.filter((f) => !f.endsWith('.json')).length, 1);
@@ -207,7 +215,7 @@ describe('a runner with both stores', () => {
     assert.deepEqual(runnerHits.hits.map((h) => h.id), [inRunner.id]);
   });
 
-  it('counts Runner Storage beside the Vault, and Ask knows it is there', async () => {
+  it('counts Runner Cloud beside the Vault, and Ask knows it is there', async () => {
     const status = (await call('vaultStatus', {})) as RunnerVaultStatus;
     assert.equal(status.files, 2);
     assert.deepEqual(status.runnerStorage, { files: 1, bytes: 24 });
@@ -224,11 +232,11 @@ describe('a runner with both stores', () => {
     assert.deepEqual(await call('vaultDelete', { uploadIds: [extra.id] }), { deleted: 1, kept: 0 });
   });
 
-  it('lets Claude and Codex ask about Runner Storage, never the Vault', async () => {
+  it('lets Claude and Codex ask about Runner Cloud, never the Vault', async () => {
     for (const engine of ['claude', 'codex']) {
       const state = await askUntilDone({ engine, question: 'policy?', store: 'runner' });
       assert.equal(state.error, null);
-      assert.equal(state.text, '<p>From Runner Storage.</p>');
+      assert.equal(state.text, '<p>From Runner Cloud.</p>');
     }
     assert.equal(cliTurns.length, 2);
     await assert.rejects(
@@ -293,8 +301,172 @@ describe('a runner with both stores', () => {
     );
   });
 
-  it('keeps out of Runner Storage anyone the Vault keeps out', async () => {
+  it('keeps out of Runner Cloud anyone the Vault keeps out', async () => {
     await assert.rejects(call('vaultFiles', { store: 'runner' }, STRANGER), /not shared with you/);
+  });
+});
+
+describe('who the owner lets in', () => {
+  // Runner Cloud only, never the Vault (.specs/vault.md rule 2).
+  it('reaches Runner Cloud only, with no store named or with one', async () => {
+    const vaultFile = (await call('vaultFiles', { store: 'vault' })).files[0];
+    assert.ok(vaultFile);
+    const status = await call('vaultShareSet', { memberId: '3', shared: true });
+    // The whole status, as a status read gives it: the Vault's counts, and
+    // who is let into Runner Cloud.
+    assert.deepEqual(status.members, ['3']);
+    assert.ok(status.runnerStorage);
+    assert.deepEqual(daemon.members(), ['3']);
+    assert.equal(daemon.isMember('3'), true);
+    assert.deepEqual((await call('vaultStatus', {})).members, ['3']);
+
+    const { files } = await call('vaultFiles', {}, STRANGER);
+    assert.ok(files.length > 0);
+    assert.ok(files.every((f) => f.store === 'runner'));
+    const { hits } = await call('vaultSearch', { query: 'policy' }, STRANGER);
+    assert.deepEqual([...new Set(hits.map((h) => h.store))], ['runner']);
+    const theirs = (await call('vaultStatus', {}, STRANGER)) as RunnerVaultStatus;
+    assert.equal(theirs.role, 'member');
+    assert.deepEqual(theirs.members, []);
+
+    // The Vault, named or by id, is never theirs.
+    for (const [action, payload] of [
+      ['vaultFiles', { store: 'vault' }],
+      ['vaultStatus', { store: 'vault' }],
+      ['vaultSearch', { query: 'policy', store: 'vault' }],
+      ['vaultDownload', { uploadId: vaultFile.id, store: 'vault' }],
+      ['vaultUploadStart', { name: 'x.txt', size: 1, contentType: 'text/plain', store: 'vault' }],
+      ['vaultAskModels', { store: 'vault' }]
+    ] as const) {
+      await assert.rejects(daemon.handle(action, payload, STRANGER), /a Vault is never shared/, action);
+    }
+    await assert.rejects(call('vaultDownload', { uploadId: vaultFile.id }, STRANGER), /not in this vault/);
+
+    // A member's file with no store named lands in Runner Cloud.
+    const bytes = Buffer.from('from a friend');
+    const { ticket } = await call(
+      'vaultUploadStart',
+      { name: 'Friend/hello.txt', size: bytes.length, contentType: 'text/plain' },
+      STRANGER
+    );
+    assert.match(ticket, /^runner-storage:/);
+    const { file } = await call('vaultWrite', { ticket, offset: 0, content: bytes.toString('base64'), last: true }, STRANGER);
+    assert.equal(file?.store, 'runner');
+    // The owner sees it, but cannot move it: it would be copied into the
+    // owner's Vault and kept where it is, its delete being its adder's.
+    const vaultBefore = (await call('vaultFiles', { store: 'vault' })).files.length;
+    const refused = await call('vaultMove', { uploadIds: [file!.id], to: 'vault' });
+    assert.deepEqual(refused.moved, []);
+    assert.match(refused.failed[0]?.error ?? '', /Only the person who added it/);
+    assert.equal((await call('vaultFiles', { store: 'vault' })).files.length, vaultBefore);
+    assert.ok((await call('vaultFiles', { store: 'runner' })).files.some((f) => f.id === file!.id));
+
+    // Only the owner changes who is in.
+    await assert.rejects(call('vaultShareSet', { memberId: '4', shared: true }, STRANGER), /Only the owner/);
+    await call('vaultShareSet', { memberId: '3', shared: false });
+    assert.deepEqual(daemon.members(), []);
+    await assert.rejects(call('vaultFiles', {}, STRANGER), /not shared with you/);
+  });
+});
+
+describe('a runner from before Runner Cloud was encrypted and the Vault owner only', () => {
+  const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-stores-old-'));
+  const engineDir = path.join(oldDir, 'parts', 'vault', 'engine');
+  const runnerRoot = path.join(oldDir, 'parts', 'runner-storage');
+  let old: DaemonVault;
+  let reported: string[][] = [];
+
+  /** Every byte under a folder, to look for plaintext. */
+  const bytesUnder = (dir: string): Buffer =>
+    Buffer.concat(
+      fs.readdirSync(dir, { withFileTypes: true }).map((entry) => {
+        const at = path.join(dir, entry.name);
+        return entry.isDirectory() ? bytesUnder(at) : fs.readFileSync(at);
+      })
+    );
+
+  before(async () => {
+    const modules = path.join(engineDir, 'node_modules');
+    fs.mkdirSync(path.join(modules, '@electric-sql'), { recursive: true });
+    fs.symlinkSync(path.join(ROOT_MODULES, VAULT_ENGINE_PACKAGE), path.join(modules, VAULT_ENGINE_PACKAGE));
+    // The Vault's share table held who was let in.
+    const vaultDb = await openVaultDb({ dataDir: storePaths(oldDir, 'vault').db, engineDir });
+    await vaultDb.batch([
+      {
+        sql: `INSERT INTO "VaultShare" ("ownerId", "memberId", "status", "acceptedAt")
+              VALUES (1, 3, 'ACCEPTED', CURRENT_TIMESTAMP)`
+      }
+    ]);
+    await vaultDb.close();
+    // Runner Cloud in the clear, with one file.
+    const plainDb = await openVaultDb({ dataDir: storePaths(oldDir, 'runner').db, engineDir });
+    const plain = new RunnerVault(
+      plainDb,
+      new FsObjectStore(storePaths(oldDir, 'runner').objects, Date.now, RUNNER_STORAGE_TICKET_SCHEME),
+      '1',
+      () => undefined,
+      null,
+      null,
+      null,
+      null,
+      { storeName: 'runner' }
+    );
+    const bytes = Buffer.from('OLD-CLOUD-MARKER in the clear');
+    const { ticket } = (await plain.handle(
+      'vaultUploadStart',
+      { name: 'Old/plain.txt', size: bytes.length, contentType: 'text/plain' },
+      OWNER
+    )) as { ticket: string };
+    await plain.handle('vaultWrite', { ticket, offset: 0, content: bytes.toString('base64'), last: true }, OWNER);
+    await plainDb.close();
+    assert.equal(bytesUnder(runnerRoot).includes(Buffer.from('OLD-CLOUD-MARKER')), true);
+
+    old = createDaemonVault(oldDir, '1', (members) => reported.push(members), embedder, engines, categorizeEngines);
+    await old.load();
+  });
+  after(async () => {
+    await old.close();
+    fs.rmSync(oldDir, { recursive: true, force: true });
+  });
+
+  it('encrypts Runner Cloud in place on the first start, under a key the runner keeps', async () => {
+    assert.ok(fs.existsSync(path.join(runnerRoot, 'keys.json')));
+    assert.equal(fs.existsSync(path.join(runnerRoot, 'db')), false);
+    assert.equal(bytesUnder(runnerRoot).includes(Buffer.from('OLD-CLOUD-MARKER')), false);
+    // Off the runner's own folder the key is the 0600 file, never a Keychain.
+    const keyFile = path.join(oldDir, RUNNER_CLOUD_KEY_FILE);
+    assert.ok(fs.existsSync(keyFile));
+    if (process.platform !== 'win32') assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600);
+    // Nothing lost: the file is listed and reads back.
+    const { files } = (await old.handle('vaultFiles', { store: 'runner' }, OWNER)) as BoardAgentActionMap['vaultFiles']['result'];
+    assert.deepEqual(files.map((f) => f.name), ['Old/plain.txt']);
+    const head = (await old.handle('vaultDownload', { uploadId: files[0]!.id }, OWNER)) as BoardAgentActionMap['vaultDownload']['result'];
+    const read = (await old.handle('vaultRead', { ticket: head.ticket, offset: 0, length: 64 }, OWNER)) as BoardAgentActionMap['vaultRead']['result'];
+    assert.equal(Buffer.from(read.content, 'base64').toString(), 'OLD-CLOUD-MARKER in the clear');
+  });
+
+  it('moves who was let in out of the Vault, into Runner Cloud', async () => {
+    assert.deepEqual(old.members(), ['3']);
+    assert.deepEqual(reported.at(-1), ['3']);
+    const status = (await old.handle('vaultStatus', {}, OWNER)) as RunnerVaultStatus;
+    assert.deepEqual(status.members, ['3']);
+    // They read Runner Cloud, and the Vault refuses them.
+    const theirs = (await old.handle('vaultFiles', {}, STRANGER)) as BoardAgentActionMap['vaultFiles']['result'];
+    assert.deepEqual(theirs.files.map((f) => f.store), ['runner']);
+    await assert.rejects(old.handle('vaultFiles', { store: 'vault' }, STRANGER), /a Vault is never shared/);
+    // The Vault's own table is empty now.
+    await old.close();
+    const vaultDb = await openVaultDb({ dataDir: storePaths(oldDir, 'vault').db, engineDir });
+    try {
+      assert.deepEqual(await vaultDb.query('SELECT * FROM "VaultShare"'), []);
+    } finally {
+      await vaultDb.close();
+    }
+    // A restart reads the list from Runner Cloud, sealed.
+    reported = [];
+    old = createDaemonVault(oldDir, '1', (members) => reported.push(members), embedder, engines, categorizeEngines);
+    await old.load();
+    assert.deepEqual(old.members(), ['3']);
   });
 });
 

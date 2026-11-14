@@ -7,7 +7,7 @@ import { after, before, describe, it } from 'node:test';
 import type { RunnerVaultFile } from '@shared/all/domains/electron';
 
 import { lazyVaultDb, migrate, openVaultDb, type VaultDb } from './db';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 
 // The Vault end to end on a real database: PGlite in its own process, on the
@@ -25,7 +25,11 @@ const reported: string[][] = [];
 before(async () => {
   db = await openVaultDb({ dataDir: 'memory://', engineDir: ENGINE });
   const store = new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-vault-svc-')));
-  vault = new RunnerVault(db, store, '1', (m) => reported.push(m));
+  // Runner Cloud: the store the owner shares. The Vault is the same code,
+  // the owner's only ('the Vault' below).
+  vault = new RunnerVault(db, store, '1', (m) => reported.push(m), null, null, null, null, {
+    storeName: 'runner'
+  });
 });
 after(async () => {
   await db.close();
@@ -189,6 +193,40 @@ describe('runner vault', () => {
   });
 });
 
+describe('the Vault', () => {
+  // Owner only, never shared (.specs/vault.md rule 2): the same code as
+  // Runner Cloud, but nobody else is let in, whatever its table holds.
+  let own: RunnerVault;
+  before(() => {
+    const store = new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-vault-own-')));
+    own = new RunnerVault(db, store, '1', () => undefined);
+  });
+
+  it('lets nobody in, and refuses to share', async () => {
+    await assert.rejects(
+      own.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER),
+      /Your Vault is never shared/
+    );
+    await assert.rejects(own.letIn(['2']), /Your Vault is never shared/);
+    const status = (await own.handle('vaultStatus', {}, OWNER)) as { members: string[] };
+    assert.deepEqual(status.members, []);
+  });
+
+  it('keeps out a member even with a row from before rule 2 in its table', async () => {
+    await db.batch([
+      {
+        sql: `INSERT INTO "VaultShare" ("ownerId", "memberId", "status", "acceptedAt")
+              VALUES (1, 2, 'ACCEPTED', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING`
+      }
+    ]);
+    assert.deepEqual(await own.shareRows(), ['2']);
+    assert.deepEqual([...(await own.memberIds())], []);
+    await assert.rejects(own.handle('vaultFiles', {}, PEER), /a Vault is never shared/);
+    await own.clearShares();
+    assert.deepEqual(await own.shareRows(), []);
+  });
+});
+
 describe('lazyVaultDb', () => {
   it('opens on the first call, shares one start, and closes when idle', async () => {
     let opens = 0;
@@ -272,6 +310,19 @@ describe('lazyVaultDb', () => {
     await lazy.query('d');
     assert.equal(made.length, 1);
     await lazy.close();
+  });
+
+  it('never opens again once closed, even for a call that arrived during the close', async () => {
+    const { made, openFake } = fakes();
+    const lazy = lazyVaultDb(openFake, 1000, () => new Error('locked'));
+    await lazy.query('a');
+    const closing = lazy.close();
+    await assert.rejects(lazy.query('b'), /locked/);
+    await closing;
+    await assert.rejects(lazy.query('c'), /locked/);
+    assert.equal(made.length, 1);
+    assert.equal(made[0].alive, false);
+    assert.equal(lazy.isOpen(), false);
   });
 
   it('a process that died takes its open transactions with it', async () => {

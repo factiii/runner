@@ -292,7 +292,8 @@ function claudeArgs(opts: ArgOptions): string[] {
     args.push('--append-system-prompt', opts.appendSystemPrompt);
   if (opts.model) args.push('--model', opts.model);
   if (opts.includePartialMessages) args.push('--include-partial-messages');
-  if (opts.mcpConfig) args.push('--mcp-config', opts.mcpConfig, '--strict-mcp-config');
+  if (opts.mcpConfig)
+    args.push('--mcp-config', opts.mcpConfig, '--strict-mcp-config');
   // Images only fit in a structured message, so stdin switches format.
   if (opts.images?.length) args.push('--input-format', 'stream-json');
   if (opts.effort) args.push('--effort', opts.effort);
@@ -321,12 +322,18 @@ export function codexArgs(
   const args = ['exec'];
   // Codex's OS sandbox is the only enforcement: 'plan' and 'dontAsk' read,
   // 'auto' writes in the workspace (plus the network and the runner's own
-  // folders, codex-permissions.ts), anything else runs open (deploy's
-  // guardrails are structural). Every flag that is exec's own goes before
-  // `resume`: `codex exec resume` rejects `--sandbox`, so a resumed run with
-  // them after it failed outright.
+  // folders, codex-permissions.ts), anything else runs open: card AI's
+  // phases and board chat pass no mode, a release and a Full access chat
+  // pass bypassPermissions (deploy's guardrails are structural). Who started
+  // the run never changes this: a member's run is bypassed like the owner's
+  // (Jon 2026-11-11, q43), after the one-time notice the engine holds it
+  // for (validators/codexNotice.ts). Every flag that is exec's own goes
+  // before `resume`: `codex exec resume` rejects `--sandbox`, so a resumed
+  // run with them after it failed outright.
   if (opts.permissionMode === 'plan' || opts.permissionMode === 'dontAsk') {
-    args.push(...codexPermissionArgs({ level: 'read-only', interactive: false }));
+    args.push(
+      ...codexPermissionArgs({ level: 'read-only', interactive: false })
+    );
   } else if (opts.permissionMode === 'auto') {
     args.push(
       ...codexPermissionArgs({ level: 'standard', interactive: false, paths })
@@ -347,8 +354,15 @@ export function codexArgs(
 }
 
 // Codex has no system-prompt flag; the phase instructions ride ahead of the
-// task in the one prompt.
-function codexPrompt(opts: ArgOptions): string {
+// task in the one prompt. On `exec resume` too, whenever the caller passes
+// them: card AI sends its system prompt with every phase, as Claude gets
+// `--append-system-prompt` on every resumed phase. A caller that leaves it
+// off on resume (a release's later turns, host-run.ts) relies on the first
+// turn's copy, which Codex keeps in the thread.
+/** Exported for its test (codex-parity.test.ts). */
+export function codexPrompt(
+  opts: Pick<ArgOptions, 'appendSystemPrompt' | 'prompt'>
+): string {
   return opts.appendSystemPrompt
     ? `${opts.appendSystemPrompt}\n\n---\n\n${opts.prompt}`
     : opts.prompt;

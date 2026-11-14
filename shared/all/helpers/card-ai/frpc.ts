@@ -7,15 +7,23 @@ import { SECRETS_BIN } from '../board-agent-core/plugin';
 import { secretsSocketPath } from '../board-agent-core/secrets-bridge';
 import { frpcExposeScript, frpcUnexposeScript } from './scripts';
 
-const FRP_SERVER_ADDR = 'dev.factiii.com';
-const FRP_SERVER_PORT = 7443;
-const FRP_DOMAIN_SUFFIX = 'dev.factiii.com';
+// frps on the runner Mac, reached through the Cloudflare Tunnel
+// "factiii-previews" (card 60e0d5d8, docs/server/frp-auth.md): the control
+// connection is a WebSocket over TLS to frp.factiii.org:443, which Cloudflare
+// terminates and cloudflared hands to frps's bind port, so the home router
+// forwards no port. Previews are https://<name>.factiii.org: not under
+// factiii.com, so a preview never receives a visitor's Factiii sign-in
+// cookie. (Before: raw TCP to dev.factiii.com:7443 and *.dev.factiii.com.)
+const FRP_SERVER_ADDR = 'frp.factiii.org';
+const FRP_SERVER_PORT = 443;
+const FRP_PROTOCOL = 'wss';
+const FRP_DOMAIN_SUFFIX = 'factiii.org';
 /** Hex characters of the task id's hash in a preview's host. The frps is
  *  shared by every runner, so the tag keeps two `app` tunnels apart; 6 hex is
  *  16.7M values, ample for the tunnels live at once. */
 const PREVIEW_TAG_LENGTH = 6;
 
-/** The short, stable tag a task's previews carry: `app-<tag>.dev.factiii.com`
+/** The short, stable tag a task's previews carry: `app-<tag>.factiii.org`
  *  rather than the whole task id (`bare-mvy10lba-fox5w6-1793549419772-app`). */
 export function previewTag(taskId: string): string {
   return createHash('sha256').update(taskId).digest('hex').slice(0, PREVIEW_TAG_LENGTH);
@@ -74,7 +82,9 @@ export const EXPOSE_SKILL_MD = [
   FENCE,
   '',
   'It prints the public URL and returns straight away - the tunnel runs in the',
-  'background and lives until the session ends or you stop it.',
+  'background and keeps running after the session ends, renewing its own',
+  'credential, until you stop it with `factiii-unexpose <name>` or the machine',
+  'restarts.',
   '',
   '- `<name>` may hold letters, numbers and dashes only.',
   '- Re-running it with the same name replaces that tunnel rather than opening a',
@@ -108,6 +118,7 @@ export function frpcEnvLines(taskId: string): string[] {
   return [
     `FACTIII_FRP_SERVER=${FRP_SERVER_ADDR}`,
     `FACTIII_FRP_PORT=${FRP_SERVER_PORT}`,
+    `FACTIII_FRP_PROTOCOL=${FRP_PROTOCOL}`,
     `FACTIII_FRP_DOMAIN=${FRP_DOMAIN_SUFFIX}`,
     `FACTIII_TASK_ID=${taskId}`,
     `FACTIII_FRP_TAG=${previewTag(taskId)}`
@@ -212,8 +223,8 @@ export async function listLiveTunnels(
     `  port=$(sed -n 's/^localPort = *//p' "$name.toml" | head -1)`,
     `  sub=$(sed -n 's/^subdomain = *//p' "$name.toml" | tr -d '"' | head -1)`,
     '  [ -n "$port" ] && [ -n "$sub" ] || continue',
-    // https, matching what factiii-expose prints: the runner Mac's nginx
-    // terminates TLS for *.dev.factiii.com. Showing http:// here made the
+    // https, matching what factiii-expose prints: Cloudflare terminates TLS
+    // for *.factiii.org. Showing http:// here made the
     // Ports panel disagree with the URL the agent had just handed the user.
     '  owner=$(cat "$name.owner" 2>/dev/null || true)',
     `  echo "$name${ROW_SEP}$port${ROW_SEP}https://$sub.$FACTIII_FRP_DOMAIN${ROW_SEP}$owner"`,
@@ -221,4 +232,32 @@ export async function listLiveTunnels(
   ].join('\n');
   const out = await target.run(['sh', '-c', script]).catch(() => '');
   return parseTunnelRows(out).sort((a, b) => a.port - b.port);
+}
+
+/**
+ * Is the tunnel `name` up, and is `nonce` its current renewal nonce? What a
+ * renewal handle (exec.ts tunnelRenewToken) is good for: `factiii-expose`
+ * writes `<name>.nonce` beside the keeper's `<name>.pid`, a replaced tunnel
+ * gets a new one, and `factiii-unexpose` removes both. Neither file holds a
+ * credential: the nonce alone opens nothing without the handle's HMAC.
+ */
+export async function tunnelHasNonce(
+  target: ExecTarget,
+  name: string,
+  nonce: string
+): Promise<boolean> {
+  // Both go into the shell below, so both are checked for shape first.
+  if (!/^[a-zA-Z0-9-]+$/.test(name) || !/^[0-9a-f]+$/.test(nonce)) {
+    return false;
+  }
+  const p = frpcPaths(target);
+  const script = [
+    `cd '${p.runDir}' 2>/dev/null || exit 0`,
+    `[ "$(cat '${name}.nonce' 2>/dev/null)" = '${nonce}' ] || exit 0`,
+    `pid=$(cat '${name}.pid' 2>/dev/null)`,
+    '[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo live',
+    'exit 0'
+  ].join('\n');
+  const out = await target.run(['sh', '-c', script]).catch(() => '');
+  return out.trim() === 'live';
 }

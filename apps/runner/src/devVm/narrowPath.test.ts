@@ -6,6 +6,12 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
 import {
+  secretsSocketPath,
+  startSecretsBridge
+} from '@shared/all/helpers/board-agent-core/secrets-bridge';
+
+import {
+  askBridgeWhoami,
   type NarrowPath,
   REFUSED_RUN,
   REFUSED_TOKEN,
@@ -65,7 +71,7 @@ describe('narrow path', () => {
     narrow = await startNarrowPath({
       listenPath: path.join(dir, 'n.sock'),
       upstreamPath: upPath,
-      spaceToken: () => TOKEN,
+      checkToken: async (token) => token === TOKEN,
       simctl: async (args) => {
         simCalls.push(args);
         return { code: 0, output: 'ok', png: args[0] === 'io' ? Buffer.from('PNG') : undefined };
@@ -180,6 +186,33 @@ describe('simctlArgs', () => {
       [1, 2]
     ]) {
       assert.ok(!Array.isArray(simctlArgs(args)), JSON.stringify(args));
+    }
+  });
+});
+
+describe('narrow path: the token check asks the bridge', () => {
+  it('takes a token the bridge knows as a live session, and nothing else', async () => {
+    const spaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'npw-'));
+    const bridge = await startSecretsBridge({
+      spaceDir,
+      handlers: {
+        run: async () => ({ code: 0, output: '' }),
+        list: async () => [],
+        whoami: async (token) => {
+          if (token !== TOKEN) throw new Error('not a live session');
+        }
+      }
+    });
+    try {
+      const sock = secretsSocketPath(spaceDir);
+      assert.equal(await askBridgeWhoami(sock, TOKEN), true);
+      assert.equal(await askBridgeWhoami(sock, 'nope'), false);
+      assert.equal(await askBridgeWhoami(sock, ''), false);
+      // No bridge at all: refused, not hung.
+      assert.equal(await askBridgeWhoami(path.join(spaceDir, 'gone.sock'), TOKEN), false);
+    } finally {
+      await bridge.close();
+      await fs.rm(spaceDir, { recursive: true, force: true });
     }
   });
 });

@@ -50,6 +50,9 @@ type Clear = { bin: string; args: string[] } | { remove: string };
 type Cache = {
   id: string;
   title: string;
+  /** Where it is, when it is one folder: `shown`, for What's using space
+   *  to offer it on the folder that holds it. */
+  dir?: string;
   /** `pgrep -f` pattern of what uses it while it runs: a clear then waits,
    *  so it never pulls files from under a build or a running program. */
   inUse?: { pattern: string; reason: string };
@@ -61,7 +64,8 @@ type Cache = {
   clear: Clear;
 };
 
-const tilde = (home: string, p: string) =>
+/** A path as the owner reads it: under the home folder, from `~`. */
+export const tilde = (home: string, p: string) =>
   p === home || p.startsWith(`${home}${path.sep}`) ? `~${p.slice(home.length)}` : p;
 
 const exists = (p: string) => {
@@ -101,6 +105,7 @@ async function findCaches(io: DiskIo): Promise<Cache[]> {
       id,
       title,
       shown: tilde(io.home, dir),
+      dir: tilde(io.home, dir),
       bytes: await io.size(dir),
       upTo,
       clear,
@@ -182,7 +187,8 @@ export async function cacheItems(io: DiskIo): Promise<RunnerCleanupItem[]> {
     path: c.shown,
     bytes: c.bytes,
     kind: 'cache' as const,
-    ...(c.upTo ? { upTo: true } : {})
+    ...(c.upTo ? { upTo: true } : {}),
+    ...(c.dir ? { dir: c.dir } : {})
   }));
 }
 
@@ -308,9 +314,45 @@ export function duBytes(output: string, dir: string): number {
   return 0;
 }
 
-/** The biggest folders under the home folder, biggest first. A read only;
- *  slow on a full disk (`du` walks every file), so it rides the dry run,
- *  which only the owner's Free up space asks for. */
+const SIM_RUNTIME_HINT =
+  'Xcode > Settings > Components removes a runtime you no longer test on.';
+const SIMCTL_TIMEOUT_MS = 30_000;
+
+/** `xcrun simctl runtime list -j`: each simulator runtime macOS keeps
+ *  outside the home folder (several GB each), as a disk use. A reading;
+ *  nothing here deletes a runtime. */
+export function simRuntimeUses(json: string): RunnerDiskUse[] {
+  let list: unknown;
+  try {
+    list = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!list || typeof list !== 'object') return [];
+  const uses: RunnerDiskUse[] = [];
+  for (const raw of Object.values(list as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.sizeBytes !== 'number' || r.sizeBytes < MIN_USE_BYTES) continue;
+    const platform =
+      /SimRuntime\.([A-Za-z]+)-/.exec(String(r.runtimeIdentifier ?? ''))?.[1] ?? 'Simulator';
+    const version = typeof r.version === 'string' ? ` ${r.version}` : '';
+    const used =
+      typeof r.lastUsedAt === 'string' ? `, last used ${r.lastUsedAt.slice(0, 10)}` : '';
+    uses.push({
+      label: `${platform}${version} simulator runtime${used}`,
+      path: 'xcrun simctl runtime',
+      bytes: r.sizeBytes,
+      hint: SIM_RUNTIME_HINT
+    });
+  }
+  return uses;
+}
+
+/** The biggest folders under the home folder, and on a Mac the simulator
+ *  runtimes outside it, biggest first. A read only; slow on a full disk
+ *  (`du` walks every file), so it rides the dry run, which only the owner's
+ *  Free up space asks for. */
 export async function diskUse(io: DiskIo): Promise<RunnerDiskUse[]> {
   const dirs = diskUseCandidates(io.home, io.runnerDir);
   const sized: RunnerDiskUse[] = [];
@@ -329,6 +371,12 @@ export async function diskUse(io: DiskIo): Promise<RunnerDiskUse[]> {
         sized.push({ label: diskUseLabel(io.home, io.runnerDir, dir), path: tilde(io.home, dir), bytes: sizes[j] });
       }
     });
+  }
+  if (io.platform === 'darwin') {
+    const runtimes = await io.run('xcrun', ['simctl', 'runtime', 'list', '-j'], {
+      timeoutMs: SIMCTL_TIMEOUT_MS
+    });
+    if (runtimes.code === 0) sized.push(...simRuntimeUses(runtimes.output));
   }
   return sized.sort((a, b) => b.bytes - a.bytes).slice(0, MAX_USES);
 }

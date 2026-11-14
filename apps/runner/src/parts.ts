@@ -138,7 +138,7 @@ export const PARTS: PartDef[] = [
     id: 'vault',
     title: 'Vault',
     description:
-      'Keeps your files on this machine, searchable from your devices. They reach your devices over the direct link only, never through Factiii’s servers.',
+      'Keeps your files on this machine, searchable from your devices. They reach your devices over the direct link only, never through the Cloud.',
     requires: ['vault-engine', 'vault-embedder'],
     // Vault storage and Vault search together (below).
     diskMb: 70 + VAULT_SEARCH_SIZE.diskMb,
@@ -150,7 +150,7 @@ export const PARTS: PartDef[] = [
     id: 'vault-storage',
     title: 'Vault storage',
     description:
-      'Keeps your files on this machine, for your devices. They reach your devices over the direct link only, never through Factiii’s servers.',
+      'Keeps your files on this machine, for your devices. They reach your devices over the direct link only, never through the Cloud.',
     requires: ['vault-engine'],
     // The engine (23 MB) and an empty database (39 MB), before any file.
     diskMb: 65,
@@ -204,9 +204,9 @@ export const MODULES: ModuleDef[] = [
   },
   {
     id: 'private-vault',
-    title: 'Private vault for Oakbox',
+    title: 'Runner Cloud and Vault for Oakbox',
     description:
-      'Your files, kept and searched on this machine, never on Factiii’s servers.',
+      'Your files, kept and searched on this machine, never in the Cloud.',
     parts: ['vault-storage', 'vault-search']
   },
   {

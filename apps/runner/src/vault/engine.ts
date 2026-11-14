@@ -45,7 +45,7 @@ export type StorePaths = { db: string; objects: string };
 
 /**
  * Where a store lives. The Vault keeps `parts/vault/db` and `objects`, where
- * it always was. Runner Storage is a second database and folder beside it,
+ * it always was. Runner Cloud is a second database and folder beside it,
  * under `parts/runner-storage`, never inside the Vault's: two folders, so no
  * query, search or index of one can reach the other's rows.
  */

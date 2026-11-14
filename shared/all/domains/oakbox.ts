@@ -19,12 +19,12 @@ import {
  *  allows one active MONTHLY_SUBSCRIPTION per space. */
 export const OAKBOX_SPACE_SLUG = 'oakbox';
 
-/** Said wherever a file goes in — Oakbox and the Factiii vault alike, since
+/** Said wherever a file goes in — Oakbox and Factiii's Cloud files alike, since
  *  both run the same ingest. The legal pages carry the detail; this line exists
  *  so nobody has to read them to learn the two facts that matter before a drop:
  *  a model reads every file, and the files are not end-to-end encrypted. */
 export const FILE_AI_NOTICE =
-  'AI from Anthropic or OpenAI reads each file you add, to tag and search it. Your files are private to you and anyone you share your vault with, but not end-to-end encrypted.';
+  'AI from Anthropic or OpenAI reads each file you add, to tag and search it. Your files are private to you and anyone you share them with, but not end-to-end encrypted.';
 
 /** The first tier: what a premium member has before buying a plan. Small on
  *  purpose — it is enough to try the app on, not enough to live in. A bought
@@ -831,7 +831,7 @@ export const duplicateMeta = (copy: HeldCopy): string => {
     year: 'numeric'
   });
   return copy.existing.name === copy.name
-    ? `Already in your vault, added ${when}`
+    ? `Already in Oakbox, added ${when}`
     : `Same file as “${copy.existing.name}”, added ${when}`;
 };
 

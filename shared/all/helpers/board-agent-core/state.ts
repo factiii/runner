@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { existsSync } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -8,6 +9,7 @@ import type {
   CardAISessionPhase
 } from '../../domains/electron';
 import type { ExecTarget } from './exec';
+import { TOOLS_DIR_ENV } from './host-env';
 import type { AgentProvider } from './providers';
 import type { SessionStarter } from './session';
 
@@ -38,6 +40,8 @@ export type CardRecord = {
    *  records written before them. */
   startedBy?: SessionStarter;
   startedVia?: string;
+  /** BaseSession.startedByRunner. */
+  startedByRunner?: string;
   taskTitle: string;
   targetBranch: string;
   startedAt: number;
@@ -110,16 +114,41 @@ export function redisSocketPath(target: ExecTarget): string {
   return `${target.paths.state}/redis.sock`;
 }
 
+const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`;
+
+/** The server and client a space's redis runs: Factiii Desktop's bundled
+ *  Valkey (redis's BSD fork, the same protocol and flags) when its tools
+ *  folder (FACTIII_TOOLS_DIR) holds both, else redis-server and redis-cli
+ *  from the PATH. `argv` for a spawn, `sh` quoted for a shell line. */
+export function redisBins(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (file: string) => boolean = existsSync
+): { server: string; cli: string } {
+  const dir = env[TOOLS_DIR_ENV]?.trim();
+  if (dir && path.posix.isAbsolute(dir)) {
+    const server = path.posix.join(dir, 'valkey-server');
+    const cli = path.posix.join(dir, 'valkey-cli');
+    if (exists(server) && exists(cli)) return { server, cli };
+  }
+  return { server: 'redis-server', cli: 'redis-cli' };
+}
+
+/** redisBins' client, quoted for a shell line. */
+export function redisCliCommand(env: NodeJS.ProcessEnv = process.env): string {
+  const { cli } = redisBins(env);
+  return cli === 'redis-cli' ? cli : shellQuote(cli);
+}
+
 /** redis-cli on the space's target; trims the trailing newline it adds. */
 async function redisCli(target: ExecTarget, args: string): Promise<string> {
   const out = await target.sh(
-    `redis-cli -s ${redisSocketPath(target)} ${args}`
+    `${redisCliCommand()} -s ${redisSocketPath(target)} ${args}`
   );
   return out.replace(/\n$/, '');
 }
 
 /**
- * Start this space's redis-server if it isn't already up. Idempotent - safe to
+ * Start this space's redis (or the bundled Valkey, redisBins) if it isn't already up. Idempotent - safe to
  * call on every ensure/reattach. AOF on, RDB off. Throws where redis-server is
  * not installed: it is an extra, so callers read that as "no live agent
  * status", never as a failed setup.
@@ -132,10 +161,12 @@ export async function ensureRedis(target: ExecTarget): Promise<void> {
     // not up yet
   }
   const stateDir = target.paths.state;
+  const { server } = redisBins();
+  const serverCommand = server === 'redis-server' ? server : shellQuote(server);
   // --port 0 disables TCP entirely, so two spaces can never reach each other's
   // store. unixsocketperm 700: the socket is only for this owner.
   await target.sh(
-    `mkdir -p ${stateDir} && redis-server --daemonize yes --appendonly yes ` +
+    `mkdir -p ${stateDir} && ${serverCommand} --daemonize yes --appendonly yes ` +
       `--save '' --dir ${stateDir} --port 0 ` +
       `--unixsocket ${redisSocketPath(target)} --unixsocketperm 700`
   );
@@ -149,7 +180,7 @@ export async function ensureRedis(target: ExecTarget): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error('redis-server did not come up.');
+  throw new Error(`${path.posix.basename(server)} did not come up.`);
 }
 
 // Written once what a runner from before kept in redis is in files, so the
@@ -295,7 +326,10 @@ export async function putAsk(
   target: ExecTarget,
   record: AskRecord
 ): Promise<void> {
-  await writeAtomic(recordPath(target, 'ask', record.id), JSON.stringify(record));
+  await writeAtomic(
+    recordPath(target, 'ask', record.id),
+    JSON.stringify(record)
+  );
 }
 
 /** Every stored conversation. One whose record is unreadable is dropped. */

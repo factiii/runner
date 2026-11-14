@@ -19,7 +19,7 @@ import {
   VaultCategorize
 } from './categorize';
 import { openVaultDb, type VaultDb } from './db';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 
 // Categorize on the runner (.specs/runner-vault-ask.md "Categorize on the runner"):
@@ -253,9 +253,25 @@ describe('a run on the Vault', () => {
   });
 
   it('is the owner’s alone', async () => {
-    await vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
-    await assert.rejects(vault.handle('vaultCategorizeStatus', {}, PEER), /Only the owner/);
-    await assert.rejects(vault.handle('vaultCategorizeStart', payload(), PEER), /Only the owner/);
+    // The Vault lets nobody else in at all (vault.md rule 2).
+    await assert.rejects(vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER), /never shared/);
+    await assert.rejects(vault.handle('vaultCategorizeStatus', {}, PEER), /a Vault is never shared/);
+    // In Runner Cloud a member let in is still refused.
+    const cloud = new RunnerVault(
+      db,
+      new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-cloud-cat-'))),
+      '1',
+      () => {},
+      null,
+      null,
+      categorize,
+      null,
+      { storeName: 'runner' }
+    );
+    await cloud.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
+    await assert.rejects(cloud.handle('vaultCategorizeStatus', {}, PEER), /Only the owner/);
+    await assert.rejects(cloud.handle('vaultCategorizeStart', payload(), PEER), /Only the owner/);
+    await cloud.handle('vaultShareSet', { memberId: '2', shared: false }, OWNER);
   });
 
   it('counts what waits, tags it, stamps it and counts each category', async () => {

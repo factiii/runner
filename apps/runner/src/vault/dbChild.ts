@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   if (!dataDir || !engineDir || !process.send) {
     throw new Error('Usage: vault-db <data dir> <engine dir> [--load], as a forked child.');
   }
-  // A sealed Vault (sealedDb.ts) runs in memory: its decrypted dump comes
+  // A sealed Vault (vault-core's sealedDb.ts) runs in memory: its decrypted dump comes
   // over IPC as the first message, and only ever lives in this process.
   const loaded = mode === '--load' ? await firstLoad() : null;
   const load = createRequire(path.join(engineDir, 'package.json'));

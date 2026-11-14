@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -19,9 +18,10 @@ import path from 'node:path';
 // the runner's own access token. Plus one op of its own, `simctl`, a short
 // allowlist of simulator commands (simctlArgs).
 //
-// Token-checked here, before anything on the Mac sees the request: the token
-// must be the space's (the one every session it spawned carries). The bridge
-// checks it again downstream.
+// Token-checked here, before the request is served: the token must be a live
+// session's, which only the space's bridge knows (each session has its own,
+// .specs/runner-link.md "Runner credential service"), so this asks it
+// (`whoami`, askBridgeWhoami). The bridge checks it again on the op itself.
 
 /** Ops passed through to the space's bridge. */
 export const NARROW_OPS: ReadonlySet<string> = new Set([
@@ -92,10 +92,36 @@ export function simctlArgs(args: unknown): string[] | { error: string } {
   return { error: `simctl ${verb} is not on the narrow path.` };
 }
 
-function sameToken(given: string, expected: string): boolean {
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  return a.length === b.length && b.length > 0 && timingSafeEqual(a, b);
+/** How long the bridge has to answer a `whoami`. */
+const WHOAMI_TIMEOUT_MS = 10_000;
+
+/** Does the space's bridge at `upstreamPath` know `token` as a live
+ *  session's? False on any refusal, error or silence. */
+export function askBridgeWhoami(upstreamPath: string, token: string): Promise<boolean> {
+  if (!token) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const conn = net.createConnection(upstreamPath);
+    let buffer = '';
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      conn.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), WHOAMI_TIMEOUT_MS);
+    conn.on('error', () => done(false));
+    conn.on('connect', () => conn.write(`${JSON.stringify({ op: 'whoami', token })}\n`));
+    conn.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf-8');
+      const newline = buffer.indexOf('\n');
+      if (newline === -1) return;
+      try {
+        done((JSON.parse(buffer.slice(0, newline)) as { type?: unknown }).type === 'whoami');
+      } catch {
+        done(false);
+      }
+    });
+    conn.on('close', () => done(false));
+  });
 }
 
 export type NarrowPath = { close: () => Promise<void> };
@@ -103,12 +129,13 @@ export type NarrowPath = { close: () => Promise<void> };
 /**
  * Serve one space's narrow path at `listenPath` (on the Mac; tunnel.ts puts
  * it in the VM). `upstreamPath` is the space's real bridge socket.
- * `spaceToken` is read per request, so a rotated token counts at once.
+ * `checkToken` is asked per request (the bridge's `whoami` by default), so a
+ * session that ended is refused at once.
  */
 export async function startNarrowPath(opts: {
   listenPath: string;
   upstreamPath: string;
-  spaceToken: () => string;
+  checkToken?: (token: string) => Promise<boolean>;
   simctl?: SimctlRunner;
 }): Promise<NarrowPath> {
   await fs.mkdir(path.dirname(opts.listenPath), {
@@ -117,6 +144,8 @@ export async function startNarrowPath(opts: {
   });
   await fs.rm(opts.listenPath, { force: true });
   const live = new Set<net.Socket>();
+  const checkToken =
+    opts.checkToken ?? ((token: string) => askBridgeWhoami(opts.upstreamPath, token));
 
   const server = net.createServer((conn) => {
     live.add(conn);
@@ -152,17 +181,24 @@ export async function startNarrowPath(opts: {
         return refuse(`${op || 'That'} is not on the dev VM’s narrow path.`);
       }
       const token = typeof request.token === 'string' ? request.token : '';
-      if (!sameToken(token, opts.spaceToken())) return refuse(REFUSED_TOKEN);
       decided = true;
       conn.off('data', onData);
-      // Hold what arrives while the upstream connects: with no listener and
-      // no pipe yet, a flowing stream would drop it. pipe() resumes it.
+      // Hold what arrives while the token is checked and the upstream
+      // connects: with no listener and no pipe yet, a flowing stream would
+      // drop it. pipe() resumes it.
       conn.pause();
-      if (op === 'simctl') {
-        void serveSimctl(conn, request.args, opts.simctl);
-        return;
-      }
-      pipeUpstream(conn, opts.upstreamPath, buffer);
+      const head = buffer;
+      void checkToken(token).then((ok) => {
+        if (!ok) {
+          conn.end(`${JSON.stringify({ type: 'error', message: REFUSED_TOKEN })}\n`);
+          return;
+        }
+        if (op === 'simctl') {
+          void serveSimctl(conn, request.args, opts.simctl);
+          return;
+        }
+        pipeUpstream(conn, opts.upstreamPath, head);
+      });
     };
     conn.on('data', onData);
   });

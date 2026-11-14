@@ -5,6 +5,10 @@ import path from 'path';
 
 
 import {
+  RUNNER_BETA_NOTE,
+  runnerPlatformSupport
+} from '@shared/all/domains/runnerPlatforms';
+import {
   ensureToolchain,
   hostTarget
 } from '@shared/all/helpers/board-agent-core';
@@ -41,6 +45,10 @@ function run(bin: string, args: string[], opts?: { silent?: boolean }): string {
 
 export async function setup(serverUrl: string): Promise<void> {
   console.log('\n=== Factiii Runner — Setup ===\n');
+  // Runner 1.0 supports macOS; Linux and Windows (WSL2) are beta.
+  if (runnerPlatformSupport(process.platform) === 'beta') {
+    console.log(`  ${RUNNER_BETA_NOTE}\n`);
+  }
 
   // Step 0: refuse before anything else. Setup ends by writing a bearer token,
   // and this runner never writes a credential it can't encrypt. Only the

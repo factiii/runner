@@ -3,6 +3,7 @@ import type {
   RunnerDiskHealth,
   RunnerHealthLevel,
   RunnerMachineHealth,
+  RunnerMemoryConsumer,
   RunnerMemoryUse,
   RunnerService
 } from '@shared/all/domains/electron';
@@ -11,8 +12,9 @@ import type {
 // disk the runner writes to, and memory pressure. Read on every parts list
 // and doctor pass; nothing to install. It warns at DISK_WARN_GB, well before
 // DISK_CRITICAL_GB, where adds, model pulls and vault uploads are refused.
-// CPU load, memory in use and the services running are for the Status tab
-// to show; they never refuse anything.
+// CPU load, memory in use, memory pressure as a number, the top memory
+// consumers and the services running are for the Status tab to show; they
+// never refuse anything.
 
 /** Below this much free, Setup warns and offers Free up space. */
 export const DISK_WARN_GB = 20;
@@ -78,6 +80,25 @@ export function meminfoLevel(meminfo: string): RunnerHealthLevel | null {
 
 export const darwinPressureLevel = (output: string): RunnerHealthLevel | null =>
   DARWIN_PRESSURE[output.trim()] ?? null;
+
+/** A share in use, 0 to 100, from a share free; null when it is not one. */
+const pressureOf = (freePct: number): number | null =>
+  Number.isFinite(freePct) && freePct >= 0 && freePct <= 100
+    ? Math.round(100 - freePct)
+    : null;
+
+/** macOS `kern.memorystatus_level` (the share of memory free, the number
+ *  macOS's own pressure is read from) as pressure, 0 to 100. */
+export const darwinMemoryPressure = (output: string): number | null =>
+  output.trim() ? pressureOf(Number(output.trim())) : null;
+
+/** Linux /proc/meminfo: the share of MemTotal not available, 0 to 100. */
+export function meminfoPressure(meminfo: string): number | null {
+  const total = statField(meminfo, 'MemTotal');
+  const available = statField(meminfo, 'MemAvailable');
+  if (!total || Number.isNaN(available)) return null;
+  return pressureOf((available / total) * 100);
+}
 
 export function processLevel(used: number, max: number): RunnerHealthLevel {
   if (used >= max * PROCESS_CRITICAL_SHARE) return 'critical';
@@ -466,6 +487,95 @@ export function embedderHealth(body: unknown): Pick<RunnerService, 'health' | 'l
 export const isEmbedderScript = (script: string | undefined) =>
   Boolean(script && /[/\\]services[/\\]embedder[/\\]/.test(script));
 
+/** The most memory consumers shown, and the least one holds to be one. */
+export const MAX_MEMORY_TOP = 8;
+const MIN_MEMORY_BYTES = 50 * 1024 ** 2;
+
+const SESSIONS_HINT = 'End the sessions you are done with in Running now.';
+
+/** What a process is, by its command line, first match wins: the ones the
+ *  owner asks about (card b78a269a: Claude sessions, dev servers,
+ *  simulators) and what else a runner Mac holds. */
+const MEMORY_KINDS: {
+  test: RegExp;
+  label: string;
+  stop?: RunnerMemoryConsumer['stop'];
+  hint?: string;
+}[] = [
+  { test: /CoreSimulator|Simulator\.app\/|launchd_sim/, label: 'iOS Simulator', stop: 'simulators' },
+  { test: /\/emulator\/|\bemulator\s+-avd\b/, label: 'Android emulator' },
+  {
+    test: /(^|\/)claude(\s|$)|@anthropic-ai\/claude-code|\/claude\/versions\//,
+    label: 'Claude Code',
+    hint: SESSIONS_HINT
+  },
+  { test: /(^|\/)codex(\s|$)|@openai\/codex/, label: 'Codex', hint: SESSIONS_HINT },
+  { test: /@factiii\/runner|factiii-runner/, label: 'Factiii runner' },
+  { test: /[/\\]services[/\\]embedder[/\\]/, label: 'Vault embedder' },
+  { test: /(^|\/)ollama(\s|$)/, label: 'Ollama' },
+  {
+    test: /OrbStack|com\.docker\.|Docker\.app|vpnkit|\bcolima\b|\blimactl\b/,
+    label: 'Containers (OrbStack, Docker)'
+  },
+  {
+    test: /Virtualization\.VirtualMachine|(^|\/)tart\s|qemu-system-/,
+    label: 'Virtual machines (containers’ VM, Tart)'
+  },
+  {
+    test: /^next-server\b|\b(next|expo|metro|vite|webpack|turbo|tsx|nodemon|react-native|storybook|jest)(\s|$)/,
+    label: 'Dev servers',
+    hint: 'Stop the ones you are done with where they run; Services lists their ports.'
+  },
+  { test: /Xcode\.app\/|SourceKitService|xcodebuild/, label: 'Xcode' },
+  { test: /Google Chrome|Chromium/, label: 'Chrome' },
+  { test: /(^|\/)postgres(\s|:|$)/, label: 'Postgres' },
+  { test: /redis-server/, label: 'Redis' },
+  { test: /(^|\/)node(\s|$)/, label: 'Other Node processes' },
+  { test: /(^|\/)python[\d.]*(\s|$)|Python\.app\//, label: 'Python' }
+];
+
+/** What a command line is, as the owner reads it: a kind above, else its
+ *  app's name ("Slack"), else its program's ("WindowServer"). */
+export function memoryKind(command: string): Omit<RunnerMemoryConsumer, 'bytes' | 'count'> {
+  const kind = MEMORY_KINDS.find((k) => k.test.test(command));
+  if (kind) {
+    return {
+      label: kind.label,
+      ...(kind.stop ? { stop: kind.stop } : {}),
+      ...(kind.hint ? { hint: kind.hint } : {})
+    };
+  }
+  const app = /\/([^/]+)\.app\/Contents\//.exec(command)?.[1];
+  if (app) return { label: app };
+  const program = command.split(/\s/)[0]?.split('/').pop() ?? '';
+  return { label: program.slice(0, 40) || 'Other' };
+}
+
+/** `ps -A -o rss=,args=` grouped by what each process is, biggest first:
+ *  the top memory consumers. RSS counts shared pages in each process, so a
+ *  sum is an upper bound, which is what "biggest" needs. */
+export function memoryConsumers(ps: string): RunnerMemoryConsumer[] {
+  const groups = new Map<string, RunnerMemoryConsumer>();
+  for (const line of ps.split('\n')) {
+    const m = /^\s*(\d+)\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const bytes = Number(m[1]) * KIB;
+    if (!bytes) continue;
+    const kind = memoryKind(m[2].trim());
+    const seen = groups.get(kind.label);
+    if (seen) {
+      seen.bytes += bytes;
+      seen.count += 1;
+    } else {
+      groups.set(kind.label, { ...kind, bytes, count: 1 });
+    }
+  }
+  return [...groups.values()]
+    .filter((g) => g.bytes >= MIN_MEMORY_BYTES)
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, MAX_MEMORY_TOP);
+}
+
 export type HealthIo = {
   /** What each folder the runner writes to holds ("Vault"). */
   folders: { use: string; dir: string }[];
@@ -478,6 +588,11 @@ export type HealthIo = {
   cpu?(): { load1: number; cores: number } | null;
   /** Memory in use and the total, or null. */
   memoryUse?(): Promise<RunnerMemoryUse | null>;
+  /** Memory pressure, 0 to 100, or null. Cheap: the alert's watch reads it
+   *  every 30 s for the 24 h chart. */
+  memoryPressure?(): Promise<number | null>;
+  /** The biggest memory users (memoryConsumers). */
+  memoryTop?(): Promise<RunnerMemoryConsumer[]>;
   /** Docker containers, pm2 processes, login agents and the runner user's
    *  listening processes. */
   services?(): Promise<RunnerService[]>;
@@ -509,6 +624,8 @@ export async function readHealth(io: HealthIo): Promise<RunnerMachineHealth> {
   const load = io.cpu?.() ?? null;
   const cpu = load ? cpuHealth(load.load1, load.cores) : null;
   const memoryInUse = (await io.memoryUse?.().catch(() => null)) ?? null;
+  const memoryPressure = (await io.memoryPressure?.().catch(() => null)) ?? null;
+  const memoryTop = io.memoryTop ? await io.memoryTop().catch(() => []) : undefined;
   const services = (await io.services?.().catch(() => [])) ?? [];
   const list = [...disks.values()];
   return {
@@ -519,6 +636,8 @@ export async function readHealth(io: HealthIo): Promise<RunnerMachineHealth> {
     processes,
     cpu,
     memoryUse: memoryInUse,
+    memoryPressure,
+    ...(memoryTop ? { memoryTop } : {}),
     services: services.slice(0, MAX_SERVICES),
     warnGb: DISK_WARN_GB,
     criticalGb: DISK_CRITICAL_GB

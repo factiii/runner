@@ -1,6 +1,7 @@
-import type { RunnerHealthAlert } from '@shared/all/domains/electron';
+import type { RunnerHealthAlert, RunnerMachineHealth } from '@shared/all/domains/electron';
 import { healthAlertChanged, healthAlertOf } from '@shared/all/helpers/runnerHealthAlert';
 
+import { machineHistory } from './healthHistory';
 import { run } from './machine';
 import { machineHealthLevels } from './machineHealthIo';
 
@@ -8,8 +9,9 @@ import { machineHealthLevels } from './machineHealthIo';
 // .specs/runner-setup.md "Low disk and memory alerts"): read the machine's
 // disk and memory every 30 s and tell the server when it changes. The server
 // shows the owner a banner at warn and pushes them at critical. Only the
-// cheap probes (statfs, the pressure level, the process count), never the
-// service list, so a reading every 30 s costs nothing.
+// cheap probes (statfs, the pressure level and share, the process count),
+// never the service list, so a reading every 30 s costs nothing. Every
+// reading also goes to the 24 h history Status charts (healthHistory.ts).
 
 const CHECK_EVERY_MS = 30 * 1000;
 /** While not ok, the reading is said again this often even unchanged, so
@@ -21,17 +23,20 @@ export type HealthWatch = {
   current(): RunnerHealthAlert | null;
 };
 
-/** Read now, then every 30 s; `send` gets each reading that changed. A read
- *  that fails is skipped, never sent as ok. */
+/** Read now, then every 30 s; `record` gets every reading and `send` each
+ *  one whose alert changed. A read that fails is skipped, never sent as ok. */
 export function watchMachineHealth(
   send: (alert: RunnerHealthAlert) => void,
-  read: () => Promise<RunnerHealthAlert> = async () => healthAlertOf(await machineHealthLevels(run))
+  read: () => Promise<RunnerMachineHealth> = () => machineHealthLevels(run),
+  record: (health: RunnerMachineHealth) => void = (health) => machineHistory().add(health)
 ): HealthWatch {
   let last: RunnerHealthAlert | null = null;
   let sentAt = 0;
   const check = async () => {
-    const next = await read().catch(() => null);
-    if (!next) return;
+    const health = await read().catch(() => null);
+    if (!health) return;
+    record(health);
+    const next = healthAlertOf(health);
     const due = next.level !== 'ok' && Date.now() - sentAt >= RESEND_EVERY_MS;
     if (!healthAlertChanged(last, next) && !due) return;
     const was = last?.level ?? 'ok';

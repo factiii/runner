@@ -7,14 +7,19 @@ import {
   CPU_WARN_LOAD,
   cpuHealth,
   cpuLevel,
+  darwinMemoryPressure,
   darwinPressureLevel,
   DISK_CRITICAL_GB,
   DISK_WARN_GB,
   diskLevel,
   type HealthIo,
+  MAX_MEMORY_TOP,
   MAX_SERVICES,
   meminfoLevel,
+  meminfoPressure,
   meminfoUse,
+  memoryConsumers,
+  memoryKind,
   commandLabel,
   containerEngine,
   embedderHealth,
@@ -59,6 +64,16 @@ describe('machine health', () => {
     assert.equal(meminfoLevel(meminfo(100000)), 'warn');
     assert.equal(meminfoLevel(meminfo(10000)), 'critical');
     assert.equal(meminfoLevel('nothing here'), null);
+  });
+
+  it('reads memory pressure as a share in use, for the chart', () => {
+    // kern.memorystatus_level is the share free.
+    assert.equal(darwinMemoryPressure('70\n'), 30);
+    assert.equal(darwinMemoryPressure(''), null);
+    assert.equal(darwinMemoryPressure('140'), null);
+    const meminfo = `MemTotal:       1000000 kB\nMemAvailable:   250000 kB\n`;
+    assert.equal(meminfoPressure(meminfo), 75);
+    assert.equal(meminfoPressure('nothing here'), null);
   });
 
   it('names each disk once with what it holds, and takes the worst level', async () => {
@@ -451,6 +466,80 @@ describe('what the Status tab shows', () => {
         }))
     });
     assert.equal(many.services?.length, MAX_SERVICES);
+  });
+});
+
+describe('top memory consumers', () => {
+  const MB = 1024;
+  it('names what a process is, with the safe stop where there is one', () => {
+    assert.deepEqual(
+      memoryKind(
+        '/Users/jon/Library/Developer/CoreSimulator/Devices/58D5/data/Containers/Bundle/Application/603A/Factiii.app/Factiii'
+      ),
+      { label: 'iOS Simulator', stop: 'simulators' }
+    );
+    assert.equal(memoryKind('claude --permission-mode auto --resume 25e7').label, 'Claude Code');
+    assert.match(memoryKind('/Users/jon/.local/bin/claude').hint ?? '', /Running now/);
+    assert.equal(memoryKind('next-server (v16.4.3)').label, 'Dev servers');
+    assert.equal(
+      memoryKind('node /w/node_modules/.bin/expo start --port 63751').label,
+      'Dev servers'
+    );
+    assert.equal(memoryKind('node --env-file=../../.env --import tsx src/app.ts').label, 'Dev servers');
+    assert.equal(
+      memoryKind('node /opt/homebrew/lib/node_modules/@factiii/runner/dist/index.js').label,
+      'Factiii runner'
+    );
+    assert.equal(
+      memoryKind('/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (Renderer).app/Contents/MacOS/x')
+        .label,
+      'Chrome'
+    );
+    // The desktop app is not the CLI.
+    assert.equal(memoryKind('/Applications/Claude.app/Contents/MacOS/Claude').label, 'Claude');
+    assert.equal(
+      memoryKind('/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon').label,
+      'WindowServer'
+    );
+  });
+
+  it('groups ps by kind, biggest first, and leaves out the small', () => {
+    const ps = [
+      ` ${3000 * MB} next-server (v16.4.3)`,
+      ` ${1000 * MB} node /w/node_modules/.bin/expo start`,
+      ` ${700 * MB} claude --resume a`,
+      ` ${400 * MB} claude`,
+      ` ${1300 * MB} /Users/jon/Library/Developer/CoreSimulator/Devices/1/data/App`,
+      `  ${10 * MB} /usr/sbin/tiny`,
+      '      0 [kthreadd]',
+      'garbage'
+    ].join('\n');
+    assert.deepEqual(memoryConsumers(ps), [
+      { label: 'Dev servers', bytes: 4000 * MB * 1024, count: 2, hint: memoryKind('next-server').hint },
+      { label: 'iOS Simulator', bytes: 1300 * MB * 1024, count: 1, stop: 'simulators' },
+      { label: 'Claude Code', bytes: 1100 * MB * 1024, count: 2, hint: memoryKind('claude').hint }
+    ]);
+    const many = Array.from({ length: 20 }, (_, i) => ` ${(100 + i) * MB} /bin/app${i}`).join('\n');
+    assert.equal(memoryConsumers(many).length, MAX_MEMORY_TOP);
+  });
+
+  it('reads the top and the pressure only where the io has them', async () => {
+    const io: HealthIo = {
+      folders: [],
+      disk: () => null,
+      memory: async () => 'ok',
+      processes: async () => null
+    };
+    const bare = await readHealth(io);
+    assert.equal(bare.memoryPressure, null);
+    assert.equal('memoryTop' in bare, false);
+    const full = await readHealth({
+      ...io,
+      memoryPressure: async () => 42,
+      memoryTop: async () => [{ label: 'Claude Code', bytes: 1, count: 1 }]
+    });
+    assert.equal(full.memoryPressure, 42);
+    assert.deepEqual(full.memoryTop, [{ label: 'Claude Code', bytes: 1, count: 1 }]);
   });
 });
 

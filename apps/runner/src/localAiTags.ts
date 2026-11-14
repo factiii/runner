@@ -15,6 +15,7 @@ import { forgetPulledModel, type LocalAiModelIo, localAiState } from './localAiM
 import { checkRoom, DISK_CRITICAL_GB } from './machineHealth';
 import { isCloudTag, type ParsedOllamaTag } from './ollamaLibrary';
 import type { OllamaLibrary } from './ollamaLibraryFetch';
+import type { StartJob } from './activity/registry';
 
 // Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
 // backend: setup, sign-ins, models"): the owner lists what Ollama holds beside the fixed table, and
@@ -63,7 +64,11 @@ export class LocalAiTags {
 
   constructor(
     private readonly io: LocalAiTagsIo,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** A pull is a `model-download` job in the runner's Activity
+     *  (activity/registry.ts). Ollama's pull has no cancel, so it shows
+     *  without Stop. */
+    private readonly startJob?: StartJob
   ) {}
 
   async list(): Promise<RunnerLocalAiModels> {
@@ -171,10 +176,24 @@ export class LocalAiTags {
   }
 
   private async run(job: RunnerLocalAiJob, bin: string): Promise<void> {
-    const onLine = (line: string) => {
+    const log = (line: string) => {
       job.lines = [...job.lines, line].slice(-KEPT_LINES);
     };
     const title = ollamaTitle(job.tag);
+    const activity =
+      job.action === 'pull'
+        ? this.startJob?.({
+            type: 'model-download',
+            engine: 'ollama',
+            title: `Download ${title}`,
+            startedBy: { userId: null, name: 'Owner', role: 'owner' },
+            log: true
+          })
+        : undefined;
+    const onLine = (line: string) => {
+      log(line);
+      activity?.log(`${line}\n`);
+    };
     try {
       const service = this.io.model.service;
       if (!(await service.status()).running) await service.start(onLine);
@@ -192,9 +211,12 @@ export class LocalAiTags {
       if (job.action === 'remove') forgetPulledModel(this.io.model.runnerDir, job.tag);
       onLine(job.action === 'pull' ? `${title} is ready.` : `Removed ${title}.`);
       job.state = 'done';
+      activity?.end('done');
     } catch (err) {
-      onLine(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      onLine(message);
       job.state = 'failed';
+      activity?.end('failed', message);
     }
   }
 }

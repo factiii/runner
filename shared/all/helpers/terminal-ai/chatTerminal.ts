@@ -141,6 +141,30 @@ export async function typeInPane(
   );
 }
 
+/** A message into the CLI open in a tab, as its next prompt: a bracketed
+ *  paste (so a newline in it is a newline, not Enter), then Enter. Only for a
+ *  CLI its hooks report idle (session-inbox.ts): never typed over a turn or a
+ *  permission prompt. Nothing at the prompt is cleared first, unlike
+ *  typeInPane: a line the person was typing stays, ahead of the message. */
+export async function pasteIntoAgent(
+  target: ExecTarget,
+  pane: string,
+  text: string
+): Promise<void> {
+  const tmux = tmuxCli(target);
+  // A buffer per pane, deleted by the paste (-d); the text goes over stdin,
+  // never into a command line.
+  const buffer = `factiii-inbox-${pane.replace(/[^0-9]/g, '')}`;
+  await target.runWithStdin(
+    ['sh', '-c', `${tmux} load-buffer -b ${buffer} -`],
+    text,
+    'inbox message'
+  );
+  await target.sh(
+    `${tmux} copy-mode -q -t ${pane} && ${tmux} paste-buffer -p -d -b ${buffer} -t ${pane} && sleep 0.2 && ${tmux} send-keys -t ${pane} Enter`
+  );
+}
+
 /** Close the Claude open in a tab, so the chat can carry its conversation on:
  *  two CLIs appending to one transcript would interleave it. TERM lets it save
  *  what it has; after five seconds it is killed. The tab drops back to its

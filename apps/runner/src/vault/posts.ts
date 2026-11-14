@@ -12,7 +12,7 @@ import type { VaultDb } from './db';
 
 // The Vault's posts as Oakbox reads them (.specs/runner-vault-ask.md "A runner
 // file's page", "Kept research on the runner"), the owner's alone
-// (access.ts):
+// (vault-core/access.ts):
 //
 // - A file's page: what the ingest read off it, a page marked where it kept
 //   one, cut at RUNNER_FILE_TEXT_CHARS, and the categories Categorize gave it

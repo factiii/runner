@@ -9,17 +9,25 @@ import {
   type CodexAccess,
   codexPermissionArgs
 } from '../board-agent-core/codex-permissions';
-import { type ExecTarget, sessionToken } from '../board-agent-core/exec';
+import {
+  type ExecTarget,
+  sessionToken,
+  tabOfSecretsToken,
+  tabSecretsToken
+} from '../board-agent-core/exec';
 import { terminalBootCommand } from '../board-agent-core/git-connections';
 import { sessionPortsEnv } from '../board-agent-core/port-blocks';
+import { SECRETS_TOKEN_ENV } from '../board-agent-core/providers';
 import {
   respawnTmuxPane,
   resurrectSave,
   safeTmuxName,
+  setTmuxSessionEnv,
   setTmuxSessionOption,
   startTmuxSession,
   tmuxCli,
   type TmuxSession,
+  tmuxSessionEnvValue,
   tmuxSessionExists
 } from '../board-agent-core/tmux';
 import type { CardAIConfig } from '../board-agent-core/session';
@@ -42,16 +50,22 @@ export function tmuxName(terminalKey: string): string {
  *  (port-blocks.ts; the board's for a session with none), which session it
  *  belongs to (FACTIII_SESSION), which the board MCP's session tools go by
  *  (session-card-tools.ts), with the secret that proves it
- *  (FACTIII_SESSION_TOKEN, exec.ts sessionToken). */
+ *  (FACTIII_SESSION_TOKEN, exec.ts sessionToken), and the tab's own
+ *  credential for the secrets socket (FACTIII_SECRETS_TOKEN, exec.ts
+ *  tabSecretsToken), good while its tmux session `tmuxSession` holds it.
+ *  A fresh one on each call: only a create keeps it (`new-session -A` sets
+ *  no env on an attach). */
 export function sessionEnv(
   target: ExecTarget,
-  postId: string
+  postId: string,
+  tmuxSession: string
 ): Record<string, string> {
   return {
     ...target.stateEnv(),
     ...sessionPortsEnv(target.paths.root, postId),
     FACTIII_SESSION: postId,
-    FACTIII_SESSION_TOKEN: sessionToken(target.paths.root, postId)
+    FACTIII_SESSION_TOKEN: sessionToken(target.paths.root, postId),
+    [SECRETS_TOKEN_ENV]: tabSecretsToken(target.paths.root, tmuxSession)
   };
 }
 
@@ -70,18 +84,28 @@ export async function restartTerminalSession(opts: {
   cwd: string;
 }): Promise<void> {
   const { target, postId, terminalKey, cwd } = opts;
+  const session = tmuxName(terminalKey);
+  const env = sessionEnv(target, postId, session);
+  // The tab keeps its own token: a pane split off it still holds that one.
+  const held = await tmuxSessionEnvValue(target, session, SECRETS_TOKEN_ENV);
+  if (held && tabOfSecretsToken(target.paths.root, held) === session) {
+    env[SECRETS_TOKEN_ENV] = held;
+  }
   await respawnTmuxPane({
     target,
-    session: tmuxName(terminalKey),
+    session,
     argv: ['bash', '-c', terminalInitScript(cwd, target.paths.bin)],
     cwd,
     // Rebuilt rather than inherited: picking up an env the session was created
     // too early to see is half the reason to restart at all.
-    env: sessionEnv(target, postId)
+    env
   }).catch(() => {
     // The pane can go between the caller's decision and this call - best
     // effort, like killTmuxSession.
   });
+  // The session's own env too, so a tab from before per-tab tokens stops
+  // carrying the old space token (space-core.ts `legacyTokenLive`).
+  await setTmuxSessionEnv(target, session, SECRETS_TOKEN_ENV, env[SECRETS_TOKEN_ENV]);
   // The pane now runs today's build. Without this the tab reads stale forever
   // and the prompt never clears.
   await terminalDigest(target)
@@ -234,7 +258,7 @@ export class TerminalManager {
         size: { cols: msg.cols, rows: msg.rows },
         // Without these, `claude` in the shell reads the default ~/.claude and
         // asks to sign in, while the agent spawns (which pass agentEnv) don't.
-        env: sessionEnv(target, msg.postId),
+        env: sessionEnv(target, msg.postId, tmuxSession),
         argv: init.argv
       });
 

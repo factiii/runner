@@ -67,6 +67,7 @@ const ROUTE_SEGMENTS = [
   'settings',
   'shop',
   'signup',
+  'tags',
   'terminal',
   'terms',
   'test',

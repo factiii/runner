@@ -160,14 +160,6 @@ export type NewGoal = Goal & {
 
 export type UpdateFactiiiPayload = RouterInputs['factiiis']['update'];
 
-/**
- * The platform's own space. Its ROOT factiiis are the seeded set every user's
- * file analyser runs (helpers/seedRootFactiiis.ts), so a root added there would
- * analyse the whole platform's documents. Roots may go in any OTHER space, and
- * then run for that space's members.
- */
-export const FACTIII_SPACE_SLUG = 'factiii';
-
 export enum FactiiiRequirement {
   MEDIA_REQUIRED = 'MEDIA_REQUIRED', //Post has to have media
   VIDEO_REQUIRED = 'VIDEO_REQUIRED', //Post has to have a video

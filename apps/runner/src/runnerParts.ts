@@ -8,8 +8,10 @@ import {
   uninstallTool
 } from '@shared/all/helpers/board-agent-core';
 
+import type { StartJob } from './activity/registry';
 import { type CleanupIo, planCleanup, runCleanup } from './cleanup';
 import { cacheItems, clearCache, type DiskIo, diskUse } from './diskCaches';
+import { machineHistory } from './healthHistory';
 import { buildChecks, evaluate } from './doctor';
 import {
   freeDiskGb,
@@ -24,7 +26,7 @@ import { doctorHost, localAiMachine, run } from './machine';
 import { checkRoom } from './machineHealth';
 import { cleanupIo, diskSize, machineHealth } from './machineHealthIo';
 import { type PartsMachine, PartsManager } from './partsManager';
-import type { RunnerServerReadiness } from '@shared/all/domains/electron';
+import type { RunnerMemoryStop, RunnerServerReadiness } from '@shared/all/domains/electron';
 import { CONFIG_DIR } from './paths';
 import { ollamaModelsOnDisk } from './vault/askEngines';
 import { installEmbedder, removeEmbedder, runStep } from './vault/embedderInstall';
@@ -36,6 +38,8 @@ import { installEngine, removeEngine, vaultPaths } from './vault/engine';
 
 const LEDGER = path.join(CONFIG_DIR, 'parts.json');
 const MB_PER_GB = 1_000;
+/** `simctl shutdown all` waits for each simulator to stop. */
+const SIMCTL_TIMEOUT_MS = 60_000;
 
 function readLedger(): string[] {
   try {
@@ -113,7 +117,8 @@ function partsMachine(server?: ServerRead): PartsMachine {
       pick: (id) => pickModel(localAi.model, id)
     },
     async health() {
-      const health = await machineHealth(run);
+      // The day of readings the alert watch keeps, for Status's chart.
+      const health = { ...(await machineHealth(run)), history: machineHistory().list() };
       if (!server) return health;
       return { ...health, server: await server().catch(() => null) };
     },
@@ -123,9 +128,28 @@ function partsMachine(server?: ServerRead): PartsMachine {
     cleanup: {
       plan: () => planCleanup(cleanup),
       run: (ids, onLine) => runCleanup(cleanup, ids, onLine),
-      usage: () => diskUse(disk)
+      usage: () => diskUse(disk),
+      stop: (what, onLine) => stopForMemory(what, onLine)
     }
   };
+}
+
+/** A top memory consumer's safe stop (machineHealth.ts MEMORY_KINDS).
+ *  Shutting the simulators down keeps their apps and data; booting one
+ *  again is the simulator panel's Boot. */
+async function stopForMemory(what: RunnerMemoryStop, onLine: (line: string) => void): Promise<boolean> {
+  if (what !== 'simulators') return false;
+  if (process.platform !== 'darwin') {
+    onLine('Only a Mac runs iOS simulators.');
+    return false;
+  }
+  const res = await run('xcrun', ['simctl', 'shutdown', 'all'], { timeoutMs: SIMCTL_TIMEOUT_MS });
+  if (res.code !== 0) {
+    onLine(`Could not shut the simulators down: ${res.output.trim().split('\n').pop() ?? `exit ${res.code}`}`);
+    return false;
+  }
+  onLine('Shut down the iOS simulators. Their apps and data stay.');
+  return true;
 }
 
 /** One manager per runner process. */
@@ -135,13 +159,17 @@ export function createPartsManager(server?: ServerRead): PartsManager {
 
 /** Oakbox > Account > Backend's models on this machine (localAiTags.ts).
  *  One per runner process, so one pull or remove at a time. */
-export function createLocalAiTags(): LocalAiTags {
+export function createLocalAiTags(startJob?: StartJob): LocalAiTags {
   const localAi = localAiMachine(hostTarget(CONFIG_DIR));
-  return new LocalAiTags({
-    model: localAi.model,
-    installed: () => ollamaModelsOnDisk(localAi.model.modelsDir),
-    health: () => machineHealth(run),
-    freeDiskGb: () => freeDiskGb(localAi.model.modelsDir),
-    library: createOllamaLibrary()
-  });
+  return new LocalAiTags(
+    {
+      model: localAi.model,
+      installed: () => ollamaModelsOnDisk(localAi.model.modelsDir),
+      health: () => machineHealth(run),
+      freeDiskGb: () => freeDiskGb(localAi.model.modelsDir),
+      library: createOllamaLibrary()
+    },
+    Date.now,
+    startJob
+  );
 }

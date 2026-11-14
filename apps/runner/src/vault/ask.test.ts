@@ -32,7 +32,7 @@ import {
   ollamaTakesTools
 } from './askEngines';
 import { openVaultDb, type VaultDb } from './db';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { askTerms, RunnerVault } from './service';
 
 // Oakbox Ask with a runner's own model (.specs/runner-vault-ask.md "Ask with a
@@ -47,7 +47,7 @@ const ENGINE = path.resolve(__dirname, '../..');
 
 let db: VaultDb;
 let vault: RunnerVault;
-/** The same rows as Runner Storage, the store Claude and Codex may read
+/** The same rows as Runner Cloud, the store Claude and Codex may read
  *  (.specs/runner-vault-ask.md "Which store Ask reads"). */
 let storage: RunnerVault;
 /** A file no question's words find: only an added one reaches the model. */
@@ -212,10 +212,10 @@ before(async () => {
   const objects = new FsObjectStore(path.join(tmp, 'objects'));
   vault = new RunnerVault(db, objects, '1', () => {});
   storage = new RunnerVault(db, objects, '1', () => {}, null, null, null, null, {
-    storeName: 'runner',
-    members: () => vault.memberIds()
+    storeName: 'runner'
   });
-  await vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
+  // Who is let in reaches Runner Cloud only: the Vault is the owner's.
+  await storage.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
   await add('Insurance/insurance.txt', 'Home insurance. Policy number AB-123. Renews in May.');
   recipe = await add('Recipes/bread.txt', 'Flour, water, salt and yeast.');
   // A fake Ollama: checks what it was sent, answers in three pieces. With
@@ -276,7 +276,7 @@ describe('Ask on a runner', () => {
   });
 
   it('offers the owner Ollama, Claude and Codex, and a peer Ollama only', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const mine = (await asker.handle('vaultAskModels', {}, OWNER)) as RunnerAskModels;
     assert.deepEqual(mine.ollama, [
       { id: 'llama3.2:3b', title: 'Llama 3.2 3B' },
@@ -287,12 +287,17 @@ describe('Ask on a runner', () => {
     assert.equal(theirs.ollama.length, 2);
     assert.deepEqual(theirs.cli, []);
     await assert.rejects(asker.handle('vaultAskModels', {}, STRANGER), /not shared with you/);
+    // The Vault is the owner's only, whoever was let in (vault.md rule 2).
+    await assert.rejects(
+      new VaultAsk(vault, engines()).handle('vaultAskModels', {}, PEER),
+      /a Vault is never shared/
+    );
   });
 
   it('refuses a peer Claude and Codex, before anything is read', async () => {
     let read = false;
     const asker = new VaultAsk(
-      vault,
+      storage,
       engines({
         cli: async () => {
           read = true;
@@ -375,7 +380,7 @@ describe('Ask on a runner', () => {
     assert.equal(ran, false);
   });
 
-  it('lets the owner ask Claude and Codex about Runner Storage', async () => {
+  it('lets the owner ask Claude and Codex about Runner Cloud', async () => {
     const asker = new VaultAsk(
       storage,
       engines({ cli: async (_engine, _prompt, mcp) => `<p>Read through ${mcp.tools.length} tools.</p>` })
@@ -388,7 +393,7 @@ describe('Ask on a runner', () => {
   });
 
   it('answers a peer with Ollama from the files it found, streamed, citing them', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const state = await ask(
       asker,
       {
@@ -409,7 +414,7 @@ describe('Ask on a runner', () => {
       ['Insurance/insurance.txt']
     );
     assert.deepEqual(state.steps, [
-      'Searching your vault on this runner',
+      'Searching Runner Cloud on this runner',
       'Reading 1 file',
       'Asking Llama 3.1 8B'
     ]);
@@ -694,7 +699,7 @@ describe('Ask on a runner', () => {
 
   it('offers no tool to a model without tools, and no save tool to a peer, and says why', async () => {
     const plain = await ask(
-      new VaultAsk(vault, engines()),
+      new VaultAsk(storage, engines()),
       { engine: 'ollama', model: 'llama3.2:3b', question: 'keep this as a note' },
       OWNER
     );
@@ -703,7 +708,7 @@ describe('Ask on a runner', () => {
     assert.match(ollamaBodies[0]?.messages[0]?.content ?? '', /this model cannot keep notes/);
 
     const peer = await ask(
-      new VaultAsk(vault, engines({ ollamaTakesTools: async () => true })),
+      new VaultAsk(storage, engines({ ollamaTakesTools: async () => true })),
       { engine: 'ollama', model: 'llama3.2:3b', question: 'keep this as a note' },
       PEER
     );
@@ -744,7 +749,7 @@ describe('Runner chats', () => {
   });
 
   it('saves a turn as a chat of the asker’s own, with its steps and sources', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const { chatId } = await ask(asker, { ...LLAMA, question: 'What is my policy number?' }, PEER);
     const { chats } = (await asker.handle('vaultChats', {}, PEER)) as Chats;
     const listed = chats.find((c) => c.id === chatId);
@@ -776,7 +781,7 @@ describe('Runner chats', () => {
   });
 
   it('continues a chat on its own model, from its stored thread', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const { chatId } = await ask(asker, { ...LLAMA, question: 'What is my policy number?' }, OWNER);
     // The payload's model and history are not the chat's: the chat's win.
     const next = await ask(
@@ -842,7 +847,7 @@ describe('Stopping a turn', () => {
 
   it('aborts the Ollama request, keeps no answer, and says the turn stopped', async () => {
     ollamaAborted = false;
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const { askId, chatId } = await slow(asker, { engine: 'ollama', model: 'llama3.2:3b' }, OWNER);
     const state = (await asker.handle('vaultAskCancel', { askId }, OWNER)) as RunnerAskState;
     assert.equal(state.done, true);
@@ -882,7 +887,7 @@ describe('Stopping a turn', () => {
   });
 
   it('lets the owner stop a peer’s turn', async () => {
-    const asker = new VaultAsk(vault, engines());
+    const asker = new VaultAsk(storage, engines());
     const { askId } = await slow(asker, { engine: 'ollama', model: 'llama3.2:3b' }, PEER);
     const state = (await asker.handle('vaultAskCancel', { askId }, OWNER)) as RunnerAskState;
     assert.equal(state.stopped, true);

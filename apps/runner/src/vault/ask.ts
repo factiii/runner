@@ -23,11 +23,13 @@ import {
   askEngineAllowed,
   storeEngineAllowed,
   VAULT_OLLAMA_ONLY
-} from './access';
+} from '@shared/vault-core/access';
 import { modelTitle } from './askChats';
 import { startVaultMcp, type VaultMcp } from './askMcp';
 import { askResearchTools } from './askTools';
 import type { RunnerVault, VaultCaller } from './service';
+import type { StartJob } from '../activity/registry';
+import { personOf } from '../runnerConnections';
 
 // Oakbox Ask with the runner's own model (.specs/runner-vault-ask.md "Ask with a
 // runner's model"). The app picks a model in Ask's menu and asks over the
@@ -48,14 +50,14 @@ import type { RunnerVault, VaultCaller } from './service';
 // (`ollamaTakesTools`) gets the tools as function tools to look further.
 // Claude and Codex answer through the CLIs' non-interactive modes, as card AI
 // runs them, on the owner's sign-in, so only the owner may pick them
-// (access.ts `askEngineAllowed`). They search and read for themselves, the
+// (vault-core/access.ts `askEngineAllowed`). They search and read for themselves, the
 // tools served by a per-turn MCP server scoped to the caller's Vault
 // (askMcp.ts).
 //
 // Every model with tools may keep an answer as a note with save_research, as
 // the cloud assistant does. A model that takes none is told it cannot, so
 // "keep this" gets a plain answer saying so. A note is the owner's
-// (access.ts), so a member's turn has no save tool; the turn's state carries
+// (vault-core/access.ts), so a member's turn has no save tool; the turn's state carries
 // the note it kept (`saved`), which Ask shows under the answer.
 //
 // Every turn is saved in the Vault's database as it is asked and answered
@@ -68,7 +70,7 @@ import type { RunnerVault, VaultCaller } from './service';
 // kept: the question stays, and the chat says its last turn was stopped.
 //
 // One VaultAsk per store (.specs/runner-vault-ask.md "Which store Ask reads"):
-// the daemon makes one on the Vault and one on Runner Storage. On the Vault
+// the daemon makes one on the Vault and one on Runner Cloud. On the Vault
 // only Ollama answers: Claude and Codex are refused here before anything is
 // read (`storeEngineAllowed`), a follow-up on an old Claude chat kept in the
 // Vault included, and again where their turn would start its MCP server.
@@ -201,7 +203,10 @@ export class VaultAsk {
     private readonly engines: AskEngines,
     private readonly now: () => number = Date.now,
     /** How long a turn waits for an added file the runner is still reading. */
-    private readonly attachedWaitMs = ATTACHED_WAIT_MS
+    private readonly attachedWaitMs = ATTACHED_WAIT_MS,
+    /** Each turn is a `research` job in the runner's Activity: a Vault job,
+     *  so metadata only (activity/registry.ts). */
+    private readonly startJob?: StartJob
   ) {}
 
   /** This store holds the turn `askId`: the daemon asks before it hands a
@@ -217,7 +222,7 @@ export class VaultAsk {
       case 'vaultAskModels':
         return this.models(entered.role === 'owner');
       case 'vaultAsk':
-        return this.start(vaultAskSchema.parse(payload), entered);
+        return this.start(vaultAskSchema.parse(payload), entered, scope);
       case 'vaultAskPoll': {
         const turn = this.turns.get(vaultAskPollSchema.parse(payload).askId);
         // Someone else's turn reads as gone, not as theirs.
@@ -253,7 +258,8 @@ export class VaultAsk {
    *  payload says; a new chat on the pick. */
   private async start(
     payload: AskPayload,
-    entered: VaultCaller
+    entered: VaultCaller,
+    scope: VouchedScope
   ): Promise<BoardAgentActionMap['vaultAsk']['result']> {
     const chats = this.vault.chats;
     const thread = payload.chatId
@@ -291,7 +297,16 @@ export class VaultAsk {
       settled: Promise.resolve()
     };
     this.turns.set(askId, turn);
-    turn.settled = this.run(turn, input, entered);
+    const job = this.startJob?.({
+      type: 'research',
+      engine: input.engine,
+      vault: true,
+      startedBy: personOf(scope),
+      stop: () => turn.stop.abort()
+    });
+    turn.settled = this.run(turn, input, entered).finally(() =>
+      job?.end(turn.state.error ? 'failed' : 'done')
+    );
     return { askId, chatId };
   }
 
@@ -404,7 +419,7 @@ export class VaultAsk {
     feed.step(
       this.vault.storeName === 'vault'
         ? 'Searching your vault on this runner'
-        : 'Searching Runner Storage on this runner'
+        : 'Searching Runner Cloud on this runner'
     );
     const found = await this.vault.askPassages(input.question, entered);
     const passages = [

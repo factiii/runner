@@ -14,16 +14,16 @@ import {
 } from '../board-agent-core/agent';
 import { readSpacePorts } from '../board-agent-core/exec';
 import {
-  readSessionPorts,
-  sessionPortsEnv
-} from '../board-agent-core/port-blocks';
-import {
   addWorktree,
   extractDiff,
   setGitIdentity
 } from '../board-agent-core/git';
 import { killTree } from '../board-agent-core/host-env';
 import type { ModeEngine } from '../board-agent-core/mode';
+import {
+  readSessionPorts,
+  sessionPortsEnv
+} from '../board-agent-core/port-blocks';
 import { buildPrompt } from '../board-agent-core/prompt';
 import prompts from '../board-agent-core/prompts.json';
 import type { AgentProvider } from '../board-agent-core/providers';
@@ -35,11 +35,27 @@ import type {
 } from '../board-agent-core/session';
 import { toSummary } from '../board-agent-core/session';
 import type { SpaceCore } from '../board-agent-core/space-core';
-import type { CardRecord } from '../board-agent-core/state';
+import type { AskRecord, CardRecord } from '../board-agent-core/state';
 import { BoardConversations } from './board-conversations';
 import { putSessionCard, teardownSession } from './card-session';
 import { installFrpcHarness } from './frpc';
 import type { ClaudeSession } from './session';
+
+/** The CLI one Ask Board turn runs. Provider is locked to the conversation: a
+ *  resume keeps its own; only a fresh conversation honors a newly picked one,
+ *  and the board's own answers when nothing was picked. Exported for its
+ *  test (codex-notice.test.ts). */
+export function askTurnProvider(
+  conversation: Pick<AskRecord, 'provider' | 'sessionId'> | undefined,
+  picked: AgentProvider | undefined,
+  boardProvider: AgentProvider
+): AgentProvider {
+  return (
+    conversation?.provider ??
+    (conversation?.sessionId ? undefined : picked) ??
+    boardProvider
+  );
+}
 
 /** AI pipeline mode: automated research→implement→review pipeline + Ask Board
  *  chat, driven by the space's configured provider CLI. */
@@ -182,6 +198,19 @@ export class ClaudeModeEngine implements ModeEngine {
 
   // ── Board AI ("Ask Board") ──
 
+  /** The CLI the next turn of a conversation runs, read without starting
+   *  the turn (the engine's Codex notice asks before anything is recorded). */
+  async askProvider(params: {
+    provider?: AgentProvider;
+    conversationId?: string;
+  }): Promise<AgentProvider> {
+    return askTurnProvider(
+      await this.asks.find(params.conversationId),
+      params.provider,
+      this.core.agentProvider()
+    );
+  }
+
   async ask(
     params: {
       question: string;
@@ -199,12 +228,11 @@ export class ClaudeModeEngine implements ModeEngine {
     await this.core.ensureSpaceWorkspace();
     const conversation = await this.asks.beginTurn(params.conversationId);
     try {
-      // Provider is locked to the conversation: a resume keeps its own; only a
-      // fresh conversation honors a newly picked one.
-      const provider =
-        conversation.provider ??
-        (conversation.sessionId ? undefined : params.provider) ??
-        this.core.agentProvider();
+      const provider = askTurnProvider(
+        conversation,
+        params.provider,
+        this.core.agentProvider()
+      );
       this.asks.setProvider(conversation, provider);
       const askCwd = this.boardCwd();
       await assertAgentSignedIn(provider, this.core.target());
@@ -261,6 +289,14 @@ export class ClaudeModeEngine implements ModeEngine {
       this.askProcs.delete(conversation.id);
       this.asks.setBusy(conversation.id, false);
     }
+  }
+
+  /** Stop the CLI answering `conversationId` (Stop in the runner's
+   *  Activity, which always names one), or every conversation's when none is
+   *  named. */
+  stopAsks(conversationId?: string): void {
+    const ids = conversationId ? [conversationId] : [...this.askProcs.keys()];
+    for (const id of ids) this.stopAsk(id);
   }
 
   /** Stop the CLI answering a conversation, if one is. */

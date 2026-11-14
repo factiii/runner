@@ -20,6 +20,7 @@ import { parseDocumentDate } from '@shared/all/helpers/documentDate';
 import { joinRows } from '@shared/all/helpers/postContent';
 import type { RunnerCategorizePayload } from '@shared/all/validators';
 
+import type { JobHandle, StartJob } from '../activity/registry';
 import type { VaultDb } from './db';
 
 // Categorize on the runner (.specs/runner-vault-ask.md "Categorize on the runner").
@@ -247,7 +248,10 @@ export class VaultCategorize {
   constructor(
     private readonly db: VaultDb,
     private readonly engines: CategorizeEngines,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** A run is a `tagging` job in the runner's Activity: a Vault job, so
+     *  its engine, times, status and file count only (activity/registry.ts). */
+    private readonly startJob?: StartJob
   ) {}
 
   /** A run is going: the Vault takes no new file. */
@@ -335,7 +339,19 @@ export class VaultCategorize {
       doneAt: null
     };
     this.abort = new AbortController();
-    void this.go(this.run, this.abort.signal, files, tree, payload, owner);
+    const job = this.startJob?.({
+      type: 'tagging',
+      engine: payload.engine,
+      vault: true,
+      startedBy: { userId: owner, name: 'Owner', role: 'owner' },
+      stop: () => {
+        if (this.run?.running) {
+          this.run.stopped = true;
+          this.abort?.abort();
+        }
+      }
+    });
+    void this.go(this.run, this.abort.signal, files, tree, payload, owner, job);
     return this.status(owner);
   }
 
@@ -354,7 +370,8 @@ export class VaultCategorize {
     files: Waiting[],
     tree: CategoryTree,
     payload: RunnerCategorizePayload,
-    owner: number
+    owner: number,
+    job?: JobHandle
   ): Promise<void> {
     const started = this.now();
     const ask = (system: string, prompt: string) =>
@@ -378,6 +395,7 @@ export class VaultCategorize {
         if (signal.aborted) break;
         await this.save(file, owner, tags, notResearch ? null : payload.aiResearchId);
         run.processed += 1;
+        job?.setItems(run.processed);
         const each = (this.now() - started) / run.processed;
         run.etaSeconds = Math.round((each * (run.total - run.processed)) / 1000);
       }
@@ -392,6 +410,7 @@ export class VaultCategorize {
       run.finishedAt = new Date(this.now()).toISOString();
       run.doneAt = this.now();
       this.abort = null;
+      job?.end(run.error ? 'failed' : 'done');
     }
   }
 

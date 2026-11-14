@@ -80,7 +80,7 @@ export const MACHINE_SERVERS: readonly MachineServer[] = [
   },
   {
     id: 'frps',
-    description: 'frp server for *.dev.factiii.com previews (7443 control, 8081 vhost, admin 127.0.0.1:7500)',
+    description: 'frp server for previews, *.factiii.org (and *.dev.factiii.com until every runner has moved) (7443 control, 8081 vhost, admin 127.0.0.1:7500)',
     program: ['{servers}/dev-tunnel/bin/frps', '-c', '{servers}/dev-tunnel/frps.toml'],
     run: { kind: 'keep-alive' },
     credentials: [],
@@ -88,8 +88,33 @@ export const MACHINE_SERVERS: readonly MachineServer[] = [
     notes: 'No secret in frps.toml: logins and proxies are checked by https://api.factiii.com/frp-auth.'
   },
   {
+    id: 'previews-tunnel',
+    description:
+      'Cloudflare Tunnel "factiii-previews": frp.factiii.org -> frps 7443 (frpc over wss), *.factiii.org -> nginx 127.0.0.1:8082 -> frps 8081',
+    program: [
+      '/opt/homebrew/bin/cloudflared',
+      'tunnel',
+      '--no-autoupdate',
+      'run',
+      '--token-file',
+      '{servers}/dev-tunnel/cloudflared/token'
+    ],
+    run: { kind: 'keep-alive' },
+    credentials: [
+      {
+        name: 'cloudflared/token',
+        what: 'Cloudflare tunnel token (anyone holding it serves *.factiii.org)',
+        today: '~/factiii-dev-tunnel/cloudflared/token'
+      }
+    ],
+    replaces: 'com.factiii.cloudflared-previews',
+    notes:
+      'Routes live in Cloudflare (remotely managed tunnel), set with the CLOUDFLARE_FACTIII_ORG_TOKEN key. No home port: once every runner uses it, the router forwards nothing and cloudflare-ddns and cert-renew go.'
+  },
+  {
     id: 'dev-previews-nginx',
-    description: 'nginx for *.dev.factiii.com (80/443) in front of frps 8081',
+    description:
+      'nginx in front of frps 8081: 127.0.0.1:8082 for the factiii.org tunnel (offline page, health), and *.dev.factiii.com 80/443 until every runner has moved',
     program: [
       '/opt/homebrew/bin/nginx',
       '-c',
@@ -111,7 +136,8 @@ export const MACHINE_SERVERS: readonly MachineServer[] = [
   },
   {
     id: 'cloudflare-ddns',
-    description: 'Keeps dev.factiii.com and *.dev.factiii.com A records on the home IP',
+    description:
+      'Keeps dev.factiii.com and *.dev.factiii.com A records on the home IP (goes once every runner uses the factiii.org tunnel)',
     program: ['/bin/sh', '{servers}/ddns/cloudflare-ddns.sh'],
     run: { kind: 'interval', seconds: 300 },
     credentials: [
@@ -126,7 +152,8 @@ export const MACHINE_SERVERS: readonly MachineServer[] = [
   },
   {
     id: 'cert-renew',
-    description: 'Renews the *.dev.factiii.com wildcard (DNS-01) weekly and reloads nginx',
+    description:
+      'Renews the *.dev.factiii.com wildcard (DNS-01) weekly and reloads nginx (goes with dev.factiii.com; Cloudflare holds factiii.org\'s certificate)',
     program: ['/bin/bash', '{servers}/dev-tunnel/renew-cert.sh'],
     run: { kind: 'calendar', weekday: 1, hour: 4, minute: 17 },
     credentials: [

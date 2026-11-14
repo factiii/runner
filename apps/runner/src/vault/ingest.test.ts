@@ -12,7 +12,7 @@ import type { EmbedRequest } from '@shared/all/validators';
 import { openVaultDb, type VaultDb } from './db';
 import { type Embedder, EmbedderError, type EmbedderState } from './embedder';
 import { VaultIngest } from './ingest';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 
 // The ingest on a real database (PGlite, the generated schema) with a fake

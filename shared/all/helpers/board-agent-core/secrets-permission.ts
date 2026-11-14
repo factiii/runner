@@ -9,7 +9,8 @@ import { SECRETS_BIN } from './plugin';
 // the `claude` or `codex` someone types into a terminal.
 //
 // Every `factiii-secrets run` already waits for the owner's password, shown the
-// exact command (space-core.ts: "a free command here always prompts"), and
+// exact command, unless that owner kept a session window open for this one
+// session and these keys (secrets-window.ts SessionWindows), and
 // `list` prints key names only. Claude's auto-mode classifier refused a
 // deploy skill's own `factiii-secrets run --file <ssh key> -- ssh ...` as a
 // production read, so the owner was never asked.

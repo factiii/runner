@@ -14,9 +14,17 @@
 // a shared file the runner never reaches never ships. A denylist and a secret
 // scan then refuse the run if anything private slipped through.
 //
+// The mirror ships a pnpm-lock.yaml (writeLockfile), so an install there gets
+// the same package versions the release was built with.
+//
 // Usage (from the repo root):
 //   pnpm --filter @factiii/runner exec node scripts/public-mirror.mjs <outDir> [--verify]
-// --verify installs the mirror and runs its build and tests in <outDir>.
+// --verify installs the mirror from its lockfile (--frozen-lockfile, so a
+// lockfile that does not match the mirror's manifests fails), builds it twice
+// and checks the two builds are byte-identical (scripts/reproducible-build.mjs,
+// which writes SHA256SUMS at the mirror's root), and runs its tests (the
+// runner's and vault-core's). release-runner.yml runs the same three as
+// separate steps in the mirror, each with its own time limit.
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -47,9 +55,9 @@ const SECRET = [
   /\bnpm_[A-Za-z0-9]{36}\b/
 ];
 
-/** Runner tests that check the runner against the server itself, so they
- *  only mean something in the monorepo. */
-const MONOREPO_ONLY = ['apps/runner/src/vault/schemaGen.test.ts'];
+/** Tests that check the runner against the server itself, so they only mean
+ *  something in the monorepo. */
+const MONOREPO_ONLY = ['shared/vault-core/schemaGen.test.ts'];
 
 /** The embedder files `bundle:embedder` copies; keep in step with package.json. */
 const EMBEDDER = [
@@ -68,11 +76,14 @@ const gitFiles = (dir) =>
     .split('\0')
     .filter(Boolean);
 
-/** Every shared file the runner's sources reach, through any import. */
+/** Every shared file the runner's sources reach, through any import, and
+ *  every vault-core module and test (its own test script runs in the mirror,
+ *  and a module the runner does not import yet is still the package's). */
 async function sharedFilesReached() {
-  const entryPoints = gitFiles('apps/runner')
-    .filter((f) => f.startsWith('apps/runner/src/') && f.endsWith('.ts'))
-    .map((f) => path.join(ROOT, f));
+  const entryPoints = [
+    ...gitFiles('apps/runner').filter((f) => f.startsWith('apps/runner/src/') && f.endsWith('.ts')),
+    ...gitFiles('shared/vault-core').filter((f) => f.endsWith('.ts') && !MONOREPO_ONLY.includes(f))
+  ].map((f) => path.join(ROOT, f));
   const result = await build({
     entryPoints,
     // Metafile paths are relative to this, and read back against ROOT below.
@@ -150,7 +161,7 @@ function resolveCatalog(deps) {
  *  the mirror leaves out. */
 function exportsFor(dir, files) {
   const map = {};
-  for (const f of files.filter((x) => x.startsWith(`${dir}/`) && x.endsWith('.ts'))) {
+  for (const f of files.filter((x) => x.startsWith(`${dir}/`) && x.endsWith('.ts') && !x.endsWith('.test.ts'))) {
     const sub = f.slice(dir.length + 1, -'.ts'.length);
     map[sub === 'index' ? '.' : `./${sub}`] = `./${sub}.ts`;
     if (sub.endsWith('/index')) map[`./${sub.slice(0, -'/index'.length)}`] = `./${sub}.ts`;
@@ -182,20 +193,30 @@ function writeWorkspace(out, version, files) {
   const all = readJson('shared/all/package.json');
   writeJson(out, 'shared/all/package.json', sharedManifest('shared/all', files, { zod: all.dependencies.zod }, {}));
 
-  const vault = readJson('shared/vault-router/package.json');
-  const vaultManifest = sharedManifest(
-    'shared/vault-router',
+  // vault-core: the stores' access rules, the Ollama-only gate, encryption
+  // and the lock (.specs/runner-vault.md "vault-core"), and the vault router
+  // with its Prisma queries. Node's own crypto, so nothing past @shared/all,
+  // the router's tRPC and zod, and the Prisma client its postinstall
+  // generates from vault.prisma; tsx runs its tests and esbuild its
+  // no-network test.
+  const core = readJson('shared/vault-core/package.json');
+  const coreManifest = sharedManifest(
+    'shared/vault-core',
     files,
     {
-      '@prisma/client': vault.dependencies['@prisma/client'],
+      '@prisma/client': core.dependencies['@prisma/client'],
       '@shared/all': 'workspace:*',
-      '@trpc/server': vault.dependencies['@trpc/server'],
-      zod: vault.dependencies.zod
+      '@trpc/server': core.dependencies['@trpc/server'],
+      zod: core.dependencies.zod
     },
-    { prisma: vault.devDependencies.prisma }
+    {
+      esbuild: core.devDependencies.esbuild,
+      prisma: core.devDependencies.prisma,
+      tsx: core.devDependencies.tsx
+    }
   );
-  vaultManifest.scripts = { postinstall: 'prisma generate --schema vault.prisma' };
-  writeJson(out, 'shared/vault-router/package.json', vaultManifest);
+  coreManifest.scripts = { postinstall: core.scripts.postinstall, test: core.scripts.test };
+  writeJson(out, 'shared/vault-core/package.json', coreManifest);
 
   writeJson(out, 'package.json', {
     name: 'factiii-runner-source',
@@ -204,7 +225,8 @@ function writeWorkspace(out, version, files) {
     packageManager: readJson('package.json').packageManager,
     scripts: {
       build: 'pnpm --filter @factiii/runner build',
-      test: 'pnpm --filter @factiii/runner test'
+      'build:check': 'node apps/runner/scripts/reproducible-build.mjs apps/runner --out SHA256SUMS',
+      test: 'pnpm --filter @shared/vault-core test && pnpm --filter @factiii/runner test'
     }
   });
   fs.writeFileSync(
@@ -229,8 +251,14 @@ what you read here is what \`dist/cli.js\` is built from. Pull requests are not
 merged here; please open an issue instead.
 
 - What the runner can do, and how you control it: [DISCLOSURE](apps/runner/DISCLOSURE)
-- Build: \`pnpm install && pnpm build\` (output in \`apps/runner/dist\`)
-- Test: \`pnpm test\`
+- What the Vault and Runner Cloud keep, who reads them, and how to report a problem: [SECURITY](SECURITY.md)
+  (the code: \`shared/vault-core\`)
+- Build: \`pnpm install --frozen-lockfile && pnpm build\` (output in \`apps/runner/dist\`).
+  \`pnpm-lock.yaml\` pins every package to the version the release was built with.
+- Check the build: \`pnpm build:check\` builds twice, fails unless both are
+  byte-identical, and writes their checksums to \`SHA256SUMS\` (a release
+  commits the one its own check wrote, vault-core's line included)
+- Test: \`pnpm test\` (vault-core's tests, then the runner's)
 - Release tarballs: see Releases. Install one with \`npm install -g ./factiii-runner-<version>.tgz\`.
 
 Contact: support@factiii.com
@@ -247,6 +275,28 @@ function check(files) {
     for (const re of SECRET) if (re.test(text)) leaks.push(`${f} (${re})`);
   }
   if (leaks.length) throw new Error(`Refusing files that look like they hold secrets:\n  ${leaks.join('\n  ')}`);
+}
+
+/** The projects of the mirror's workspace, as its lockfile names them. */
+const MIRROR_PROJECTS = ['.', 'apps/runner', 'configs/typescript', 'shared/all', 'shared/vault-core'];
+
+/** The mirror's pnpm-lock.yaml, so `pnpm install` there is reproducible. pnpm
+ *  writes it the standard way (`install --lockfile-only`, against the mirror's
+ *  own manifests), starting from the monorepo's lockfile: every package keeps
+ *  the version the monorepo installed and the release was built with, and the
+ *  monorepo's other projects drop out. Refused if any of them is still named. */
+function writeLockfile(out) {
+  const lockfile = path.join(out, 'pnpm-lock.yaml');
+  fs.copyFileSync(path.join(ROOT, 'pnpm-lock.yaml'), lockfile);
+  execFileSync('pnpm', ['install', '--lockfile-only', '--ignore-scripts'], { cwd: out, stdio: 'inherit' });
+  const text = fs.readFileSync(lockfile, 'utf8');
+  const importers = text.match(/^importers:\n([\s\S]*?)^\S/m)?.[1] ?? '';
+  const projects = [...importers.matchAll(/^ {2}(\S[^:]*):/gm)].map((m) => m[1]);
+  const extra = projects.filter((p) => !MIRROR_PROJECTS.includes(p));
+  if (!projects.includes('apps/runner') || extra.length) {
+    throw new Error(`The mirror's lockfile names other projects: ${extra.join(', ') || '(no apps/runner)'}`);
+  }
+  for (const re of SECRET) if (re.test(text)) throw new Error(`The mirror's lockfile looks like it holds a secret (${re})`);
 }
 
 async function main() {
@@ -275,12 +325,13 @@ async function main() {
   );
   const shared = (await sharedFilesReached()).filter((f) => !f.endsWith('/package.json'));
   const extra = [
-    'shared/vault-router/vault.prisma',
-    'shared/vault-router/.gitignore',
+    'shared/vault-core/vault.prisma',
+    'shared/vault-core/.gitignore',
     // esbuild reads these: target and class-field semantics. Without them the
     // mirror compiles the shared code differently from the release.
     'shared/all/tsconfig.json',
-    'shared/vault-router/tsconfig.json',
+    'shared/vault-core/tsconfig.json',
+    'shared/vault-core/SECURITY.md',
     'configs/typescript/package.json',
     'configs/typescript/base.json',
     ...EMBEDDER.map((f) => `services/embedder/${f}`)
@@ -288,24 +339,30 @@ async function main() {
   const files = [...runnerFiles, ...shared, ...extra];
   check(files);
   for (const f of files) copy(f, out);
+  // GitHub shows a root SECURITY.md as the repository's security policy.
+  fs.copyFileSync(path.join(ROOT, 'shared/vault-core/SECURITY.md'), path.join(out, 'SECURITY.md'));
 
   const version = readJson('apps/runner/package.json').version;
   writeWorkspace(out, version, files);
+  writeLockfile(out);
   fs.writeFileSync(path.join(out, 'MIRRORED_FILES.txt'), `${files.sort().join('\n')}\n`);
 
   const count = (prefix) => files.filter((f) => f.startsWith(prefix)).length;
   console.log(
     `Mirror of @factiii/runner ${version} in ${out}: ${count('apps/runner/')} runner files, ` +
-      `${count('shared/all/')} from shared/all, ${count('shared/vault-router/')} from shared/vault-router, ` +
+      `${count('shared/all/')} from shared/all, ` +
+      `${count('shared/vault-core/')} from shared/vault-core, ` +
       `${count('services/embedder/')} from services/embedder.`
   );
 
   if (flags.includes('--verify')) {
     const run = (cmd, args) => execFileSync(cmd, args, { cwd: out, stdio: 'inherit' });
-    run('pnpm', ['install', '--no-frozen-lockfile']);
-    run('pnpm', ['build']);
+    // From the lockfile writeLockfile wrote, exactly as a user's install is.
+    run('pnpm', ['install', '--frozen-lockfile']);
+    // Built twice and compared; SHA256SUMS is committed with the mirror.
+    run('pnpm', ['build:check']);
     run('pnpm', ['test']);
-    console.log('Mirror installs, builds and passes its tests.');
+    console.log('Mirror installs from its lockfile, builds the same twice and passes its tests.');
   }
 }
 

@@ -1,4 +1,5 @@
 import type { AskImage } from '@shared/all/domains/electron';
+import { runnerTooOld } from '@shared/all/domains/runnerProtocol';
 import {
   AI_MODEL_NO_VISION,
   AI_NO_CLI_SIGNED_IN,
@@ -9,6 +10,7 @@ import {
 } from '@shared/all/validators';
 import { ollamaModelInUse } from '@shared/all/helpers/oakboxBackend';
 
+import { currentVersion } from '../selfUpdate';
 import type { AskEngines } from './ask';
 
 // Factiii's AI features on the owner's runner (.specs/oakbox.md "Backend" →
@@ -31,15 +33,16 @@ export type AiPromptEngines = Pick<
   AskEngines,
   'clis' | 'signedIn' | 'ollamaModels' | 'ollama'
 > & {
-  /** Claude or Codex with no tools; resolves the whole answer. `images`
-   *  go with the prompt. */
+  /** Claude or Codex with no tools; resolves the whole answer and the
+   *  model that ran it (null when the CLI did not say and none was asked
+   *  for). `images` go with the prompt. */
   cliPlain(
     engine: 'claude' | 'codex',
     prompt: string,
     settings?: CliAskSettings,
     signal?: AbortSignal,
     images?: AskImage[]
-  ): Promise<string>;
+  ): Promise<{ text: string; model: string | null }>;
   /** Whether the Ollama model reads images. */
   ollamaSeesImages(model: string): Promise<boolean>;
 };
@@ -77,15 +80,26 @@ async function pickEngine(
   return { engine: 'ollama', model: tag };
 }
 
-/** Answer one `aiPrompt`. Throws a refusal the client shows (a bad payload,
- *  no engine) or the engine's own error. */
+/** Answer one `aiPrompt`: the text, the engine and the model that answered
+ *  (the Ollama tag; Claude's or Codex's when known, else null), so a feature
+ *  can name the model on what the person posts with it (a Dark Patterns
+ *  suggestion's model factiii). Throws a refusal the client shows (a bad
+ *  payload, no engine) or the engine's own error. */
 export async function answerAiPrompt(
   engines: AiPromptEngines,
   payload: unknown,
   signal?: AbortSignal
-): Promise<{ text: string; engine: Engine }> {
+): Promise<{ text: string; engine: Engine; model: string | null }> {
   const parsed = aiPromptPayloadSchema.safeParse(payload ?? {});
-  if (!parsed.success) throw new Error('An AI request needs a prompt.');
+  if (!parsed.success) {
+    // A field this runner does not know comes from a newer app that did not
+    // check this runner's features (.specs/versioning.md "Protocol"): say the
+    // runner is too old, not that the prompt is missing.
+    if (parsed.error.issues.some((issue) => issue.code === 'unrecognized_keys')) {
+      throw new Error(runnerTooOld(currentVersion()));
+    }
+    throw new Error('An AI request needs a prompt.');
+  }
   const { prompt, engine: asked, model, claude, codex, cliOnly, images } = parsed.data;
   const { engine, model: tag } = await pickEngine(engines, asked, model, cliOnly);
   if (engine === 'ollama') {
@@ -105,11 +119,11 @@ export async function answerAiPrompt(
       undefined,
       signal
     );
-    return { text: text.trim(), engine };
+    return { text: text.trim(), engine, model: tag };
   }
   const settings = engine === 'claude' ? claude : codex;
-  const text = await engines.cliPlain(engine, prompt, settings, signal, images);
-  return { text: text.trim(), engine };
+  const answer = await engines.cliPlain(engine, prompt, settings, signal, images);
+  return { text: answer.text.trim(), engine, model: answer.model };
 }
 
 /** Which engines read images with an `aiPrompt` (`aiPromptInfo`). Claude

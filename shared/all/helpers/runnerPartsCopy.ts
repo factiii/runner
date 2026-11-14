@@ -265,12 +265,16 @@ export function vaultIngestLine(ingest: RunnerVaultIngest): string | null {
 export const vaultReading = (status: RunnerVaultStatus | null): boolean =>
   status?.ingest?.running === true;
 
-/** Under the Vault part when the owner shares no vault on Factiii. */
+/** Under the Vault part when the owner shares with nobody in Oakbox. The
+ *  Vault itself is never shared (.specs/vault.md rule 2): the people let in
+ *  open Runner Cloud. */
 export const VAULT_SHARE_NONE =
-  'Only you can open it. To share it, add someone to your shared vault in Oakbox, Account.';
+  'Only you can open your Vault. To share Runner Cloud, add someone under Sharing in Oakbox, Account.';
 
-/** The switch beside a shared-vault peer. */
-export const vaultShareLabel = (name: string) => `${name} can open it`;
+/** The switch beside someone shared with in Oakbox: it lets them into Runner Cloud,
+ *  never the Vault. */
+export const vaultShareLabel = (name: string) =>
+  `${name} can open your Runner Cloud`;
 
 /** Under the Local AI module's Model: the model it pulled for this
  *  machine, "Llama 3.1 8B · about 4.9 GB", or null when none fits. */
@@ -284,3 +288,24 @@ export function localAiModelLine(localAi: RunnerLocalAi): string | null {
 /** Where another model is picked: Oakbox Ask, not Setup. */
 export const LOCAL_AI_ASK_LINE =
   'Ask with it, or with another model on this machine, from the model menu in Oakbox Ask.';
+
+/** The runner page's one Oakbox section (.specs/oakbox.md "Shared screens",
+ *  card a9bec1e7 step 6): what Oakbox keeps and runs on this computer, under
+ *  the Vault storage part. Oakbox's settings are not here: they are the
+ *  shared screens' Account, where the link goes. */
+export const OAKBOX_ON_THIS_COMPUTER = 'Oakbox on this computer';
+
+/** The section's link to the settings Factiii and Oakbox share. */
+export const OAKBOX_SETTINGS_LABEL = 'Oakbox settings';
+
+/** The section's private AI line: the Ollama model Local AI pulled, or that
+ *  there is none yet, since only it reads the Vault (.specs/vault.md rule
+ *  4). */
+export function oakboxOllamaLine(
+  localAi: RunnerLocalAi | null | undefined
+): string {
+  const model = localAi ? localAiModelLine(localAi) : null;
+  return model
+    ? `Private AI (Ollama): ${model}`
+    : 'No private AI (Ollama) on this computer yet. Add Local AI to read your Vault.';
+}

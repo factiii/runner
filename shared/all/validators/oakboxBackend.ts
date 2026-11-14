@@ -4,20 +4,44 @@ import { ASK_IMAGE_TYPES } from '../domains/electron';
 import { aiCliSchema, aiSourceSchema } from './aiSource';
 import { ollamaTagSchema } from './runnerParts';
 
-// How Oakbox works for an account (.specs/oakbox.md "Backend"): on Factiii's
-// servers (with a computer of the person's own searched beside them, if one is
-// chosen), or on that computer alone. Kept on the account, so every device the
-// person signs in on works the same way. A mode and ids only, never content.
+// The settings Factiii and Oakbox share (.specs/vault.md "Shared settings"):
+// one record per account, each setting stored once, so every app and device
+// follows it. Ids and choices only, never content. The record is still named
+// for Oakbox's Backend, where it began.
 
-const OAKBOX_BACKEND_MODES = ['FACTIII', 'RUNNER'] as const;
+/** Where NEW items go (.specs/vault.md "The default location"): Factiii
+ *  Cloud, the runner's Runner Cloud, or its Vault. A new account is on
+ *  Cloud. Replaced the backend mode (FACTIII/RUNNER) on 2026-11-11. */
+export const DATA_LOCATIONS = ['CLOUD', 'RUNNER', 'VAULT'] as const;
 
-const oakboxBackendModeSchema = z.enum(OAKBOX_BACKEND_MODES);
+export const dataLocationSchema = z.enum(DATA_LOCATIONS);
 
-/** What `set` takes: an app from before the two modes may still send
- *  HYBRID ("Both"), which became Factiii with its computer. */
-const oakboxBackendModeInputSchema = z
-  .enum([...OAKBOX_BACKEND_MODES, 'HYBRID'])
+export type DataLocation = z.infer<typeof dataLocationSchema>;
+
+/** The backend mode, as an app from before the default location sends and
+ *  reads it: FACTIII is a Cloud default, RUNNER a runner one. HYBRID
+ *  ("Both", older still) became Factiii with its computer. */
+export const legacyBackendModeSchema = z
+  .enum(['FACTIII', 'RUNNER', 'HYBRID'])
   .transform((mode) => (mode === 'HYBRID' ? 'FACTIII' : mode));
+
+export type LegacyBackendMode = 'FACTIII' | 'RUNNER';
+
+/** The mode an older app reads for a default location. */
+export const legacyBackendMode = (location: DataLocation): LegacyBackendMode =>
+  location === 'CLOUD' ? 'FACTIII' : 'RUNNER';
+
+/** The default an older app's mode saves: FACTIII is Cloud; RUNNER keeps a
+ *  runner default already saved (it cannot tell Runner Cloud from the
+ *  Vault), else the Vault, which the old Runner mode is (Jon, 2026-11-11,
+ *  q21). */
+export const locationFromLegacyMode = (
+  mode: LegacyBackendMode,
+  saved: DataLocation
+): DataLocation => {
+  if (mode === 'FACTIII') return 'CLOUD';
+  return saved === 'CLOUD' ? 'VAULT' : saved;
+};
 
 // Claude and Codex in Ask on a runner (.specs/runner-vault-ask.md "Oakbox's
 // backend: setup, sign-ins, models"): the model and effort each runs with, picked in Account >
@@ -155,7 +179,12 @@ export const aiPromptPayloadSchema = z
 export type AiPromptPayload = z.infer<typeof aiPromptPayloadSchema>;
 
 export const oakboxBackendSetSchema = z.object({
-  mode: oakboxBackendModeInputSchema,
+  /** Where new items go. Absent from an app from before it, which sends
+   *  `mode`; with neither, the saved one is kept. */
+  defaultLocation: dataLocationSchema.optional(),
+  /** An older app's backend mode (`locationFromLegacyMode`). Ignored when
+   *  `defaultLocation` is sent. */
+  mode: legacyBackendModeSchema.optional(),
   /** The runner Oakbox uses; one of the account's own. */
   runnerId: z.number().int().positive().nullable(),
   /** The Ollama model Ask starts on, on that runner. */
@@ -180,5 +209,3 @@ export const oakboxBackendSetSchema = z.object({
    *  kept. */
   aiRunnerId: z.number().int().positive().nullable().optional()
 });
-
-export type OakboxBackendMode = z.infer<typeof oakboxBackendModeSchema>;

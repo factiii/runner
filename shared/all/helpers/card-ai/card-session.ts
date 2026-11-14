@@ -1,11 +1,11 @@
 import type { ExecTarget } from '../board-agent-core/exec';
 import {
   isDisposableWorktree,
-  touchedWithin,
   isWorktreePath,
   listTerminalWorktrees,
   removeWorktree,
   removeWorktreeAndBranch,
+  touchedWithin,
   worktreeLeftovers
 } from '../board-agent-core/git';
 import { releaseSessionPorts } from '../board-agent-core/port-blocks';
@@ -28,10 +28,7 @@ import {
 
 /** What a teardown needs: a live session, or the card record standing in for
  *  one the engine no longer holds in memory. */
-type TeardownSubject = Pick<
-  BaseSession,
-  'postId' | 'mode' | 'workspacePath'
->;
+type TeardownSubject = Pick<BaseSession, 'postId' | 'mode' | 'workspacePath'>;
 
 /** Git card: runs in its own worktree. */
 export function isWorktreeSession(
@@ -55,6 +52,7 @@ function sessionToRecord(s: BaseSession, prompt = ''): CardRecord {
     cardId: s.cardId,
     startedBy: s.startedBy,
     startedVia: s.startedVia,
+    startedByRunner: s.startedByRunner,
     taskTitle: s.taskTitle,
     targetBranch: s.targetBranch,
     startedAt: s.startedAt,

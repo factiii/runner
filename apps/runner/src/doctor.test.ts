@@ -6,9 +6,11 @@ import type { ToolPlan } from '@shared/all/helpers/board-agent-core';
 import {
   BREW_SHELLENV,
   buildChecks,
+  DESKTOP_INSTALLS,
   countSimulators,
   type DoctorHost,
   type DoctorUi,
+  ollamaManualInstall,
   parsePmset,
   renderResult,
   runDoctor
@@ -279,11 +281,12 @@ describe('Homebrew on the login PATH', () => {
 });
 
 describe('fixes', () => {
+  // Tools the runner may still install (none Factiii Desktop installs).
   const missingTools = () =>
     toolPlans({
-      tmux: { command: 'brew install tmux', sudo: false },
-      sops: { command: 'brew install sops', sudo: false },
-      'age-keygen': { command: 'brew install age', sudo: false }
+      git: { command: 'brew install git', sudo: false },
+      node: { command: 'brew install node', sudo: false },
+      sops: { command: 'brew install sops', sudo: false }
     });
 
   it('never asks without a terminal', async () => {
@@ -295,7 +298,7 @@ describe('fixes', () => {
     );
     assert.equal(exitCode, 0);
     assert.deepEqual(ui.installed, []);
-    assert.ok(ui.lines.some((line) => line.includes('The runner can install it: brew install tmux')));
+    assert.ok(ui.lines.some((line) => line.includes('The runner can install it: brew install git')));
   });
 
   it('never asks with --no-fix, terminal or not', async () => {
@@ -316,10 +319,40 @@ describe('fixes', () => {
     };
     const host = fakeHost({ tools: async () => (installed ? toolPlans() : missingTools()) });
     const { results, exitCode } = await runDoctor(buildChecks(host), ui, { fix: true });
-    assert.deepEqual(ui.installed, ['tmux', 'sops', 'age-keygen']);
+    assert.deepEqual(ui.installed, ['git', 'node', 'sops']);
     assert.deepEqual(ui.asked, ['Fix it for me? [Y/n] ', 'Fix it for me? [Y/n] ', 'Fix it for me? [Y/n] ']);
     assert.equal(exitCode, 0);
-    assert.equal(state(results, 'tmux'), 'met');
+    assert.equal(state(results, 'git'), 'met');
+  });
+
+  // Card d26fbbbb: Factiii Desktop installs tmux, the AI CLIs and what it
+  // carries, so the runner never offers them; a machine without the app
+  // gets the command to run itself.
+  it('never offers a tool Factiii Desktop installs, and prints its command', async () => {
+    const ui = fakeUi(true);
+    const host = fakeHost({
+      tools: async () =>
+        toolPlans({
+          tmux: { command: 'brew install tmux', sudo: false },
+          claude: { command: 'npm install -g @anthropic-ai/claude-code@~2.1.0', sudo: false },
+          'age-keygen': null
+        })
+    });
+    const { results } = await runDoctor(buildChecks(host), ui, { fix: true });
+    assert.deepEqual(ui.asked, []);
+    assert.deepEqual(ui.installed, []);
+    assert.equal(results.find((r) => r.id === 'tmux')?.fix?.kind, 'command');
+    const text = ui.lines.join('\n');
+    assert.ok(text.includes(DESKTOP_INSTALLS));
+    assert.ok(text.includes('Without the app, install it yourself:'));
+    assert.ok(text.includes('    brew install tmux'));
+    assert.ok(!text.includes('The runner can install it: brew install tmux'));
+    // No package here: the manual line instead of a command.
+    assert.deepEqual(results.find((r) => r.id === 'age-keygen')?.fix, {
+      kind: 'command',
+      note: [DESKTOP_INSTALLS, 'No package manager was found (brew, apt-get, dnf, pacman).'],
+      commands: []
+    });
   });
 
   it('installs nothing on a no', async () => {
@@ -402,14 +435,14 @@ describe('fixes', () => {
   it('reports an install that failed and stays unmet', async () => {
     const ui = fakeUi(true);
     ui.installTool = async () => {
-      throw new Error('Failed to install tmux with `brew install tmux`.');
+      throw new Error('Failed to install git with `brew install git`.');
     };
     const host = fakeHost({
-      tools: async () => toolPlans({ tmux: { command: 'brew install tmux', sudo: false } })
+      tools: async () => toolPlans({ git: { command: 'brew install git', sudo: false } })
     });
     const { results } = await runDoctor(buildChecks(host), ui, { fix: true });
-    assert.equal(state(results, 'tmux'), 'unmet');
-    assert.ok(ui.lines.some((line) => line.includes('Failed to install tmux')));
+    assert.equal(state(results, 'git'), 'unmet');
+    assert.ok(ui.lines.some((line) => line.includes('Failed to install git')));
   });
 });
 
@@ -441,5 +474,16 @@ describe('probe parsing', () => {
       { sleep: 0, autorestart: 1 }
     );
     assert.deepEqual(parsePmset(' sleep                10\n'), { sleep: 10, autorestart: null });
+  });
+});
+
+describe('ollamaManualInstall', () => {
+  it('says the Linux script (which asks for sudo), never as a fix to run', () => {
+    assert.match(ollamaManualInstall('linux'), /ollama\.com\/install\.sh/);
+    assert.match(ollamaManualInstall('linux'), /your password/);
+  });
+  it('points a Mac without Homebrew at brew.sh or the download', () => {
+    assert.match(ollamaManualInstall('darwin'), /brew\.sh/);
+    assert.match(ollamaManualInstall('darwin'), /ollama\.com\/download/);
   });
 });

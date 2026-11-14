@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { launchdLabel } from '@shared/all/helpers/board-agent-core/runner-dir';
+
 import { supervisorExitCode } from './selfUpdate';
 import {
   installService,
@@ -264,6 +266,9 @@ describe('renderLaunchAgent', () => {
     const dev = { ...mac, runnerDir: '/Users/jo/.factiii-runner-dev', customDir: true };
     const label = serviceName(dev);
     assert.match(label, /^com\.factiii\.runner\.[0-9a-f]{8}$/);
+    // Factiii Dev's runner monitor finds the job by the same name.
+    assert.equal(launchdLabel({ FACTIII_RUNNER_DIR: dev.runnerDir }), label);
+    assert.equal(launchdLabel({}), serviceName(mac));
     assert.equal(
       serviceFiles(dev).definition,
       `/Users/jo/Library/LaunchAgents/${label}.plist`

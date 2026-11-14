@@ -2,7 +2,10 @@ import path from 'node:path';
 
 import type { RunnerMachineHealth } from '@shared/all/domains/electron';
 import type { ToolPlan } from '@shared/all/helpers/board-agent-core';
-import { ENVIRONMENT_TOOLS } from '@shared/all/helpers/board-agent-core/toolchain';
+import {
+  desktopProvides,
+  ENVIRONMENT_TOOLS
+} from '@shared/all/helpers/board-agent-core/toolchain';
 import {
   CLEANUP_SAFE_NOTE,
   diskLine,
@@ -25,7 +28,9 @@ import {
 // `factiii-runner doctor` runs it again.
 //
 // Three kinds of fix, and the runner only ever performs the first:
-//   install / folder  no root needed, so it offers to do it
+//   install / folder  no root needed, so it offers to do it (never a tool
+//                     Factiii Desktop installs: tmux, the AI CLIs, what the
+//                     app carries; those print their command, as below)
 //   command           needs root or is the owner's call: printed, never run
 //   settings          only a person can tick the box: it names the pane and
 //                     offers to open it
@@ -56,6 +61,17 @@ export type Check = {
   required: boolean;
   check(): Promise<CheckStatus>;
 };
+
+/** How a person installs Ollama where the runner cannot (card a9bec1e7
+ *  step 10). The runner installs it only through Homebrew, which needs no
+ *  administrator, and never runs anything as root. On Linux, Ollama's own
+ *  script asks for sudo, so it is said, never run. */
+export function ollamaManualInstall(platform: NodeJS.Platform): string {
+  if (platform === 'linux') {
+    return 'On Linux, install it yourself (it asks for your password): curl -fsSL https://ollama.com/install.sh | sh, then check again.';
+  }
+  return 'Install Homebrew (brew.sh) and set it up again, or download Ollama from ollama.com/download.';
+}
 
 export type DoctorHost = {
   platform: NodeJS.Platform;
@@ -91,6 +107,10 @@ export type DoctorHost = {
 
 const MIN_NODE_MAJOR = 20;
 
+/** The doctor's line for a tool Factiii Desktop installs. */
+export const DESKTOP_INSTALLS =
+  "On a Mac, Factiii Desktop installs this (Set up this computer).";
+
 const met = (detail: string): CheckStatus => ({ state: 'met', detail });
 
 /** The checks for this host, and `refresh` to probe the tools again after
@@ -121,6 +141,23 @@ export function buildChecks(host: DoctorHost): {
     async check() {
       const plan = (await tools()).find((t) => t.bin === bin);
       if (plan?.location) return met(plan.location);
+      // Factiii Desktop's Set up this computer installs it, so the runner
+      // never does: on a Mac, the app; elsewhere (Linux, headless) the
+      // command to run, or the manual line when this host has no package.
+      if (desktopProvides(bin)) {
+        return {
+          state: 'unmet',
+          detail: 'Not found on the login PATH.',
+          fix: {
+            kind: 'command',
+            note: [
+              DESKTOP_INSTALLS,
+              ...(plan?.install ? ['Without the app, install it yourself:'] : [manual])
+            ],
+            commands: plan?.install ? [plan.install.command] : []
+          }
+        };
+      }
       if (!plan?.install) return { state: 'unmet', detail: `Not found. ${manual}` };
       const { command, sudo } = plan.install;
       return {
@@ -217,12 +254,7 @@ export function buildChecks(host: DoctorHost): {
           ...ENVIRONMENT_TOOLS.map((t) =>
             tool(t.bin, t.title, t.purpose, t.manual)
           ),
-          tool(
-            'ollama',
-            'Ollama',
-            'local AI',
-            'Install it from ollama.com, or install Homebrew and add the Local AI part.'
-          ),
+          tool('ollama', 'Ollama', 'local AI', ollamaManualInstall(host.platform)),
           {
             id: 'local-ai-model',
             title: 'Local AI model',

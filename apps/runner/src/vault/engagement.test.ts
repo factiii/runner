@@ -10,7 +10,7 @@ import {
 } from '@shared/all/helpers/board-agent-core/runner-access';
 
 import { openVaultDb, type VaultDb } from './db';
-import { FsObjectStore } from './objectStore';
+import { FsObjectStore } from '@shared/vault-core/objectStore';
 import { RunnerVault } from './service';
 
 // The owner's viewing data in the Vault (.specs/analytics.md "The runner's
@@ -23,6 +23,7 @@ const NY = 'America/New_York';
 // 2026-11-03 09:00 in New York.
 const NINE = Date.UTC(2026, 10, 3, 14);
 const MINUTE = 60_000;
+const DAY = 86_400_000;
 
 const interval = (id: string, startedAt: number, minutes: number, postId = 'post-1') => ({
   kind: 'interval' as const,
@@ -44,7 +45,6 @@ describe('the Vault’s viewing data', () => {
     db = await openVaultDb({ dataDir: 'memory://', engineDir: ENGINE });
     const store = new FsObjectStore(fs.mkdtempSync(path.join(os.tmpdir(), 'runner-vault-engagement-')));
     vault = new RunnerVault(db, store, '1', () => {}, null, null, null);
-    await vault.handle('vaultShareSet', { memberId: '2', shared: true }, OWNER);
   });
   after(async () => {
     await db.close();
@@ -52,7 +52,7 @@ describe('the Vault’s viewing data', () => {
 
   const A = '0190a000-0000-7000-8000-000000000001';
   const B = '0190a000-0000-7000-8000-000000000002';
-  const MOOD = '0190a000-0000-7000-8000-000000000003';
+  const RETIRED = '0190a000-0000-7000-8000-000000000003';
 
   it('upserts on id, so a re-send and a later save are harmless', async () => {
     const first = await vault.handle(
@@ -64,7 +64,7 @@ describe('the Vault’s viewing data', () => {
     // The open interval saved again, longer; then the old copy re-sent.
     await vault.handle('engagementPush', { deviceId: 'phone', rows: [interval(A, NINE, 3)] }, OWNER);
     await vault.handle('engagementPush', { deviceId: 'phone', rows: [interval(A, NINE, 1)] }, OWNER);
-    await vault.handle(
+    const retired = await vault.handle(
       'engagementPush',
       {
         deviceId: 'laptop',
@@ -83,16 +83,20 @@ describe('the Vault’s viewing data', () => {
             updatedAt: NINE + 60 * MINUTE
           },
           interval(B, NINE + 60 * MINUTE, 2, 'post-2'),
-          { kind: 'mood', id: MOOD, mood: 'happy', timestamp: NINE + 70 * MINUTE, updatedAt: NINE + 70 * MINUTE }
+          // A self-report row from an app older than the drop: acknowledged,
+          // never kept.
+          { kind: 'mood', id: RETIRED, mood: 'happy', timestamp: NINE + 70 * MINUTE, updatedAt: NINE + 70 * MINUTE }
         ]
       },
       OWNER
     );
-    const { intervals, moods } = (await vault.handle(
+    assert.deepEqual(retired, { acceptedThrough: NINE + 70 * MINUTE, accepted: 3 });
+    const answer = (await vault.handle(
       'engagementQuery',
       { kind: 'intervals', range: { start: NINE - MINUTE, end: NINE + 120 * MINUTE } },
       OWNER
-    )) as { intervals: { id: string; endedAt: number }[]; moods: { mood: string }[] };
+    )) as { intervals: { id: string; endedAt: number }[] };
+    const { intervals } = answer;
     assert.deepEqual(
       intervals.map((row) => [row.id, row.endedAt]),
       [
@@ -100,7 +104,7 @@ describe('the Vault’s viewing data', () => {
         [B, NINE + 62 * MINUTE]
       ]
     );
-    assert.deepEqual(moods.map((m) => m.mood), ['happy']);
+    assert.deepEqual(Object.keys(answer), ['kind', 'intervals']);
   });
 
   it('answers history and day totals across devices', async () => {
@@ -120,15 +124,70 @@ describe('the Vault’s viewing data', () => {
       { kind: 'daily', range, timeZone: NY },
       OWNER
     )) as { totals: { dayKey: string; factiiiName: string; duration: number }[] };
+    // viewedAt is the last moment read, inside the day (the reading's end,
+    // less 1 ms, so one cut at midnight is not the next day's first moment).
     assert.deepEqual(daily.totals, [
-      { dayKey: '2026-11-03', factiiiId: 7, factiiiName: 'Cooking', duration: 300, viewedAt: NINE + 62 * MINUTE }
+      { dayKey: '2026-11-03', factiiiId: 7, factiiiName: 'Cooking', duration: 300, viewedAt: NINE + 62 * MINUTE - 1 }
     ]);
   });
 
+  it('runs Findings as a job over every device and answers them to a query', async () => {
+    const TONE = { id: 101, slug: 'happy' };
+    // Before any run there is nothing stored, and no number is made up.
+    const before = (await vault.handle('engagementQuery', { kind: 'findings', range: { start: 0, end: 1 } }, OWNER)) as {
+      findings: unknown;
+    };
+    assert.equal(before.findings, null);
+
+    // Twenty days of reading from two devices; the latest push carries the
+    // zone and the Tone list.
+    const rows = (device: number) =>
+      Array.from({ length: 10 }, (_, d) => ({
+        ...interval(
+          `0190a000-0000-7000-8000-0000000${String(1000 + device * 100 + d).padStart(5, '0')}`,
+          NINE + (device * 10 + d) * DAY,
+          5,
+          `post-${device}-${d}`
+        ),
+        factiiiIds: [7, 8],
+        factiiiNames: { '7': 'Cooking', '8': 'Travel' }
+      }));
+    await vault.handle('engagementPush', { deviceId: 'phone', rows: rows(0) }, OWNER);
+    await vault.handle(
+      'engagementPush',
+      { deviceId: 'laptop', rows: rows(1), timeZone: NY, tones: [TONE] },
+      OWNER
+    );
+
+    const now = NINE + 25 * DAY;
+    assert.deepEqual(await vault.runFindings(now), { state: 'computed', computedAt: now });
+    // Nothing changed since: nothing is worked out again.
+    assert.deepEqual(await vault.runFindings(now), { state: 'unchanged' });
+
+    const read = (await vault.handle('engagementQuery', { kind: 'findings', range: { start: 0, end: 1 } }, OWNER)) as {
+      kind: string;
+      findings: {
+        computedAt: number;
+        windowDays: number;
+        timeZone: string;
+        result: { status: string; activeDays: number; tone: { status: string } };
+      };
+    };
+    assert.equal(read.kind, 'findings');
+    assert.equal(read.findings.computedAt, now);
+    assert.equal(read.findings.windowDays, 90);
+    assert.equal(read.findings.timeZone, NY);
+    // Both devices' days count; nothing read had the Tone, and it says so.
+    assert.equal(read.findings.result.status, 'ok');
+    assert.equal(read.findings.result.activeDays, 20);
+    assert.deepEqual(read.findings.result.tone, { status: 'no-tags' });
+  });
+
   it('is the owner’s alone, and never on the relay', async () => {
+    // The Vault lets nobody but the owner in (vault.md rule 2).
     await assert.rejects(
       vault.handle('engagementQuery', { kind: 'intervals', range: { start: 0, end: 1 } }, PEER),
-      /Only the owner/
+      /a Vault is never shared/
     );
     assert.equal(relaySecretsRefusal('socket', 'engagementPush', {}), RELAY_VAULT_REFUSAL);
     assert.equal(relaySecretsRefusal('socket', 'engagementQuery', {}), RELAY_VAULT_REFUSAL);

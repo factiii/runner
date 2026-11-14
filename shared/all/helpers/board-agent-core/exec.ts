@@ -102,17 +102,26 @@ export async function allocateSpacePorts(spaceDir: string): Promise<number[]> {
 const SECRET_FILE = '.secret';
 
 /**
- * This space's long-lived secret, behind the token every terminal carries for
- * `factiii-secrets`. On disk because it must outlive the process handing it
- * out: tmux is its own server, so a terminal survives a runner update or the
- * desktop app quitting, and keeps the token it was spawned with.
- *
- * Random and 0600, not derived from a path: anything a local process can
- * recompute is not a secret, and this is what separates a session the host
- * spawned from anything else that found the socket. Sync like readSpacePorts.
+ * The LEGACY space secret. Until per-session tokens it was the one value every
+ * terminal of the space carried as FACTIII_SECRETS_TOKEN, on disk because tmux
+ * is its own server and a terminal keeps the token it was spawned with across
+ * a runner update. Nothing mints it any more: it is read only so a terminal
+ * from before the change keeps working while it lives (space-core.ts
+ * `legacyTokenLive`), and removed once no tmux session carries it. '' when
+ * there is none. Never minted here: a new value would be a credential no
+ * session holds.
  */
-export function spaceSecret(spaceDir: string): string {
-  return fileSecret(spaceDir, SECRET_FILE);
+export function readLegacySpaceSecret(spaceDir: string): string {
+  try {
+    return readFileSync(path.join(spaceDir, SECRET_FILE), 'utf-8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** Remove the legacy space secret (see readLegacySpaceSecret). */
+export async function removeLegacySpaceSecret(spaceDir: string): Promise<void> {
+  await fs.rm(path.join(spaceDir, SECRET_FILE), { force: true });
 }
 
 /** A random secret kept in `name` under the space dir, minted on first read. */
@@ -163,6 +172,135 @@ export function isSessionToken(
   const expected = Buffer.from(sessionToken(spaceDir, sessionId));
   const given = Buffer.from(token);
   return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+const TAB_TOKEN_PREFIX = 'ft2.';
+/** A tab token from before the nonce: its name's HMAC alone. Still taken
+ *  from a tab that holds it, since the check is the tab's own environment. */
+const LEGACY_TAB_TOKEN_PREFIX = 'ft1.';
+const HMAC_HEX_CHARS = 64;
+/** A tab token's nonce: 16 random bytes, hex. */
+const TAB_NONCE = /^[0-9a-f]{32}$/;
+/** What safeTmuxName (tmux.ts) can give: a tab token names its session. */
+const TMUX_NAME = /^[a-zA-Z0-9._-]{1,80}$/;
+
+const tabKey = (spaceDir: string) =>
+  createHmac('sha256', fileSecret(spaceDir, SESSION_KEY_FILE))
+    .update('factiii-secrets-tab')
+    .digest();
+
+/**
+ * The FACTIII_SECRETS_TOKEN of one terminal tab: its tmux session's name, a
+ * fresh nonce, and an HMAC of both under a key derived from `.session-key`
+ * (in no session's env), apart from sessionToken's. Different for every tab
+ * and for every tab made under a name a closed one had, not workable out
+ * from the name, and no record of the runner's: tmux keeps it in the tab's
+ * own environment (`new-session -e`, setTmuxSessionEnv), across a runner
+ * restart. The secrets socket takes it only while that exact tmux session
+ * holds it (space-core.ts `callerOf`), so closing the tab ends it, and a new
+ * tab under its name never brings it back. Never logged.
+ */
+export function tabSecretsToken(
+  spaceDir: string,
+  tmuxSession: string,
+  nonce = randomBytes(16).toString('hex')
+): string {
+  const mac = createHmac('sha256', tabKey(spaceDir))
+    .update(`${nonce}.${tmuxSession}`)
+    .digest('hex');
+  return `${TAB_TOKEN_PREFIX}${mac}.${nonce}.${tmuxSession}`;
+}
+
+/** A tab token from before the nonce (LEGACY_TAB_TOKEN_PREFIX). */
+const legacyTabSecretsToken = (spaceDir: string, tmuxSession: string) =>
+  `${LEGACY_TAB_TOKEN_PREFIX}${createHmac('sha256', tabKey(spaceDir))
+    .update(tmuxSession)
+    .digest('hex')}.${tmuxSession}`;
+
+const sameToken = (given: string, expected: string) => {
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+
+/** The tmux session a tab token was given for, or null when `token` is not a
+ *  tab token of this space. Says nothing about whether the tab still lives
+ *  or still holds it. */
+export function tabOfSecretsToken(
+  spaceDir: string,
+  token: string
+): string | null {
+  if (token.startsWith(LEGACY_TAB_TOKEN_PREFIX)) {
+    const rest = token.slice(LEGACY_TAB_TOKEN_PREFIX.length);
+    if (rest[HMAC_HEX_CHARS] !== '.') return null;
+    const name = rest.slice(HMAC_HEX_CHARS + 1);
+    if (!TMUX_NAME.test(name)) return null;
+    return sameToken(token, legacyTabSecretsToken(spaceDir, name)) ? name : null;
+  }
+  if (!token.startsWith(TAB_TOKEN_PREFIX)) return null;
+  const rest = token.slice(TAB_TOKEN_PREFIX.length);
+  if (rest[HMAC_HEX_CHARS] !== '.') return null;
+  const nonce = rest.slice(HMAC_HEX_CHARS + 1, HMAC_HEX_CHARS + 33);
+  if (!TAB_NONCE.test(nonce) || rest[HMAC_HEX_CHARS + 33] !== '.') return null;
+  const name = rest.slice(HMAC_HEX_CHARS + 34);
+  if (!TMUX_NAME.test(name)) return null;
+  return sameToken(token, tabSecretsToken(spaceDir, name, nonce)) ? name : null;
+}
+
+const TUNNEL_RENEW_PREFIX = 'ftn1.';
+/** What `factiii-expose` takes for a tunnel name. */
+const TUNNEL_NAME = /^[a-zA-Z0-9-]{1,80}$/;
+/** A renewal handle's nonce: 16 random bytes, hex. */
+const TUNNEL_NONCE = /^[0-9a-f]{32}$/;
+
+/** A fresh nonce for one tunnel's renewal handle. */
+export function newTunnelNonce(): string {
+  return randomBytes(16).toString('hex');
+}
+
+/**
+ * The handle one tunnel's keeper renews its frp credential with
+ * (`factiii-secrets tunnel-token --renew`, .specs/runner-link.md "Tunnel
+ * credential"): `ftn1.<hmac>.<name>.<nonce>`, an HMAC of the tunnel's name and
+ * a nonce under a key derived from `.session-key`, apart from the tab and
+ * session tokens'. It opens nothing but a new tunnel credential, and only
+ * while that tunnel is up with that nonce (space-core.ts checks
+ * `<name>.nonce` and the keeper's pid), so it outlives the session that opened
+ * the tunnel (a Ports-panel shell, an agent run) and a runner restart, and
+ * dies with the tunnel. No record. Never logged, never in a file.
+ */
+export function tunnelRenewToken(
+  spaceDir: string,
+  name: string,
+  nonce: string
+): string {
+  const key = createHmac('sha256', fileSecret(spaceDir, SESSION_KEY_FILE))
+    .update('factiii-secrets-tunnel')
+    .digest();
+  const mac = createHmac('sha256', key)
+    .update(`${name}.${nonce}`)
+    .digest('hex');
+  return `${TUNNEL_RENEW_PREFIX}${mac}.${name}.${nonce}`;
+}
+
+/** The tunnel and nonce a renewal handle was given for, or null when `token`
+ *  is not one of this space's. Says nothing about whether the tunnel lives. */
+export function tunnelOfRenewToken(
+  spaceDir: string,
+  token: string
+): { name: string; nonce: string } | null {
+  if (!token.startsWith(TUNNEL_RENEW_PREFIX)) return null;
+  const parts = token.slice(TUNNEL_RENEW_PREFIX.length).split('.');
+  if (parts.length !== 3) return null;
+  const [mac, name, nonce] = parts;
+  if (mac?.length !== HMAC_HEX_CHARS) return null;
+  if (!name || !TUNNEL_NAME.test(name)) return null;
+  if (!nonce || !TUNNEL_NONCE.test(nonce)) return null;
+  const expected = Buffer.from(tunnelRenewToken(spaceDir, name, nonce));
+  const given = Buffer.from(token);
+  return given.length === expected.length && timingSafeEqual(given, expected)
+    ? { name, nonce }
+    : null;
 }
 
 /** The board-level block recorded for this space, or [] when none was

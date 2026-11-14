@@ -135,6 +135,23 @@ describe('free up space', () => {
       ['builds:board/builds/old', 'jobs:board/jobs', 'log:logs/runner.log.1', 'ollama:llama3.1:8b']
     );
     assert.deepEqual(removed, []);
+    // No home folder given: no `dir`.
+    assert.ok(items.every((i) => i.dir === undefined));
+  });
+
+  it('says where each item is, from the home folder, so its folder can offer it', async () => {
+    const { io, base } = runnerFolder();
+    const items = await planCleanup({ ...io, home: base, modelsDir: path.join(base, '.ollama', 'models') });
+    const rel = path.relative(base, io.runnerDir);
+    assert.deepEqual(
+      items.map((i) => i.dir),
+      [
+        `~/${rel}/board/builds/old`,
+        `~/${rel}/board/jobs`,
+        `~/${rel}/logs/runner.log.1`,
+        '~/.ollama/models'
+      ]
+    );
   });
 
   it('removes only the ids it is given that a fresh plan still lists', async () => {

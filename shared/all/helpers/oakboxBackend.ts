@@ -6,6 +6,7 @@ import type {
   RunnerMachineHealth,
   RunnerStoreName
 } from '../domains/electron';
+import { VAULT_DEFINITION } from '../domains/vaultDefinition';
 import type { AiCli, AiSource } from '../validators/aiSource';
 import type {
   CLAUDE_ASK_EFFORTS,
@@ -13,23 +14,28 @@ import type {
   CliAskSettings,
   CODEX_ASK_EFFORTS,
   CODEX_ASK_MODELS,
-  OakboxBackendMode
+  DataLocation
 } from '../validators/oakboxBackend';
 import { LOCAL_AI_MODELS, type LocalAiModelFit } from './localAiModels';
 
 // How Oakbox works for an account (.specs/oakbox.md "Backend"): the rules
-// and the words, in one place for Oakbox web and the phone app.
+// and the words, in one place for Oakbox web and the phone app. The account's
+// default location (.specs/vault.md "The default location") decides:
 //
-// - Factiii: files, Ask and chats on Factiii's servers. With a computer
+// - Cloud: files, Ask and chats on Factiii's servers. With a computer
 //   chosen (`runnerId`), search and Ask also reach it: its Vault's files
 //   (lock-marked), its models and its chats, which stay on it. Vaults shared
-//   with the person are searched too. No other runner is dialed.
-// - Runner: the person's own runner is the backend, and Oakbox uses nothing
-//   else of Factiii's (`factiiiFeatures`): files, Ask and chats are the
-//   runner's, and no plan or Trons apply.
+//   with the person are searched too. No other runner is dialed. A file can
+//   still be added to that computer from the add sheet.
+// - Runner Cloud or the Vault (Runner mode, `onRunner`): the person's own
+//   runner is the backend, and Oakbox uses nothing else of Factiii's
+//   (`factiiiFeatures`): files, Ask and chats are the runner's, and no plan
+//   or Trons apply. New files go to that store unless the add sheet says
+//   otherwise.
 
 export type OakboxBackend = {
-  mode: OakboxBackendMode;
+  /** Where new items go; Runner Cloud or the Vault is Runner mode. */
+  defaultLocation: DataLocation;
   runnerId: number | null;
   model: string | null;
   /** Claude's and Codex's in Ask on a runner; null is the CLI's default. */
@@ -51,7 +57,7 @@ export type OakboxBackend = {
 
 /** An account that never chose. */
 export const DEFAULT_OAKBOX_BACKEND: OakboxBackend = {
-  mode: 'FACTIII',
+  defaultLocation: 'CLOUD',
   runnerId: null,
   model: null,
   claudeModel: null,
@@ -73,25 +79,28 @@ export type RunnerScope = {
   includes: (runner: ListedRunner) => boolean;
 };
 
+/** Runner mode: a Runner Cloud or Vault default, so the runner is the
+ *  backend and nothing of Factiii's content or Trons is used. Premium is still
+ *  needed (.specs/oakbox.md "Premium in every mode"). */
+export const onRunner = (backend: OakboxBackend): boolean =>
+  backend.defaultLocation !== 'CLOUD';
+
 /** The runners Oakbox uses in this mode: the computer chosen in Account >
  *  Backend, and none of the person's own until one is; on Factiii, every
- *  vault shared with the person too (accepted in the Shared vault tab). No
+ *  Oakbox shared with the person too (accepted in the Sharing tab). No
  *  other runner is dialed, so a computer is never used without being chosen. */
 export function runnerScope(backend: OakboxBackend): RunnerScope {
-  switch (backend.mode) {
-    case 'FACTIII':
-      return {
-        key: `factiii:${backend.runnerId ?? 'none'}`,
-        includes: (runner) =>
-          runner.shared || runner.runnerId === backend.runnerId
-      };
-    case 'RUNNER':
-      return {
-        key: `runner:${backend.runnerId ?? 'none'}`,
-        includes: (runner) =>
-          !runner.shared && runner.runnerId === backend.runnerId
-      };
+  if (onRunner(backend)) {
+    return {
+      key: `runner:${backend.runnerId ?? 'none'}`,
+      includes: (runner) =>
+        !runner.shared && runner.runnerId === backend.runnerId
+    };
   }
+  return {
+    key: `factiii:${backend.runnerId ?? 'none'}`,
+    includes: (runner) => runner.shared || runner.runnerId === backend.runnerId
+  };
 }
 
 /**
@@ -104,20 +113,69 @@ export function runnerScope(backend: OakboxBackend): RunnerScope {
  * `runnerScope`. Runner mode is unchanged: its chosen runner only.
  */
 export function askScope(backend: OakboxBackend): RunnerScope {
-  if (backend.mode === 'RUNNER') return runnerScope(backend);
+  if (onRunner(backend)) return runnerScope(backend);
   return { key: 'factiii:ask', includes: () => true };
 }
 
 /** A computer of the person's own is part of the backend: always in Runner,
  *  and on Factiii once one is chosen. */
 export const usesComputer = (backend: OakboxBackend): boolean =>
-  backend.mode === 'RUNNER' || backend.runnerId !== null;
+  onRunner(backend) || backend.runnerId !== null;
 
-/** Where a file added now goes: the chosen runner in Runner mode (its Vault
- *  or Runner Storage, as picked on the add sheet: RUNNER_STORE_CHOICES), else
- *  Factiii's Cloud. */
-export const addsToRunner = (backend: OakboxBackend): number | null =>
-  backend.mode === 'RUNNER' ? backend.runnerId : null;
+/** A place a file added now can go: Factiii Cloud, or one of the chosen
+ *  runner's two stores (.specs/vault.md "The three places"). */
+export type AddPlace = 'cloud' | RunnerStoreName;
+
+const PLACE_OF: Record<DataLocation, AddPlace> = {
+  CLOUD: 'cloud',
+  RUNNER: 'runner',
+  VAULT: 'vault'
+};
+
+/** Where an add starts: the account's default location. */
+export const defaultAddPlace = (backend: OakboxBackend): AddPlace =>
+  PLACE_OF[backend.defaultLocation];
+
+/** The places the add sheet offers, in the order every list names them
+ *  (Cloud, Runner Cloud, Vault). On Cloud, the chosen computer's stores join
+ *  it; with none chosen, Cloud is the only place (the sheet offers "Add your
+ *  computer"). Runner mode offers the runner's two only: it sends nothing to
+ *  Factiii. */
+export function addPlaces(backend: OakboxBackend): AddPlace[] {
+  if (onRunner(backend)) return ['runner', 'vault'];
+  return backend.runnerId === null ? ['cloud'] : ['cloud', 'runner', 'vault'];
+}
+
+/** The place an add goes to: the pick when it is one on offer, else the
+ *  default (a pick from before a change of default or runner never
+ *  outlives it). */
+export const addPlaceFor = (
+  backend: OakboxBackend,
+  picked: AddPlace | null
+): AddPlace =>
+  picked !== null && addPlaces(backend).includes(picked)
+    ? picked
+    : defaultAddPlace(backend);
+
+/** Where a file added now goes: the chosen runner when the place is one of
+ *  its stores (the default, or picked on the add sheet), else Factiii's
+ *  Cloud (null). */
+export const addsToRunner = (
+  backend: OakboxBackend,
+  place: AddPlace = defaultAddPlace(backend)
+): number | null => (place === 'cloud' ? null : backend.runnerId);
+
+/** The runner and store a file added now goes to, or null for Cloud (or a
+ *  runner place with no computer chosen, which takes nothing). */
+export type RunnerAddTarget = { runnerId: number; store: RunnerStoreName };
+
+export function runnerAddTarget(
+  backend: OakboxBackend,
+  place: AddPlace
+): RunnerAddTarget | null {
+  if (place === 'cloud' || backend.runnerId === null) return null;
+  return { runnerId: backend.runnerId, store: place };
+}
 
 /** What of Factiii Oakbox uses for this account (.specs/oakbox.md "Backend",
  *  "Runner mode is independent of Factiii"). */
@@ -125,16 +183,18 @@ export type FactiiiFeatures = {
   /** Factiii's files, search, upload queue, Categorize, Skills, the cloud
    *  models and their chats, and kept research. */
   content: boolean;
-  /** Plans, storage and Trons: the paywall, the storage bar, the balance and
-   *  their Account tabs. */
+  /** Storage and Trons: the storage bar, the balance and their Account tabs.
+   *  Not the paywall or the plan, which apply in every mode. */
   billing: boolean;
 };
 
 /**
- * Runner mode uses none of Factiii: its files, models and chats are the
- * runner's, and it is free, so no plan, storage or Trons either. What still
- * reaches Factiii is sign-in, this setting, the runner list and who is
- * online, the signalling that connects the device to the runner, and the
+ * Runner mode uses none of Factiii's content: its files, models and chats are
+ * the runner's, so no storage bar or Trons either. The Premium gate and the
+ * plan in Account are asked in every mode (.specs/oakbox.md "Premium in every
+ * mode"). What still reaches Factiii is sign-in, the Premium check
+ * (`onedriveEmbed.status`) and the plan, this setting, the runner list and
+ * who is online, the signalling that connects the device to the runner, and the
  * category tree (`oakboxBackend.categories`) with the person's own category
  * edits (`factiiis.*`): names and rules, never a file or a tag.
  *
@@ -144,7 +204,7 @@ export type FactiiiFeatures = {
 export function factiiiFeatures(
   backend: OakboxBackend | null
 ): FactiiiFeatures {
-  const on = backend !== null && backend.mode !== 'RUNNER';
+  const on = backend !== null && !onRunner(backend);
   return { content: on, billing: on };
 }
 
@@ -158,34 +218,51 @@ export const RUNNER_FACTIII_FILES_NOTE =
 export const RUNNER_FILE_NOTICE =
   'Files go to your runner over a direct link, and nothing is sent to Factiii.';
 
-/** The two stores on a runner a file can go to (.specs/runner-vault.md "Two
- *  stores"), as the add sheet offers them in Runner mode: the Vault first,
- *  and the default. Each line says what AI can read it. */
-export const RUNNER_STORE_CHOICES: {
-  id: RunnerStoreName;
+/** The places a file can go (.specs/vault.md "The three places"), as the
+ *  add sheet names them, each with what AI can read it. In the order every
+ *  list shows them. */
+export const ADD_PLACE_CHOICES: {
+  id: AddPlace;
   label: string;
   line: string;
 }[] = [
   {
-    id: 'vault',
-    label: 'Vault',
-    line: 'On your computer. Only private AI on your computer can read it.'
+    id: 'cloud',
+    label: 'Cloud',
+    line: 'In the Cloud. Synced everywhere.'
   },
   {
     id: 'runner',
-    label: 'Runner Storage',
+    label: 'Runner Cloud',
     line: 'On your computer. Any AI you choose can read it, Claude and Codex included.'
+  },
+  {
+    id: 'vault',
+    label: 'Vault',
+    line: 'On your computer. Only private AI on your computer can read it.'
   }
 ];
 
-/** Over the add sheet's Vault / Runner Storage pick. */
-export const RUNNER_STORE_PICK_LABEL = 'Add to';
+/** Over the add sheet's place pick. */
+export const ADD_PLACE_PICK_LABEL = 'Add to';
 
-export const runnerStoreChoice = (store: RunnerStoreName) =>
-  RUNNER_STORE_CHOICES.find((c) => c.id === store) ?? RUNNER_STORE_CHOICES[0]!;
+/** The add sheet's entry when Cloud is the only place (no computer chosen):
+ *  it opens Account > Backend. */
+export const ADD_YOUR_COMPUTER = 'Add your computer';
+export const ADD_YOUR_COMPUTER_LINE =
+  'Keep files on a computer of your own too, free: in Runner Cloud or your Vault.';
 
-type ModeCopy = {
-  mode: OakboxBackendMode;
+export const addPlaceChoice = (place: AddPlace) =>
+  ADD_PLACE_CHOICES.find((c) => c.id === place) ?? ADD_PLACE_CHOICES[0]!;
+
+/** The add sheet's choices for this account (`addPlaces`). */
+export const addPlaceChoices = (backend: OakboxBackend) => {
+  const places = addPlaces(backend);
+  return ADD_PLACE_CHOICES.filter((c) => places.includes(c.id));
+};
+
+type LocationCopy = {
+  location: DataLocation;
   title: string;
   line: string;
   /** Where things are kept, who can read them, what is hidden, and what it
@@ -193,33 +270,50 @@ type ModeCopy = {
   points: string[];
 };
 
+/** What a Runner Cloud and a Vault default share: Runner mode. */
+const RUNNER_MODE_POINTS = [
+  'You install the Oakbox runner on that computer. It needs to be on when you use Oakbox.',
+  'Free. No plan and no Trons.',
+  'We only sign you in. Your files never reach our servers.',
+  'Sharing, Skills and cloud models need our servers, so they’re off.'
+];
+
 // Only what is true today: the privacy policy's sections 4 and 8 for
 // Factiii, runner-vault.md and runner-vault-ask.md "Ask with a runner's model"
 // for the runner. No price is typed here: plans and Trons come from their own cards.
-// Names (card a9bec1e7, round 4): Cloud is Factiii's servers, never called a
-// vault (card 7b54ebdc); a runner holds a Vault and Runner Storage.
-export const BACKEND_MODES: ModeCopy[] = [
+// Names (card a9bec1e7, 2026-11-11): Cloud is Factiii's servers, never called a
+// vault (card 7b54ebdc); a runner holds a Vault and Runner Cloud.
+/** The default location's choices in Account > Backend (.specs/vault.md
+ *  "The default location"), which replaced the backend modes. */
+export const DEFAULT_LOCATIONS: LocationCopy[] = [
   {
-    mode: 'FACTIII',
-    title: 'Cloud · on Factiii',
+    location: 'CLOUD',
+    title: 'Cloud',
     line: 'Easiest. Works on any device, nothing to install.',
     points: [
       'Your files are stored privately. Only you can open them.',
       'The research agent uses models from Anthropic and OpenAI. They don’t train on your files.',
       'A monthly plan for storage, and Trons for the research agent.',
-      'Have a computer with Oakbox on it? Its files also show in search, with a lock.'
+      'Have a computer with Oakbox on it? Its files also show in search, with a lock, and you can add files to it.'
     ]
   },
   {
-    mode: 'RUNNER',
-    title: 'Your computer',
-    line: 'Most private. Your files and research agent stay on a computer you own.',
+    location: 'RUNNER',
+    title: 'Runner Cloud',
+    line: 'Free. New files go to Runner Cloud, on a computer you own.',
     points: [
-      'Two places on it: your Vault, which only private AI on your computer can read, and Runner Storage, which Claude and Codex can read too.',
-      'You install the Oakbox runner on that computer. It needs to be on when you use Oakbox.',
-      'Free. No plan and no Trons.',
-      'We only sign you in. Your files never reach our servers.',
-      'Shared vaults, Skills and cloud models need our servers, so they’re off.'
+      'Any AI you choose can read Runner Cloud, Claude and Codex included. You can still add a file to your Vault instead.',
+      ...RUNNER_MODE_POINTS
+    ]
+  },
+  {
+    location: 'VAULT',
+    title: 'Vault',
+    line: 'Most private. New files go to your Vault, on a computer you own.',
+    points: [
+      VAULT_DEFINITION,
+      'You can still add a file to Runner Cloud instead.',
+      ...RUNNER_MODE_POINTS
     ]
   }
 ];
@@ -227,10 +321,24 @@ export const BACKEND_MODES: ModeCopy[] = [
 /** Account > Backend's opening line (its card's note): the choice, before
  *  the modes' own lines. */
 export const BACKEND_INTRO =
-  'Choose where your files are kept and where your research agent runs.';
+  'Choose where new files go and where your research agent runs. You can pick another place each time you add.';
 
-export const backendModeCopy = (mode: OakboxBackendMode): ModeCopy =>
-  BACKEND_MODES.find((m) => m.mode === mode) ?? BACKEND_MODES[0]!;
+/** The default locations Account > Backend offers: all three once the
+ *  account has a runner; with none, Cloud only (and "Add your computer"
+ *  under it), keeping a runner default already saved so it still shows. */
+export function defaultLocationChoices(
+  backend: OakboxBackend,
+  hasRunner: boolean
+): LocationCopy[] {
+  if (hasRunner) return DEFAULT_LOCATIONS;
+  return DEFAULT_LOCATIONS.filter(
+    (l) => l.location === 'CLOUD' || l.location === backend.defaultLocation
+  );
+}
+
+export const locationCopy = (location: DataLocation): LocationCopy =>
+  DEFAULT_LOCATIONS.find((m) => m.location === location) ??
+  DEFAULT_LOCATIONS[0]!;
 
 /** What Account says over the steps to add one, when Runner mode has no
  *  runner to use (backend/AddRunner.tsx). */
@@ -277,17 +385,20 @@ export function backendHealthLine(health: RunnerMachineHealth): string | null {
 // ── Research agent ──
 
 /** Backend's research-agent block: Runner mode starts Ask on the one on
- *  this computer; Factiii starts it on ours, so these are extras. */
-export const AGENTS_COPY = {
+ *  this computer; Cloud starts it on ours, so these are extras. */
+const AGENTS_COPY = {
   RUNNER: {
     heading: 'Research agent',
     line: 'Answers your questions in Ask. You can switch between these there.'
   },
-  FACTIII: {
+  CLOUD: {
     heading: 'Also available in Ask',
     line: 'Ask starts on our servers. You can switch to one of these there.'
   }
 } as const;
+
+export const agentsCopy = (backend: OakboxBackend) =>
+  AGENTS_COPY[onRunner(backend) ? 'RUNNER' : 'CLOUD'];
 
 /** Each research agent's name and whose account it uses. */
 export const AGENT_TITLES = {
@@ -638,10 +749,33 @@ export function cliModelLabel(
   return model ? CLI_MODEL_LABELS[model] : null;
 }
 
-// ── AI features: Trons or the person's runner ──
-// (.specs/ai-source.md). The picker's words are in helpers/aiSource.ts; this
-// is the one a recording's title says when its runner fell back.
+// ── Private AI setup (card a9bec1e7 step 10) ──
 
-/** A runner that could not answer, so Trons did. */
-export const aiRunnerFellBack = (message: string): string =>
-  `Your runner could not answer (${message.replace(/\.$/, '')}), so Trons did.`;
+/** The model the runner picked for this machine (the largest of the table
+ *  that fits its memory and disk), offered in one tap while Ollama holds
+ *  none. Null once a model is there, while a pull runs, or when nothing
+ *  fits: then "Choose a model" is the only way on. */
+export function recommendedModel(
+  list: RunnerLocalAiModels
+): LocalAiModelFit | null {
+  if (!list.ollama || list.installed.length > 0) return null;
+  if (list.job?.state === 'running' || !list.recommended) return null;
+  return list.models.find((m) => m.id === list.recommended && m.fits) ?? null;
+}
+
+/** The row's line while it offers the pick. */
+export const recommendedModelLine = (model: LocalAiModelFit): string =>
+  `Recommended for this computer: ${model.title}, ${model.diskGb} GB.`;
+
+/** Asked before the pick is pulled: a download never starts unasked. */
+export function recommendedModelConfirm(
+  model: LocalAiModelFit,
+  list: RunnerLocalAiModels
+): { title: string; body: string; confirmLabel: string } {
+  const memory = list.machine ? ` (${list.machine.memoryGb} GB)` : '';
+  return {
+    title: `Add ${model.title}?`,
+    body: `It downloads about ${model.diskGb} GB to this computer and runs there, fully private. It fits this computer’s memory${memory}. You can change it any time.`,
+    confirmLabel: 'Add it'
+  };
+}

@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 
+import { runnerInfoFrame } from '@shared/all/domains/runnerProtocol';
+
 import type { RunnerConfig } from './config';
+import { createServerPeer, runnerHello } from './serverPeer';
 import {
   applyRefreshedToken,
   configToStore,
@@ -17,7 +20,9 @@ import {
   storedTokensMatch,
   takeRefreshToken,
   tokenRefreshDue,
-  tokenTimes
+  tokenTimes,
+  TUNNEL_OFFLINE,
+  tunnelCredential
 } from './runnerToken';
 
 // When the runner asks for a new pair of tokens, what answer it accepts, what
@@ -247,12 +252,19 @@ describe('the refresh token stays off the config object', () => {
     assert.equal(source.includes('config.refreshToken'), false);
     // What a session, a client link and the server's heartbeat row receive.
     assert.ok(source.includes("runnerToken: () => config.authToken"));
+    // Both carry the version and the handshake's features, and nothing else
+    // (.specs/versioning.md "Protocol").
+    assert.ok(source.includes('JSON.stringify(runnerInfoFrame(currentVersion()))'));
     assert.ok(
-      source.includes("JSON.stringify({ type: 'runner-info', version: currentVersion() })")
+      source.includes("socket.emit('runner:heartbeat', runnerHello(currentVersion()))")
     );
-    assert.ok(
-      source.includes("socket.emit('runner:heartbeat', { version: currentVersion() })")
-    );
+    assert.deepEqual(Object.keys(runnerInfoFrame('1.0.0')).sort(), [
+      'features',
+      'protocol',
+      'type',
+      'version'
+    ]);
+    assert.deepEqual(Object.keys(runnerHello('1.0.0')).sort(), ['features', 'protocol', 'version']);
   });
 });
 
@@ -509,5 +521,78 @@ describe('token keeper', () => {
     t.world.now += RUNNER_TOKEN_REFRESH_RETRY_MS;
     await t.keeper.run(false);
     assert.equal(t.keeper.state().confirmed, true);
+  });
+});
+
+describe('the tunnel credential (runner:tunnel-token)', () => {
+  const deps = (over: Partial<Parameters<typeof tunnelCredential>[0]> = {}) => ({
+    connected: () => true,
+    serverLacks: () => false,
+    ask: async () => ({ token: 'tunnel-jwt', expiresAt: 1 }),
+    accessToken: () => 'access-jwt',
+    ...over
+  });
+
+  it('is the server-minted one, never the access token, on a server that has it', async () => {
+    assert.equal(await tunnelCredential(deps()), 'tunnel-jwt');
+  });
+
+  it('is the access token on a server that answered without it, as before', async () => {
+    let asked = false;
+    const res = await tunnelCredential(
+      deps({
+        serverLacks: () => true,
+        ask: async () => {
+          asked = true;
+          return {};
+        }
+      })
+    );
+    assert.equal(res, 'access-jwt');
+    assert.equal(asked, false);
+  });
+
+  it('refuses with words, and never falls back to the access token', async () => {
+    await assert.rejects(tunnelCredential(deps({ connected: () => false })), {
+      message: TUNNEL_OFFLINE
+    });
+    await assert.rejects(
+      tunnelCredential(deps({ ask: async () => ({ error: 'too many tunnel requests' }) })),
+      /too many tunnel requests/
+    );
+    await assert.rejects(
+      tunnelCredential(
+        deps({
+          ask: async () => {
+            throw new Error('operation has timed out');
+          }
+        })
+      ),
+      /no answer/
+    );
+  });
+
+  it('never hands the access token to a server whose hello timed out', async () => {
+    // A hello with no answer leaves the server unknown (serverPeer.ts): it is
+    // asked for a frp-only credential, and refused with words without one.
+    const peer = createServerPeer({
+      hello: async () => {
+        throw new Error('operation has timed out');
+      },
+      retryMs: 60 * 60_000
+    });
+    await peer.greet();
+    await assert.rejects(
+      tunnelCredential(
+        deps({
+          serverLacks: () => peer.lacks('tunnelToken'),
+          ask: async () => {
+            throw new Error('operation has timed out');
+          }
+        })
+      ),
+      /no answer/
+    );
+    peer.reset();
   });
 });

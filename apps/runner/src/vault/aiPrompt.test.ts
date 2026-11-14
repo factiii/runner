@@ -35,7 +35,7 @@ function engines(over: Partial<AiPromptEngines> = {}, calls: Call[] = []): AiPro
     },
     cliPlain: async (engine, prompt, settings, _signal, images) => {
       calls.push({ engine, prompt, settings, ...(images ? { images } : {}) });
-      return `From ${engine}`;
+      return { text: `From ${engine}`, model: engine === 'claude' ? 'claude-haiku-4-5' : null };
     },
     ollamaSeesImages: async (model) => model.startsWith('llava'),
     ...over
@@ -50,7 +50,11 @@ describe('aiPrompt', () => {
       claude: { model: 'haiku', effort: null },
       codex: { model: 'gpt-6-luna', effort: null }
     });
-    assert.deepEqual(answer, { text: 'From claude', engine: 'claude' });
+    assert.deepEqual(answer, {
+      text: 'From claude',
+      engine: 'claude',
+      model: 'claude-haiku-4-5'
+    });
     assert.deepEqual(calls, [
       { engine: 'claude', prompt: 'Title this', settings: { model: 'haiku', effort: null } }
     ]);
@@ -63,7 +67,8 @@ describe('aiPrompt', () => {
     const none = engines({ signedIn: async () => false }, calls);
     assert.deepEqual(await answerAiPrompt(none, { prompt: 'x' }), {
       text: 'From Ollama',
-      engine: 'ollama'
+      engine: 'ollama',
+      model: 'llama3.2:3b'
     });
     assert.equal(calls[0]?.engine, 'ollama:llama3.2:3b');
   });
@@ -77,6 +82,12 @@ describe('aiPrompt', () => {
     assert.deepEqual(calls, []);
     const signed = engines({ signedIn: async (cli) => cli === 'codex' });
     assert.equal((await answerAiPrompt(signed, { prompt: 'x', cliOnly: true })).engine, 'codex');
+  });
+
+  it('names the model that answered: the Ollama tag, a CLI only when known', async () => {
+    const e = engines({ ollamaModels: async () => ['llava:7b'] });
+    assert.equal((await answerAiPrompt(e, { prompt: 'x', engine: 'ollama' })).model, 'llava:7b');
+    assert.equal((await answerAiPrompt(e, { prompt: 'x', engine: 'codex' })).model, null);
   });
 
   it('uses the Ollama model asked for only if the runner holds it', async () => {
@@ -110,9 +121,11 @@ describe('aiPrompt', () => {
 
   it('refuses a request with no prompt or with extra fields', async () => {
     await assert.rejects(answerAiPrompt(engines(), {}), /needs a prompt/);
+    // A field this runner does not know is a newer app's: the runner says it
+    // is too old (.specs/versioning.md "Protocol").
     await assert.rejects(
       answerAiPrompt(engines(), { prompt: 'x', tools: ['Bash'] }),
-      /needs a prompt/
+      /too old for this\. Update the runner/
     );
   });
 });

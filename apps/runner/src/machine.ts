@@ -12,6 +12,10 @@ import {
   freshPath,
   TOOLS_DIR_ENV
 } from '@shared/all/helpers/board-agent-core/host-env';
+import {
+  RUNNER_BETA_NOTE,
+  runnerPlatformSupport
+} from '@shared/all/domains/runnerPlatforms';
 import { defaultRunnerDir } from '@shared/all/helpers/board-agent-core/runner-dir';
 
 import { prompt } from './auth';
@@ -326,13 +330,23 @@ export async function doctor(opts: {
     // The pane opens; the switch in it is the owner's to flip.
     openSettings: (url) => void execFile('open', [url], () => {})
   };
+  // Runner 1.0 supports macOS; Linux and Windows (WSL2) are beta
+  // (runnerPlatforms.ts).
+  const support = runnerPlatformSupport(process.platform);
+  if (support === 'beta') ui.print(`\n${RUNNER_BETA_NOTE}\n`);
   const { results, exitCode } = await runDoctor(
     buildChecks(doctorHost(target)),
     ui,
     { fix: opts.fix }
   );
   if (opts.json) {
-    console.log(JSON.stringify({ ready: exitCode === 0, results }, null, 2));
+    console.log(
+      JSON.stringify(
+        { ready: exitCode === 0, platform: { name: process.platform, support }, results },
+        null,
+        2
+      )
+    );
     return exitCode;
   }
   // What separates a tool that is absent from one installed where the runner

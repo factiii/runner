@@ -39,4 +39,8 @@ export const VAULT_MIGRATIONS: { id: string; sql: string }[] = [
     id: "0009_2026-11-10",
     sql: "-- CreateEnum\nCREATE TYPE \"UploadLifecycle\" AS ENUM ('UPLOADING', 'UPLOADED', 'POSTED', 'DISCARDED', 'FAILED');\n\n-- AlterTable\nALTER TABLE \"Upload\" ADD COLUMN     \"lifecycle\" \"UploadLifecycle\",\nADD COLUMN     \"lifecycleAt\" TIMESTAMP(3),\nADD COLUMN     \"multipartId\" TEXT,\nADD COLUMN     \"preparedAt\" TIMESTAMP(3);\n\n-- CreateIndex\nCREATE INDEX \"Upload_lifecycle_lifecycleAt_idx\" ON \"Upload\"(\"lifecycle\", \"lifecycleAt\");"
   },
+  {
+    id: "0010_2026-11-11",
+    sql: "-- AlterEnum\n-- This migration adds more than one value to an enum.\n-- With PostgreSQL versions 11 and earlier, this is not possible\n-- in a single migration. This can be worked around by creating\n-- multiple migrations, each migration adding only one value to\n-- the enum.\n\n\nALTER TYPE \"UploadSource\" ADD VALUE 'RUNNER';\nALTER TYPE \"UploadSource\" ADD VALUE 'VAULT';"
+  },
 ];

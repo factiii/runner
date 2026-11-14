@@ -13,20 +13,34 @@ sessions it holds. Your own session:
   session works on.
 - `set_work_path { path }`: point this session's IDE at another folder.
 
-Every other session on the boards you can use on this runner:
+Every other session on the boards you can use, on this runner and on the
+other runners (and the desktop app on your computer) you can reach, through
+Factiii's server:
 
-- `list_sessions { board? }`: board, runner, id, title, state (starting,
-  working, idle, needs you, error), mode (Chat or Code), linked card,
-  worktree, and which session started it if an agent did.
-- `start_session { mode, message, board?, title?, cardId?, baseBranch? }`:
-  `code` gets its own worktree and branch named after `title` (required);
-  `chat` runs in the board's workspace. `message` is its task; it goes in once
-  the workspace is ready. Returns the new id.
-- `message_session { session, text, board? }`: its next chat message.
-- `read_session { session, board?, limit? }`: its recent transcript and, for
-  Code, branch, dirty files, ahead/behind and unpushed commits.
-- `end_session { session, board?, discard?, deleteBranch? }`: stops it and
-  removes its worktree. The branch is kept unless `deleteBranch: true`.
+- `list_runners`: this runner first, then each other one online, with its
+  `id` (what `runner` takes: `r12`, `desktop:5`), the boards you reach there,
+  what it offers (`os`, `tart` VMs, the iOS `simulator`, a `gpu`), and
+  whether its owner lets sessions be started there from other runners.
+- `list_sessions { board? }`: board, runner (where it runs) and runnerName,
+  id, title, state (starting, working, idle, needs you, error), mode (Chat or
+  Code), linked card, and here also worktree and which session started it.
+- `start_session { mode, message, board?, title?, cardId?, baseBranch?,
+  runner? }`: `code` gets its own worktree and branch named after `title`
+  (required); `chat` runs in the board's workspace. `message` is its task; it
+  goes in once the workspace is ready. Returns the new id. With `runner`, it
+  starts on that runner, if its owner allowed starts from other runners, and
+  runs with that runner's own permissions.
+- `message_session { session, text, board?, runner? }`: lands in its inbox
+  and goes in once any turn in progress ends; it never interrupts one. A
+  session on an offline runner gets it when that runner is back (held 7
+  days, then expired). Says whether it was delivered or is waiting.
+- `read_session { session, board?, runner?, limit?, wait? }`: its recent
+  transcript and, for Code, branch, dirty files, ahead/behind and unpushed
+  commits. `wait` (seconds, up to 600) waits for its turn to end and adds its
+  final answer as `summary`.
+- `end_session { session, board?, discard?, deleteBranch? }`: stops a session
+  on this runner and removes its worktree. The branch is kept unless
+  `deleteBranch: true`.
 
 ## Rules the runner enforces
 
@@ -39,9 +53,13 @@ Every other session on the boards you can use on this runner:
   with `read_session`, then end it. Pass `discard: true` only when the user
   said the work may be lost.
 - You cannot end your own session this way.
-- Only this runner's sessions: another runner's are not listed or reachable.
+- A message is at most 16,000 characters, at most 30 a minute, and never
+  holds a secret (a token, a key, a password): it is refused. No secrets
+  cross between runners; a session reads its own runner's.
+- On another runner you reach only the boards its owner gave you Shell on
+  (all of them on your own runners).
 - Every start, message and end is in the runner's audit log under your
-  session's id.
+  session's id; a message or start to another runner is in both runners'.
 
 ## Working with them
 
@@ -49,4 +67,8 @@ Every other session on the boards you can use on this runner:
   will do. Link it to the card it works on (`cardId`).
 - A new session needs a while to start: poll `list_sessions` or
   `read_session` instead of messaging it at once.
-- Do not wait in a tight loop. Check back after a minute or two.
+- Do not wait in a tight loop. Check back after a minute or two, or use
+  `read_session { wait: 600 }` to wait for its answer in one call.
+- To hand work to another machine ("open a Tart VM, run X, report back"):
+  `list_runners`, `start_session { runner, board, mode: "chat", message }`,
+  then `read_session { runner, board, session, wait: 600 }` for the result.

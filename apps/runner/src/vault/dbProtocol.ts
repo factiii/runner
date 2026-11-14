@@ -35,7 +35,7 @@ export type DbRequest =
   | { id: number; op: 'batch'; statements: Statement[] }
   | { id: number; op: 'driver'; driver: DriverOp }
   /** The whole data folder as a gzip tarball (PGlite's dumpDataDir), for
-   *  the sealed Vault to encrypt and write (sealedDb.ts). Answers `value`. */
+   *  the sealed Vault to encrypt and write (vault-core's sealedDb.ts). Answers `value`. */
   | { id: number; op: 'dump' }
   | { id: number; op: 'close' };
 

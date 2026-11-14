@@ -1,12 +1,12 @@
 import type {
   AgentProvider,
   BareFsChange,
-  CodexAccess,
   CardAILogEntry as LogEntry,
   CardAIMode,
   CardAISessionPhase as SessionPhase,
   CardAISessionSummary as SessionSummary,
   CardAITodo,
+  CodexAccess,
   ExposedPort,
   GitConnectionChoice,
   RunnerActivity,
@@ -96,6 +96,10 @@ export type BaseSession = {
    *  start_session: the starting session's id. What the per-board cap
    *  counts (MCP_SESSION_CAP). */
   startedVia?: string;
+  /** Set when a session on another runner started this one through the
+   *  server's relay (.specs/card-sessions.md "Across runners"): that
+   *  runner's name. Activity says "started by <runner>". */
+  startedByRunner?: string;
 };
 
 /** A terminal's kind from where it works: every worktree is a folder directly
@@ -319,6 +323,16 @@ export interface ConfigProvider {
   /** The detail behind tokensEncrypted: key store, optional password layer,
    *  lock state, and the remedy when the store is unusable. */
   secureStore?(): SecureStoreStatus;
+  /** Who has continued past the one-time Codex notice on this host, runner
+   *  wide (validators/codexNotice.ts). Absent: a host that runs only its own
+   *  user's Codex (desktop), which never asks. */
+  codexNotice?: CodexNoticeStore;
+}
+
+/** The people, by user id, who have seen the Codex notice on this runner. */
+export interface CodexNoticeStore {
+  seen(userId: string): boolean;
+  markSeen(userId: string): void;
 }
 
 /** Default AgentEventSink implementation that handles log accumulation. */

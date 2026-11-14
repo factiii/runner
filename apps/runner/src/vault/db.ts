@@ -22,7 +22,7 @@ export type VaultDb = {
   close(): Promise<void>;
   /** The database process is still there to answer. */
   alive(): boolean;
-  /** The data folder as a gzip tarball (sealedDb.ts encrypts it). */
+  /** The data folder as a gzip tarball (vault-core's sealedDb.ts encrypts it). */
   dump(): Promise<Uint8Array>;
 };
 
@@ -199,11 +199,18 @@ export async function migrate(db: VaultDb): Promise<string[]> {
   return ran;
 }
 
+/** What a call on a lazy database after its `close` is answered by default. */
+export const DB_CLOSED = 'The vault database was closed. Try again.';
+
 /** A VaultDb that opens on its first call and closes after `idleMs` with
- *  nothing asked. Two calls during the start share one start. */
+ *  nothing asked. Two calls during the start share one start. Once `close`
+ *  is called it never opens again: every later call is answered
+ *  `closedError`, so a call that arrives while a lock closes the Vault cannot
+ *  open a new decrypted copy beside the one being saved. */
 export function lazyVaultDb(
   open: () => Promise<VaultDb>,
-  idleMs: number
+  idleMs: number,
+  closedError: () => Error = () => new Error(DB_CLOSED)
 ): VaultDb & { isOpen(): boolean } {
   // The process held now, and the interactive transactions the driver holds
   // open in it: several calls apart, so nothing is busy between them, and
@@ -213,6 +220,7 @@ export function lazyVaultDb(
   let current: Held | null = null;
   let timer: NodeJS.Timeout | null = null;
   let busy = 0;
+  let closed = false;
 
   const idle = () => {
     if (timer) clearTimeout(timer);
@@ -229,6 +237,7 @@ export function lazyVaultDb(
    *  looked at is let go: another call may have started its replacement
    *  while this one waited, and that one is shared, not started again. */
   const hold = async (): Promise<Held> => {
+    if (closed) throw closedError();
     const held = current;
     if (held) {
       // A database process that died (killed, out of memory) is started
@@ -236,6 +245,8 @@ export function lazyVaultDb(
       if ((await held.db.catch(() => null))?.alive()) return held;
       if (current === held) current = null;
     }
+    // Closed while this call waited on a process that died.
+    if (closed) throw closedError();
     if (!current) {
       const opening: Held = { db: open(), openTx: 0 };
       current = opening;
@@ -276,6 +287,7 @@ export function lazyVaultDb(
         }
       }),
     close: async () => {
+      closed = true;
       if (timer) clearTimeout(timer);
       const closing = current;
       current = null;

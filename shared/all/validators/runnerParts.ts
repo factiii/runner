@@ -69,7 +69,10 @@ export const machineCleanupSchema = z.object({
   /** A dry run of the biggest folders only (diskCaches.ts): slow, so asked
    *  for apart from the plan. */
   usage: z.boolean().optional(),
-  ids: z.array(z.string().max(300)).max(200).optional()
+  ids: z.array(z.string().max(300)).max(200).optional(),
+  /** Free memory instead of disk, with `confirm`: `simulators` shuts down
+   *  every booted iOS simulator (their apps and data stay). */
+  stop: z.enum(['simulators']).optional()
 });
 
 /** An Ollama model as `ollama pull` takes it, from Ollama's own library:
@@ -125,6 +128,9 @@ export const keepAwakeSetSchema = z.object({
   auto: z.boolean().optional(),
   ac: z.boolean().optional()
 });
+
+/** autoUpdateSet (apps/runner/src/updateSafety.ts): the owner's switch. */
+export const autoUpdateSetSchema = z.object({ auto: z.boolean() }).strict();
 
 /** runnerLogs (.specs/runner-window.md "Remote connections"): which log, and
  *  how many of its last lines. The runner clamps `lines` (1..2000, 200 when
