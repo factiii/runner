@@ -210,6 +210,7 @@ apps/runner/src/vault/ask.test.ts
 apps/runner/src/vault/ask.ts
 apps/runner/src/vault/askChats.ts
 apps/runner/src/vault/askEngines.ts
+apps/runner/src/vault/askEnginesTools.test.ts
 apps/runner/src/vault/askMcp.ts
 apps/runner/src/vault/askTools.test.ts
 apps/runner/src/vault/askTools.ts
@@ -283,7 +284,6 @@ services/embedder/requirements.txt
 services/embedder/text_tokenizer.py
 shared/all/domains/apps.ts
 shared/all/domains/autoTopUp.ts
-shared/all/domains/e2ee.ts
 shared/all/domains/electron.ts
 shared/all/domains/factiiis.ts
 shared/all/domains/mediaTranscript.ts
@@ -298,6 +298,7 @@ shared/all/domains/runnerPlatforms.ts
 shared/all/domains/runnerProtocol.ts
 shared/all/domains/scheduledPosts.ts
 shared/all/domains/secretsBackup.ts
+shared/all/domains/secureChat.ts
 shared/all/domains/sessionRelay.ts
 shared/all/domains/shop.ts
 shared/all/domains/skills.ts
@@ -459,6 +460,7 @@ shared/all/validators/runnerGit.ts
 shared/all/validators/runnerJobs.ts
 shared/all/validators/runnerParts.ts
 shared/all/validators/runnerVault.ts
+shared/all/validators/secureChat.ts
 shared/all/validators/sessionRelay.ts
 shared/all/validators/vaultKeys.ts
 shared/vault-core/.gitignore

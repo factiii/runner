@@ -351,6 +351,15 @@ export const NO_RUNNER_NOTE =
  *  one: nothing is used until one is. */
 export const CHOOSE_RUNNER_LINE = 'Choose the computer Oakbox uses.';
 
+/** Why Ask's paperclip is greyed out: the chat's model is a runner's, which
+ *  takes no file from this device yet (Upload still stores one). */
+export const ASK_FILES_RUNNER_MODEL_NOTE =
+  "This computer's model can't take a file from here yet. Use Upload to store it, then ask about it.";
+
+/** Why Ask's paperclip is greyed out: the chosen computer is offline. */
+export const ASK_FILES_RUNNER_OFFLINE_NOTE =
+  'Your computer is offline. Start it to add a file to the question.';
+
 /** Organize, Ask and adding files in Runner mode with no computer chosen. */
 export const CHOOSE_RUNNER_NOTE =
   'No computer is chosen yet. Choose one in Account, under Backend.';

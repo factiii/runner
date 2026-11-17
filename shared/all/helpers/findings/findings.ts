@@ -129,6 +129,10 @@ export const FINDINGS_FDR_Q = 0.1;
 export const FINDINGS_CI_LEVEL = 0.95;
 /** Effects too small to be worth a sentence, even when unlikely by chance. */
 export const FINDINGS_MIN_ABS_RHO = 0.3;
+/** Two factiiis whose time is this much on the same posts (of the smaller
+ *  one's time) are one topic tagged twice: their minutes move together by
+ *  construction, so the share test says nothing about reading. */
+export const FINDINGS_MAX_PAIR_OVERLAP = 0.25;
 export const FINDINGS_MIN_LIFT = 1.5;
 export const FINDINGS_MIN_TONE_SHIFT = 0.25;
 /** A pair is tested for sequence once it happened this many times. */
@@ -324,22 +328,66 @@ const dotCorr = (
   return dot / (a.norm * b.norm);
 };
 
+/** Of each pair's smaller time, the share on posts that carry both (tested
+ *  factiiis by index, row-major, symmetric). Only readings on active days
+ *  count, the same minutes the day table holds. */
+function pairOverlap(
+  intervals: FindingsInterval[],
+  table: DayTable,
+  index: Map<number, number>,
+  timeZone?: string
+): Float64Array {
+  const parts = index.size;
+  const both = new Float64Array(parts * parts);
+  const active = new Set(table.days);
+  for (const interval of intervals) {
+    const minutes = intervalMinutes(interval);
+    if (minutes <= 0) continue;
+    if (!active.has(localDayKey(interval.startedAt, timeZone))) continue;
+    const carried = [...new Set(interval.factiiiIds)]
+      .map((id) => index.get(id))
+      .filter((f): f is number => f !== undefined);
+    for (const a of carried) {
+      for (const b of carried) if (a !== b) both[a * parts + b]! += minutes;
+    }
+  }
+  const totals = [...index.keys()].map((id) =>
+    table.minutes.get(id)!.reduce((sum, value) => sum + value, 0)
+  );
+  for (let a = 0; a < parts; a++) {
+    for (let b = 0; b < parts; b++) {
+      const smaller = Math.min(totals[a]!, totals[b]!);
+      both[a * parts + b] = smaller > 0 ? both[a * parts + b]! / smaller : 0;
+    }
+  }
+  return both;
+}
+
+/** The share tests, and how many pairs were left out as the same posts:
+ *  each still counts in the correction at p = 1, as rare sequences do. */
 function shareTests(
   table: DayTable,
   tested: number[],
+  overlap: Float64Array,
   name: (id: number) => string,
   seed: number
-): Candidate[] {
+): { candidates: Candidate[]; untested: number } {
   const parts = tested.length;
   const n = table.days.length;
-  if (parts < FINDINGS_MIN_SHARE_PARTS) return [];
+  if (parts < FINDINGS_MIN_SHARE_PARTS) return { candidates: [], untested: 0 };
   const columns = tested.map((id) => table.minutes.get(id)!);
   const clr = tested.map(() => new Float64Array(n));
   clrInto(columns, n, clr, (_f, d) => d);
   const observed = clr.map((c) => centredRanks(c));
   const pairs: [number, number][] = [];
+  let untested = 0;
   for (let a = 0; a < parts; a++) {
-    for (let b = a + 1; b < parts; b++) pairs.push([a, b]);
+    for (let b = a + 1; b < parts; b++) {
+      // A pair mostly on the same posts is tagging, not reading: the null
+      // shuffles each factiii's days apart and would call it a finding.
+      if (overlap[a * parts + b]! >= FINDINGS_MAX_PAIR_OVERLAP) untested++;
+      else pairs.push([a, b]);
+    }
   }
 
   const rng = mulberry32(seed ^ SALT_SHARES);
@@ -359,7 +407,7 @@ function shareTests(
     });
   }
 
-  return pairs.map(([a, b], i) => {
+  const candidates = pairs.map(([a, b], i): Candidate => {
     const raw = dotCorr(observed[a]!, observed[b]!);
     const { p, mean } = twoSided(
       raw,
@@ -397,6 +445,7 @@ function shareTests(
         `More time on ${name(idA)} was associated with ${rho >= 0 ? 'more' : 'less'} time on ${name(idB)} (ρ ${fmt(rho)}, ${ciText(ci)}, n = ${n} days).`
     };
   });
+  return { candidates, untested };
 }
 
 // ── Sessions and sequences ──
@@ -907,9 +956,11 @@ export function computeFindings(input: FindingsInput): FindingsResult {
   const index = new Map(tested.map((id, f) => [id, f]));
   const sessions = buildSessions(input.intervals, index);
 
+  const overlap = pairOverlap(input.intervals, table, index, input.timeZone);
+  const shares = shareTests(table, tested, overlap, name, seed);
   const sequences = sequenceTests(sessions, tested, name, seed);
   const candidates: Candidate[] = [
-    ...shareTests(table, tested, name, seed),
+    ...shares.candidates,
     ...sequences.candidates
   ];
   const tone = toneTests(input, table, sessions, tested, name, seed);
@@ -917,7 +968,7 @@ export function computeFindings(input: FindingsInput): FindingsResult {
 
   const qs = benjaminiHochberg([
     ...candidates.map((c) => c.p),
-    ...Array.from({ length: sequences.untested }, () => 1)
+    ...Array.from({ length: shares.untested + sequences.untested }, () => 1)
   ]);
   const findings: Finding[] = [];
   candidates.forEach((c, i) => {

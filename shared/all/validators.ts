@@ -1277,3 +1277,4 @@ export const shopRefundOrderSchema = z.object({
 export * from './validators/aiConfirmations';
 export * from './validators/audioRooms';
 export * from './validators/e2ee';
+export * from './validators/secureChat';

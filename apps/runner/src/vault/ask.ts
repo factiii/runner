@@ -156,7 +156,7 @@ const FILES_TOO =
 const SAVE_BY_TOOL =
   '- When what you have put together is worth keeping — a finding drawn across several documents, something they asked you to remember — call save_research, then say so in your reply. Do not save a restatement of one file they already hold.';
 const SAVE_NONE =
-  '- You cannot keep notes. If they ask you to keep, save or remember something, say that this model cannot keep notes on this runner, and that a model with tools, such as Llama 3.2, can.';
+  '- You cannot keep notes. If they ask you to keep, save or remember something, say that this model cannot keep notes on this runner, and that a model with tools, such as Llama 3.2 3B or larger, can.';
 const SAVE_NOT_OWNER =
   '- You cannot keep notes. If they ask you to keep, save or remember something, say that only the owner of this runner keeps notes on it.';
 

@@ -32,6 +32,7 @@ const ROUTE_SEGMENTS = [
   'dmca',
   'download',
   'dsar',
+  'e2ee-chat',
   'eula',
   'explore',
   'f',

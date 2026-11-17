@@ -1,6 +1,6 @@
 {
   "name": "@factiii/runner",
-  "version": "0.44.0",
+  "version": "0.45.0",
   "description": "Factiii Runner, run Board AI agents on a machine you control. Pairs with the Factiii web/mobile clients over WebRTC.",
   "license": "ISC",
   "homepage": "https://factiii.com",
@@ -73,8 +73,8 @@
     "commander": "^15.0.0",
     "esbuild": "0.25.12",
     "qrcode": "^1.5.4",
-    "socket.io-client": "^4.8.3",
-    "superjson": "^2.2.6",
+    "socket.io-client": "^4.8.4",
+    "superjson": "^1.13.3",
     "tsx": "^4.22.4",
     "@typescript/native": "npm:typescript@^7.0.2",
     "typescript": "npm:@typescript/typescript6@^6.0.2"

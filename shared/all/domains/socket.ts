@@ -152,9 +152,6 @@ interface SocketBanInfo {
 // way (joining is a mutation that returns the full DTO), so the channel
 // metadata is optional and clients default it when mapping to ConversationDto.
 export interface NewConversationPayload {
-  /** End-to-end encrypted (.specs/chat-e2ee.md). Absent from servers
-   *  before it, which means false. */
-  encrypted?: boolean;
   id: string;
   name: string | null;
   kind?: 'DM' | 'GROUP' | 'CHANNEL';
@@ -285,9 +282,15 @@ export interface ServerToClientEvents {
   // This socket is no longer in the room: removed by the host, or the person
   // joined from another tab or device.
   audioRoomLeft: (data: { roomId: string }) => void;
-  // End-to-end encrypted chat (.specs/chat-e2ee.md): one of this user's
-  // devices has mail. Contentless; the device polls e2ee.pollToDevice.
+  // Secure chat (.specs/secure-chat.md): one of this user's devices has
+  // mail. Contentless; each device fetches its own (secure.fetch).
   e2eeToDevice: () => void;
+  // A secure chat's members or name changed (created, added, removed, left,
+  // renamed): re-read secure.chats / secure.chat.
+  secureChats: (data: { chatId?: string }) => void;
+  // Someone's devices changed (a new primary, a link, an unlink): re-read
+  // secure.devices for that user. `userId` is me for my own linked devices.
+  secureDevices: (data: { userId?: number }) => void;
   // A WebRTC offer, answer or candidate from another member's socket.
   audioRoomSignal: (data: {
     roomId: string;

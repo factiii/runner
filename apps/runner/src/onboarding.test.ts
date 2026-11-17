@@ -114,9 +114,18 @@ describe('onboarding session', () => {
       seen += 1;
     });
     try {
-      requestOnboarding(t.dir);
+      // fs.watch arms asynchronously (FSEvents on macOS), and a write made
+      // before it is armed is never reported. Under a loaded machine (the
+      // whole suite in parallel) that gap outlasted the 10 s wait. The Desktop
+      // writes long after the runner started watching, so the test writes
+      // again every half second until the watch reports one.
       const until = Date.now() + 10_000;
+      let nextWrite = 0;
       while (seen === 0 && Date.now() < until) {
+        if (Date.now() >= nextWrite) {
+          requestOnboarding(t.dir);
+          nextWrite = Date.now() + 500;
+        }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       assert.ok(seen > 0, 'the watch saw the request');

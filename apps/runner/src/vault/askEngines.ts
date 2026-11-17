@@ -71,11 +71,33 @@ export function ollamaModelsOnDisk(modelsDir: string): string[] {
   return ids.sort();
 }
 
+/** The smallest model trusted with tools, in billions of parameters. Below
+ *  it a model that lists "tools" still cannot use them: Llama 3.2 1B, asked
+ *  "hi", wrote the tool definitions back as its answer (2026-11-15). Such a
+ *  model answers from the files the runner hands it, with no tools. */
+export const MIN_TOOL_PARAMS_B = 3;
+
+/** Ollama's `details.parameter_size` ("1.2B", "494.03M", "70.6B") in
+ *  billions; null when it says none or something else. */
+export function parameterBillions(size: unknown): number | null {
+  if (typeof size !== 'string') return null;
+  const match = /^\s*([\d.]+)\s*([KMBT])\s*$/i.exec(size);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n)) return null;
+  const scale = { K: 1e-6, M: 1e-3, B: 1, T: 1e3 }[
+    match[2]!.toUpperCase() as 'K' | 'M' | 'B' | 'T'
+  ];
+  return n * scale;
+}
+
 /**
- * Does Ollama say `model` takes tools? Its `/api/show` lists the model's
- * capabilities ("completion", "tools", ...), read off the model itself, so a
- * model pulled from anywhere is answered for. An Ollama too old to list them,
- * or one that does not answer, reads as no.
+ * Does Ollama say `model` takes tools, and is it big enough to use them? Its
+ * `/api/show` lists the model's capabilities ("completion", "tools", ...) and
+ * its size, read off the model itself, so a model pulled from anywhere is
+ * answered for. Under MIN_TOOL_PARAMS_B is no; a size it does not state is
+ * left to the capability. An Ollama too old to list them, or one that does
+ * not answer, reads as no.
  */
 export async function ollamaTakesTools(
   baseUrl: string,
@@ -89,8 +111,13 @@ export async function ollamaTakesTools(
       body: JSON.stringify({ model })
     });
     if (!res.ok) return false;
-    const { capabilities } = (await res.json()) as { capabilities?: unknown };
-    return Array.isArray(capabilities) && capabilities.includes('tools');
+    const { capabilities, details } = (await res.json()) as {
+      capabilities?: unknown;
+      details?: { parameter_size?: unknown };
+    };
+    if (!Array.isArray(capabilities) || !capabilities.includes('tools')) return false;
+    const size = parameterBillions(details?.parameter_size);
+    return size === null || size >= MIN_TOOL_PARAMS_B;
   } catch {
     return false;
   }

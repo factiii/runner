@@ -2,6 +2,10 @@ import { z } from 'zod';
 
 import type { ResearchProgressSource } from '../domains/socket';
 
+/** How many topics (factiiis) one Ask message may be limited to: the server's
+ *  input cap and the topic strip's, on web and the phone. */
+export const MAX_ASK_TOPICS = 10;
+
 // The research tools Ask's models call (.specs/search.md "Research mode"),
 // defined once: Factiii's cloud Ask offers them to Claude
 // (apps/server/src/utilities/research/tools.ts), and a runner serves the

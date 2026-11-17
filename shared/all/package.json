@@ -6,7 +6,6 @@
   "exports": {
     "./domains/apps": "./domains/apps.ts",
     "./domains/autoTopUp": "./domains/autoTopUp.ts",
-    "./domains/e2ee": "./domains/e2ee.ts",
     "./domains/electron": "./domains/electron.ts",
     "./domains/factiiis": "./domains/factiiis.ts",
     "./domains/mediaTranscript": "./domains/mediaTranscript.ts",
@@ -21,6 +20,7 @@
     "./domains/runnerProtocol": "./domains/runnerProtocol.ts",
     "./domains/scheduledPosts": "./domains/scheduledPosts.ts",
     "./domains/secretsBackup": "./domains/secretsBackup.ts",
+    "./domains/secureChat": "./domains/secureChat.ts",
     "./domains/sessionRelay": "./domains/sessionRelay.ts",
     "./domains/shop": "./domains/shop.ts",
     "./domains/skills": "./domains/skills.ts",
@@ -180,6 +180,7 @@
     "./validators/runnerJobs": "./validators/runnerJobs.ts",
     "./validators/runnerParts": "./validators/runnerParts.ts",
     "./validators/runnerVault": "./validators/runnerVault.ts",
+    "./validators/secureChat": "./validators/secureChat.ts",
     "./validators/sessionRelay": "./validators/sessionRelay.ts",
     "./validators/vaultKeys": "./validators/vaultKeys.ts"
   },

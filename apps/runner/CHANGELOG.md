@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-16
+
+### Fixed
+
+- **Back on superjson 1**, the major every Factiii client and the server encode with. 0.44.0 shipped superjson 2, whose encoding of dates, maps and sets the apps do not read the same way.
+- **A model under 3B parameters gets no tools in Ask.** The runner gives tools only to an Ollama model of 3B or more (`MIN_TOOL_PARAMS_B`, read from `/api/show`): Llama 3.2 1B wrote the tool definitions back as its answer. A smaller one answers from the files the runner hands it.
+
 ### Added
 
 - **A session's free commands can skip the password for a while.** The "A command needs your secrets" prompt offers the job prompt's durations (Once, 30m, 2h, 8h, 12h). A duration opens a session window: later `factiii-secrets run` commands from that same session that name only keys approved in that prompt run without asking until it ends; any other key, or any other session, asks again. Each run is still on the audit log, naming the window. It ends at expiry, at Lock now (`secretsLock` now ends the jobs window and every session window), at a password change, when the session ends, or at a restart. The runner marks such a request `sessionWindow` on `PendingSecretsAuth`, and `secretsAuthState` lists the open ones as `sessionWindows`; an app shows the durations on a free command only when the runner set `sessionWindow`. A free command's `unlockFor` no longer opens the jobs window.
