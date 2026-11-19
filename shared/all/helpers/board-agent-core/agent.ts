@@ -25,7 +25,7 @@ export async function assertAgentSignedIn(
   const info = PROVIDERS[provider];
   if (!(await isSignedIn(target, provider))) {
     throw new Error(
-      `Not signed in to ${info.label}. Use "Sign in with ${info.label}" in Board AI settings, then retry.`
+      `Not signed in to ${info.label}. Sign in on the runner’s Accounts tab, then retry.`
     );
   }
 }

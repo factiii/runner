@@ -1,3 +1,4 @@
+import type { AppSlug } from '../domains/apps';
 import type {
   OllamaLibraryModel,
   OllamaLibraryTag,
@@ -32,6 +33,10 @@ import { LOCAL_AI_MODELS, type LocalAiModelFit } from './localAiModels';
 //   (`factiiiFeatures`): files, Ask and chats are the runner's, and no plan
 //   or Trons apply. New files go to that store unless the add sheet says
 //   otherwise.
+//
+// Who is let in (`needsPremium`, .specs/oakbox.md "The Premium gate", Jon,
+// 2026-11-17): the Oakbox brand (oakbox.me, the Oakbox app) needs Premium in
+// every mode; inside Factiii, Runner mode is free and only Cloud needs it.
 
 export type OakboxBackend = {
   /** Where new items go; Runner Cloud or the Vault is Runner mode. */
@@ -80,8 +85,11 @@ export type RunnerScope = {
 };
 
 /** Runner mode: a Runner Cloud or Vault default, so the runner is the
- *  backend and nothing of Factiii's content or Trons is used. Premium is still
- *  needed (.specs/oakbox.md "Premium in every mode"). */
+ *  backend and nothing of Factiii's content or Trons is used. Whether Premium
+ *  is still needed depends on the app showing it (`needsPremium`,
+ *  .specs/oakbox.md "The Premium gate"): yes on oakbox.me and in the Oakbox
+ *  app, no inside Factiii (Jon, 2026-11-17, replacing 2026-11-14's "Premium
+ *  in every mode"). */
 export const onRunner = (backend: OakboxBackend): boolean =>
   backend.defaultLocation !== 'CLOUD';
 
@@ -184,15 +192,18 @@ export type FactiiiFeatures = {
    *  models and their chats, and kept research. */
   content: boolean;
   /** Storage and Trons: the storage bar, the balance and their Account tabs.
-   *  Not the paywall or the plan, which apply in every mode. */
+   *  Not the paywall or the plan, which are `needsPremium`'s (the app showing
+   *  Oakbox decides, not only the mode). */
   billing: boolean;
 };
 
 /**
  * Runner mode uses none of Factiii's content: its files, models and chats are
- * the runner's, so no storage bar or Trons either. The Premium gate and the
- * plan in Account are asked in every mode (.specs/oakbox.md "Premium in every
- * mode"). What still reaches Factiii is sign-in, the Premium check
+ * the runner's, so no storage bar or Trons either. The Premium question and
+ * the plan in Account are asked in every mode; what a "no" does is the gate's
+ * (`needsPremium`, .specs/oakbox.md "The Premium gate": since 2026-11-17 it
+ * locks Runner mode only on oakbox.me and in the Oakbox app, never inside
+ * Factiii). What still reaches Factiii is sign-in, the Premium check
  * (`onedriveEmbed.status`) and the plan, this setting, the runner list and
  * who is online, the signalling that connects the device to the runner, and the
  * category tree (`oakboxBackend.categories`) with the person's own category
@@ -207,6 +218,66 @@ export function factiiiFeatures(
   const on = backend !== null && !onRunner(backend);
   return { content: on, billing: on };
 }
+
+/**
+ * Whether Oakbox, shown by `app`, needs Premium on the account to open with
+ * this setting (.specs/oakbox.md "The Premium gate"; Jon, 2026-11-17, which
+ * replaced 2026-11-14's "Premium in every mode"):
+ *
+ * - the Oakbox brand (`oakbox`: oakbox.me and the Oakbox app) is locked
+ *   without Premium wherever the files live, a runner included;
+ * - inside Factiii (`factiii`: web `/oakbox`, the phone's Oakbox tile) a
+ *   runner of the person's own is free, so only a Cloud default (files on
+ *   Factiii's servers) needs Premium.
+ *
+ * `null` is a setting not read yet: Premium is needed until it is, so
+ * nothing opens on a guess.
+ *
+ * This is what the screens draw, not what protects Cloud files: every Cloud
+ * procedure on the server refuses an account without Premium whichever app
+ * asks (`vaultAccess`), and in Runner mode the server holds no files.
+ */
+export const needsPremium = (
+  app: AppSlug,
+  backend: OakboxBackend | null
+): boolean => app === 'oakbox' || backend === null || !onRunner(backend);
+
+/** What the gate shows: the app, the paywall, or the loading frame while an
+ *  answer it needs is still on its way. */
+export type OakboxGate = 'open' | 'paywall' | 'wait';
+
+/**
+ * The gate's one decision, for both clients (web `VaultGate.tsx`, phone
+ * `OakboxScreens.tsx`). `premium` is the server's answer to
+ * `onedriveEmbed.status`: 'yes', 'no' (its 403, and only that), 'asking'
+ * while it is on its way, or 'unknown' when it failed some other way (a
+ * dropped connection is not a reason to ask anyone to pay, so that opens).
+ */
+export function oakboxGate(
+  app: AppSlug,
+  backend: OakboxBackend | null,
+  premium: 'yes' | 'no' | 'asking' | 'unknown'
+): OakboxGate {
+  if (backend === null) return 'wait';
+  if (!needsPremium(app, backend)) return 'open';
+  if (premium === 'asking') return 'wait';
+  return premium === 'no' ? 'paywall' : 'open';
+}
+
+/** The paywall inside Factiii, where it is about Cloud only: what needs the
+ *  plan, and the free way that needs none. Never shown by oakbox.me or the
+ *  Oakbox app, whose paywall says only "Premium". Names no website and no
+ *  price (the phone shows it too, Apple 3.1.1). */
+export const CLOUD_NEEDS_PREMIUM_LINE =
+  'Keeping your files in the Cloud, on our servers, needs a Premium plan. Every storage plan includes it.';
+export const RUNNER_INSTEAD_TITLE = 'Or use your own runner, free';
+export const RUNNER_INSTEAD_LINE =
+  'Your files and Ask stay on a computer you own, with its own AI. No plan and no Trons. You can change this in Account, under Backend.';
+export const RUNNER_INSTEAD_SET_UP = 'Set up a runner';
+/** Account's plan card for someone in on their own runner with no Premium
+ *  (inside Factiii only): what a plan would be for. */
+export const RUNNER_FREE_PLAN_NOTE =
+  'Your runner is free and needs no plan. A plan is for keeping files in the Cloud, on our servers.';
 
 /** Organize in Runner mode, about files added in the other modes. Said
  *  always: knowing whether there are any would mean asking Factiii. */

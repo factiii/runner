@@ -10,6 +10,8 @@ apps/runner/embedder/onnx_backend.py
 apps/runner/embedder/overrides-onnx.txt
 apps/runner/embedder/requirements-onnx.txt
 apps/runner/embedder/serve.py
+apps/runner/native/h264encoder.h
+apps/runner/native/jpegstream.m
 apps/runner/native/simhid.m
 apps/runner/native/simstream.m
 apps/runner/plugin/.claude-plugin/marketplace.json
@@ -48,6 +50,7 @@ apps/runner/src/autoUpdate.test.ts
 apps/runner/src/autoUpdate.ts
 apps/runner/src/boardRegistry.test.ts
 apps/runner/src/boardRegistry.ts
+apps/runner/src/browserPanel.real.test.ts
 apps/runner/src/cleanup.test.ts
 apps/runner/src/cleanup.ts
 apps/runner/src/cli.ts
@@ -104,6 +107,10 @@ apps/runner/src/machineHealth.ts
 apps/runner/src/machineHealthIo.ts
 apps/runner/src/machineScan.test.ts
 apps/runner/src/machineScan.ts
+apps/runner/src/mail/daemonMail.test.ts
+apps/runner/src/mail/daemonMail.ts
+apps/runner/src/mail/mailStore.test.ts
+apps/runner/src/mail/mailStore.ts
 apps/runner/src/migrate.test.ts
 apps/runner/src/migrate.ts
 apps/runner/src/nuke.test.ts
@@ -141,6 +148,7 @@ apps/runner/src/ops/teardown.ts
 apps/runner/src/ops/updateVerify.ts
 apps/runner/src/ops/updater.ts
 apps/runner/src/ops/updaterMac.ts
+apps/runner/src/ops/updaterStaging.test.ts
 apps/runner/src/packageContents.test.ts
 apps/runner/src/pairing.test.ts
 apps/runner/src/parts.test.ts
@@ -284,6 +292,7 @@ services/embedder/requirements.txt
 services/embedder/text_tokenizer.py
 shared/all/domains/apps.ts
 shared/all/domains/autoTopUp.ts
+shared/all/domains/desktopStaging.ts
 shared/all/domains/electron.ts
 shared/all/domains/factiiis.ts
 shared/all/domains/mediaTranscript.ts
@@ -315,6 +324,8 @@ shared/all/helpers/board-agent-core/ansi.ts
 shared/all/helpers/board-agent-core/audit.ts
 shared/all/helpers/board-agent-core/board-mcp-relay.ts
 shared/all/helpers/board-agent-core/boardTerminal.ts
+shared/all/helpers/board-agent-core/browser-store.ts
+shared/all/helpers/board-agent-core/cdp-client.ts
 shared/all/helpers/board-agent-core/claude-login.ts
 shared/all/helpers/board-agent-core/claude-stream-types.ts
 shared/all/helpers/board-agent-core/claude-stream.ts
@@ -323,6 +334,7 @@ shared/all/helpers/board-agent-core/codex-login.ts
 shared/all/helpers/board-agent-core/codex-permissions.ts
 shared/all/helpers/board-agent-core/codex-stream.ts
 shared/all/helpers/board-agent-core/default-home-cleanup.ts
+shared/all/helpers/board-agent-core/ended-sessions.ts
 shared/all/helpers/board-agent-core/engine.ts
 shared/all/helpers/board-agent-core/exec.ts
 shared/all/helpers/board-agent-core/git-connections.ts
@@ -335,6 +347,7 @@ shared/all/helpers/board-agent-core/host-run.ts
 shared/all/helpers/board-agent-core/host-secrets.ts
 shared/all/helpers/board-agent-core/host-skill-update.ts
 shared/all/helpers/board-agent-core/host-skills.ts
+shared/all/helpers/board-agent-core/inbox-delivery.ts
 shared/all/helpers/board-agent-core/index.ts
 shared/all/helpers/board-agent-core/job-targets.ts
 shared/all/helpers/board-agent-core/jobs.ts
@@ -348,6 +361,7 @@ shared/all/helpers/board-agent-core/port-blocks.ts
 shared/all/helpers/board-agent-core/prompt.ts
 shared/all/helpers/board-agent-core/prompts.json
 shared/all/helpers/board-agent-core/providers.ts
+shared/all/helpers/board-agent-core/repo-defaults.ts
 shared/all/helpers/board-agent-core/rtp-h264.ts
 shared/all/helpers/board-agent-core/runner-access.ts
 shared/all/helpers/board-agent-core/runner-dir.ts
@@ -376,6 +390,7 @@ shared/all/helpers/board-agent-core/tmux.ts
 shared/all/helpers/board-agent-core/toolchain.ts
 shared/all/helpers/board-agent-core/workName.ts
 shared/all/helpers/boardAssistant.ts
+shared/all/helpers/browserKeys.ts
 shared/all/helpers/card-ai/board-conversations.ts
 shared/all/helpers/card-ai/card-session.ts
 shared/all/helpers/card-ai/claude-mode.ts
@@ -451,6 +466,7 @@ shared/all/validators/codexNotice.ts
 shared/all/validators/e2ee.ts
 shared/all/validators/embed.ts
 shared/all/validators/engagementVault.ts
+shared/all/validators/mcpApprovals.ts
 shared/all/validators/mcpConnections.ts
 shared/all/validators/oakboxBackend.ts
 shared/all/validators/releaseNotice.ts

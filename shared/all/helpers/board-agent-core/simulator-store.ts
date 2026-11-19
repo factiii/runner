@@ -12,14 +12,23 @@ import type {
 } from '../../domains/electron';
 import type { ExecTarget } from './exec';
 
-type Helper = 'simstream' | 'simhid';
+/** `jpegstream` is the browser panel's (browser-store.ts): the same encoder,
+ *  fed a Chrome tab's screencast instead of a simulator's display. */
+export type NativeHelper = 'simstream' | 'simhid' | 'jpegstream';
+type Helper = NativeHelper;
 
 const FRAMEWORKS: Record<Helper, string> = {
   simstream:
     '-framework Foundation -framework IOSurface -framework VideoToolbox ' +
     '-framework CoreMedia -framework CoreVideo',
-  simhid: '-framework Foundation -framework AppKit'
+  simhid: '-framework Foundation -framework AppKit',
+  jpegstream:
+    '-framework Foundation -framework ImageIO -framework CoreGraphics ' +
+    '-framework VideoToolbox -framework CoreMedia -framework CoreVideo'
 };
+
+/** The encoder both video helpers include. A change to it rebuilds them. */
+const SHARED_HEADER = 'h264encoder.h';
 
 function shEscape(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -402,27 +411,45 @@ export class SimulatorStore {
     this.hid.clear();
   }
 
-  /** Compile if missing or stale. `clang` ships with the Xcode a simulator
-   *  already requires, so this adds no dependency. */
   private async build(helper: Helper): Promise<string> {
-    if (!this.nativeDir) {
-      throw new Error('This runner has no simulator helpers installed.');
-    }
-    const source = `${this.nativeDir}/${helper}.m`;
-    // Built beside the space rather than into the package: an npm install is
-    // not writable on every host, and the binary is per-Xcode anyway.
-    const binary = `${this.target().paths.bin}/${helper}`;
-    if (this.built.has(helper)) return binary;
-
-    await this.target().sh(
-      `if [ ! -x ${shEscape(binary)} ] || [ ${shEscape(source)} -nt ${shEscape(binary)} ]; then
-         clang -fobjc-arc -Wno-objc-method-access -Wno-deprecated-declarations \
-           ${FRAMEWORKS[helper]} -o ${shEscape(binary)} ${shEscape(source)}
-       fi`
+    if (this.built.has(helper)) return helperBinary(this.target(), helper);
+    const binary = await buildNativeHelper(
+      this.target(),
+      this.nativeDir,
+      helper
     );
     this.built.add(helper);
     return binary;
   }
+}
+
+function helperBinary(target: ExecTarget, helper: Helper): string {
+  // Built beside the space rather than into the package: an npm install is
+  // not writable on every host, and the binary is per-Xcode anyway.
+  return `${target.paths.bin}/${helper}`;
+}
+
+/** Compile if missing or stale. `clang` ships with the Xcode a simulator
+ *  already requires, so this adds no dependency. */
+export async function buildNativeHelper(
+  target: ExecTarget,
+  nativeDir: string,
+  helper: Helper
+): Promise<string> {
+  if (!nativeDir) {
+    throw new Error('This runner has no simulator helpers installed.');
+  }
+  const source = `${nativeDir}/${helper}.m`;
+  const header = `${nativeDir}/${SHARED_HEADER}`;
+  const binary = helperBinary(target, helper);
+
+  await target.sh(
+    `if [ ! -x ${shEscape(binary)} ] || [ ${shEscape(source)} -nt ${shEscape(binary)} ] || [ ${shEscape(header)} -nt ${shEscape(binary)} ]; then
+         clang -fobjc-arc -Wno-objc-method-access -Wno-deprecated-declarations \
+           ${FRAMEWORKS[helper]} -o ${shEscape(binary)} ${shEscape(source)}
+       fi`
+  );
+  return binary;
 }
 
 /** Inferred rather than imported from `child_process`: this module also

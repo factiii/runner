@@ -43,6 +43,9 @@
 
 import type { AuditEntry } from '../../domains/electron';
 import {
+  messageHoldText,
+  parseMessageHold,
+  type RelayMessageHold,
   type RelayMessageState,
   type RelayMessageStatus,
   type RelayOrigin,
@@ -50,10 +53,10 @@ import {
   type RelayRunner,
   type RelaySessionRow,
   type RunnerOffers,
-  SESSION_MESSAGE_HOLD_DAYS,
-  SESSION_MESSAGE_MAX,
   SESSION_FILES_MAX_BYTES,
   SESSION_FILES_PER_CALL,
+  SESSION_MESSAGE_HOLD_DAYS,
+  SESSION_MESSAGE_MAX,
   SESSION_READ_WAIT_MAX_S,
   type SessionFileInfo,
   type SessionFileResult,
@@ -69,9 +72,9 @@ import type { SessionStarter } from './session';
 import {
   describeSourceFileStamped,
   fetchFiles,
+  filesArg,
   type FileSource,
   type FileSourceRules,
-  filesArg,
   localFileSource,
   readSourceChunk,
   type SourceFileStamp
@@ -87,6 +90,9 @@ export const MCP_SESSION_CAP = 5;
  *  runners (the server counts the relayed ones again, aiRateLimit.ts). */
 export const MESSAGES_PER_MINUTE = 30;
 const MINUTE_MS = 60_000;
+
+/** message_session's `expiresIn`, in minutes: at most the inbox's own hold. */
+const EXPIRES_IN_MAX_MIN = SESSION_MESSAGE_HOLD_DAYS * 24 * 60;
 
 /** How many transcript events read_session returns by default, and at most. */
 const READ_DEFAULT = 20;
@@ -144,10 +150,22 @@ export interface HypervisorBoard {
   message(
     id: string,
     text: string,
-    messageId?: string
-  ): Promise<{ id: string; state: RelayMessageState }>;
+    opts?: {
+      /** The sender's id for it (a relayed message keeps the server's). */
+      id?: string;
+      /** How long it may wait before it is expired, when the sender set one. */
+      holdMs?: number;
+      /** The sending session here (`<board>/<session>`): who may cancel it. */
+      from?: string;
+    }
+  ): Promise<{ id: string; state: RelayMessageState; hold?: RelayMessageHold }>;
+  /** Take back a message `from` sent that still waits in an inbox here.
+   *  False when it is not waiting any more, or not that sender's. */
+  cancel?(messageId: string, from: string): Promise<boolean>;
   /** Messages still waiting in the session's inbox. */
   waiting(id: string): number;
+  /** Why the oldest of them waits. */
+  hold?(id: string): RelayMessageHold | undefined;
   /** The most recent chat events (bareChatTranscript). */
   transcript(id: string): Promise<ChatEvent[]>;
   /** Git state of a Code session's worktree; null for Chat. Throws when git
@@ -185,7 +203,11 @@ export interface HypervisorRemote {
   message(
     origin: RelayOrigin,
     target: { runner: string; board: string; session: string; text: string }
-  ): Promise<{ messageId: string; state: RelayMessageState }>;
+  ): Promise<{
+    messageId: string;
+    state: RelayMessageState;
+    hold?: RelayMessageHold;
+  }>;
   start(
     origin: RelayOrigin,
     target: { runner: string; board: string; start: RemoteStart }
@@ -350,11 +372,39 @@ export const HYPERVISOR_TOOLS = [
   },
   {
     name: 'message_session',
-    description: `Send text to another session, on this runner or another. It lands in that session's inbox and goes in as its next message once any turn in progress has ended: it never interrupts one. A session on an offline runner gets it when that runner is back (held ${SESSION_MESSAGE_HOLD_DAYS} days, then expired). At most ${SESSION_MESSAGE_MAX} characters and ${MESSAGES_PER_MINUTE} a minute; never a secret. Returns the message's state: delivered or waiting. read_session shows the reply. files brings files from that session to your $DROPS_DIR as the message is sent; for files it makes in answer, use read_session with wait and files.`,
+    description: `Send text to another session, on this runner or another. It lands in that session's inbox and goes in as its next message once any turn in progress has ended: it never interrupts one. A session on an offline runner gets it when that runner is back (held ${SESSION_MESSAGE_HOLD_DAYS} days, then expired). At most ${SESSION_MESSAGE_MAX} characters and ${MESSAGES_PER_MINUTE} a minute; never a secret. Returns the message's state: delivered, or waiting with the reason (on a turn, its terminal not open yet, or a CLI that has not reported what it is doing). expiresIn (minutes) drops a message still waiting after that long, so it cannot go in after the work is done another way; cancel_message takes a waiting one back. Both are for a session on this runner only. read_session shows the reply. files brings files from that session to your $DROPS_DIR as the message is sent; for files it makes in answer, use read_session with wait and files.`,
     inputSchema: {
       type: 'object',
-      properties: { ...sessionArg, text: { type: 'string' }, ...filesProp },
+      properties: {
+        ...sessionArg,
+        text: { type: 'string' },
+        expiresIn: {
+          type: 'integer',
+          minimum: 1,
+          maximum: EXPIRES_IN_MAX_MIN,
+          description:
+            'Minutes the message may wait in the inbox before it is dropped (expired). A session on this runner only.'
+        },
+        ...filesProp
+      },
       required: ['session', 'text'],
+      additionalProperties: false
+    },
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  {
+    name: 'cancel_message',
+    description:
+      "Take back a message you sent with message_session that is still waiting in a session's inbox on this runner, so it is never delivered. message is the id message_session returned. Only the session that sent it can; one already delivered, expired or held for another runner cannot be taken back.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message: {
+          type: 'string',
+          description: 'The message id, as message_session returned it.'
+        }
+      },
+      required: ['message'],
       additionalProperties: false
     },
     annotations: { readOnlyHint: false, openWorldHint: false }
@@ -822,18 +872,25 @@ async function bringFiles(
   let from: string;
   if ('remote' in found) {
     const remote = host.remote;
-    if (!remote?.file) return 'Files cannot be brought from other runners here.';
+    if (!remote?.file)
+      return 'Files cannot be brought from other runners here.';
     const target = found.remote;
     const origin = originOf(starter, caller);
     source = {
       info: async (path) => {
-        const res = await remote.file!(origin, { ...target, path, part: 'info' });
-        if (!('file' in res)) throw new Error(`${target.runner} did not describe ${path}.`);
+        const res = await remote.file!(origin, {
+          ...target,
+          path,
+          part: 'info'
+        });
+        if (!('file' in res))
+          throw new Error(`${target.runner} did not describe ${path}.`);
         return res.file;
       },
       chunk: async (path, part) => {
         const res = await remote.file!(origin, { ...target, path, part });
-        if (!('chunk' in res)) throw new Error(`${target.runner} sent no data for ${path}.`);
+        if (!('chunk' in res))
+          throw new Error(`${target.runner} sent no data for ${path}.`);
         return res.chunk;
       }
     };
@@ -852,10 +909,14 @@ async function bringFiles(
       info: async (path) => {
         try {
           const info = await local.info(path);
-          await audit(`${fileLine(info)} from session ${target.session.id}, ${to}`);
+          await audit(
+            `${fileLine(info)} from session ${target.session.id}, ${to}`
+          );
           return info;
         } catch (err) {
-          await audit(`"${path}" from session ${target.session.id} refused (${errText(err)}), ${to}`);
+          await audit(
+            `"${path}" from session ${target.session.id} refused (${errText(err)}), ${to}`
+          );
           throw err;
         }
       },
@@ -899,9 +960,16 @@ async function messageSession(
     const brought = await bringFiles(host, starter, caller, found, files);
     return ok(pretty({ message: said, ...filesField(brought) }));
   };
+  const expiresIn = expiresInArg(args.expiresIn);
+  if (typeof expiresIn === 'string') return fail(expiresIn);
   const found = await locate(host, starter, caller, args);
   if ('remote' in found) {
     if (!host.remote) return fail(NO_RELAY);
+    if (expiresIn !== null) {
+      return fail(
+        `expiresIn is for a session on this runner: ${found.remote.session} is on ${found.remote.runner}, where a message is held ${SESSION_MESSAGE_HOLD_DAYS} days. Send it without expiresIn.`
+      );
+    }
     const limited = takeMessageSlot(host, caller);
     if (limited) return fail(limited);
     try {
@@ -916,7 +984,7 @@ async function messageSession(
       });
       return await answer(
         sent.state === 'waiting'
-          ? `Held for ${found.remote.session} on ${found.remote.runner}: it is offline or on a turn, and gets it as soon as it can (held ${SESSION_MESSAGE_HOLD_DAYS} days). Message ${sent.messageId}.`
+          ? `Held for ${found.remote.session} on ${found.remote.runner}: ${remoteHoldText(parseMessageHold(sent.hold))} (held ${SESSION_MESSAGE_HOLD_DAYS} days). Message ${sent.messageId}.`
           : `Delivered to ${found.remote.session} on ${found.remote.runner} (${found.remote.board}): it reads it once any turn in progress ends. Message ${sent.messageId}.`,
         found
       );
@@ -931,11 +999,15 @@ async function messageSession(
   }
   const limited = takeMessageSlot(host, caller);
   if (limited) return fail(limited);
-  let sent: { id: string; state: RelayMessageState };
+  let sent: Awaited<ReturnType<HypervisorBoard['message']>>;
   try {
     sent = await target.board.message(
       target.session.id,
-      `${messageHeader({ runner: host.runner, board: caller.slug, session: caller.session, name: starter.name })}\n\n${text}`
+      `${messageHeader({ runner: host.runner, board: caller.slug, session: caller.session, name: starter.name })}\n\n${text}`,
+      {
+        from: senderKey(caller),
+        ...(expiresIn === null ? {} : { holdMs: expiresIn * MINUTE_MS })
+      }
     );
   } catch (err) {
     return fail(errText(err));
@@ -943,13 +1015,68 @@ async function messageSession(
   await target.board.audit({
     actor: starter,
     action: 'session-message',
-    detail: `to session ${target.session.id} "${target.session.title}" (${sent.state}), ${describeCaller(caller)}`
+    detail: `to session ${target.session.id} "${target.session.title}" (message ${sent.id}, ${sent.state}${sent.state === 'waiting' && sent.hold ? `: ${sent.hold}` : ''}), ${describeCaller(caller)}`
   });
   return answer(
     sent.state === 'waiting'
-      ? `In ${target.session.id}'s inbox on ${target.slug}: it is on a turn, and reads it when that ends. Message ${sent.id}.`
+      ? `In ${target.session.id}'s inbox on ${target.slug}, not delivered yet: ${messageHoldText(sent.hold)}.${expiresIn === null ? '' : ` Dropped if it still waits in ${expiresIn} min.`} cancel_message { message: "${sent.id}" } takes it back. Message ${sent.id}.`
       : `Sent to ${target.session.id} on ${target.slug}. Message ${sent.id}.`,
     { here: target }
+  );
+}
+
+/** Who a message is from, as its inbox keeps it: the one session that may
+ *  cancel it. */
+const senderKey = (caller: HypervisorCaller) =>
+  `${caller.slug}/${caller.session}`;
+
+/** message_session's `expiresIn`: whole minutes, null when not given, or why
+ *  it is refused. */
+function expiresInArg(value: unknown): number | null | string {
+  if (value === undefined || value === null) return null;
+  const minutes = Number(value);
+  if (
+    !Number.isInteger(minutes) ||
+    minutes < 1 ||
+    minutes > EXPIRES_IN_MAX_MIN
+  ) {
+    return `expiresIn is whole minutes, 1 to ${EXPIRES_IN_MAX_MIN}.`;
+  }
+  return minutes;
+}
+
+/** Why a message for a session on another runner waits. With no reason from
+ *  there (the runner is offline, or from before it said): either. */
+const remoteHoldText = (hold: RelayMessageHold | undefined) =>
+  hold
+    ? messageHoldText(hold)
+    : 'it is offline or not ready for a message (on a turn, or its terminal not open), and gets it as soon as it can';
+
+/** Take back a message this session sent that still waits in an inbox on
+ *  this runner. */
+async function cancelMessage(
+  host: HypervisorHost,
+  starter: SessionStarter,
+  caller: HypervisorCaller,
+  args: Loose
+): Promise<Answer> {
+  const id = str(args.message);
+  if (!id) return fail('message is the id message_session returned.');
+  for (const slug of host.boards()) {
+    const board = host.board(slug);
+    if (!board?.cancel) continue;
+    if (!(await board.cancel(id, senderKey(caller)).catch(() => false))) {
+      continue;
+    }
+    await board.audit({
+      actor: starter,
+      action: 'session-message',
+      detail: `cancelled message ${id} while it waited, ${describeCaller(caller)}`
+    });
+    return ok(`Cancelled message ${id}: it will not be delivered.`);
+  }
+  return fail(
+    `No message ${id} of yours is waiting on ${host.runner}: it was delivered, expired or cancelled already, or it is held for another runner (that one cannot be taken back).`
   );
 }
 
@@ -1013,7 +1140,8 @@ async function readView(
           },
     transcript: events.slice(-limit).map(eventLine),
     answer: lastAnswer(events),
-    waiting: board.waiting(session.id)
+    waiting: board.waiting(session.id),
+    hold: board.hold?.(session.id)
   };
 }
 
@@ -1130,6 +1258,11 @@ async function readSession(
       worktree: read.worktree,
       git: typeof read.git === 'string' ? { error: read.git } : read.git,
       inboxWaiting: read.waiting,
+      ...(read.waiting > 0
+        ? {
+            inboxNote: `Not delivered yet: ${messageHoldText(parseMessageHold(read.hold))}.`
+          }
+        : {}),
       ...(messages ? { messages } : {}),
       transcript: read.transcript,
       ...(waitS > 0
@@ -1235,6 +1368,8 @@ export async function callHypervisorTool(
       return startSession(host, starter, caller, args);
     case 'message_session':
       return messageSession(host, starter, caller, args);
+    case 'cancel_message':
+      return cancelMessage(host, starter, caller, args);
     case 'read_session':
       return readSession(host, starter, caller, args);
     case 'end_session':
@@ -1314,21 +1449,22 @@ export async function answerSessionOp(
   if (op.op === 'read') {
     return { ok: true, read: await readView(board, session, op.limit) };
   }
-  if (op.op === 'file') return answerFileOp(host, board, session, starter, op, from);
+  if (op.op === 'file')
+    return answerFileOp(host, board, session, starter, op, from);
   const refused = messageRefusal(op.text);
   if (refused) return { error: refused };
   try {
     const sent = await board.message(
       session.id,
       `${messageHeader({ ...op.from, name: op.actor.name })}\n\n${op.text}`,
-      op.messageId
+      { id: op.messageId }
     );
     await board.audit({
       actor: starter,
       action: 'session-message',
       detail: `to session ${session.id} "${session.title}" (message ${op.messageId}, ${sent.state}), ${from}`
     });
-    return { ok: true, state: sent.state };
+    return { ok: true, state: sent.state, hold: sent.hold };
   } catch (err) {
     return { error: errText(err) };
   }
@@ -1379,7 +1515,9 @@ async function answerFileOp(
       };
     }
     if (op.part >= ticket.chunks) {
-      return { error: `${op.path} has ${ticket.chunks} chunks, not ${op.part + 1}.` };
+      return {
+        error: `${op.path} has ${ticket.chunks} chunks, not ${op.part + 1}.`
+      };
     }
     try {
       const chunk = readSourceChunk(
@@ -1400,7 +1538,11 @@ async function answerFileOp(
   const to = `to ${from.replace(/^from /, '')}`;
   try {
     const { info: file, stamp } = describeSourceFileStamped(rules, op.path);
-    tickets.set(key, { stamp, chunks: file.chunks, until: now + FILE_TICKET_MS });
+    tickets.set(key, {
+      stamp,
+      chunks: file.chunks,
+      until: now + FILE_TICKET_MS
+    });
     await board
       .audit({
         actor: starter,

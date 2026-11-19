@@ -1275,6 +1275,7 @@ export const shopRefundOrderSchema = z.object({
   orderId: z.number().int().positive()
 });
 export * from './validators/aiConfirmations';
+export * from './validators/mcpApprovals';
 export * from './validators/audioRooms';
 export * from './validators/e2ee';
 export * from './validators/secureChat';

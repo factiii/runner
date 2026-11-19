@@ -13,7 +13,15 @@ import { BOARD_SLUG, REFUSED_BOARD } from './protocol';
 import { type OpsServer, startOpsServer } from './server';
 import { opsHomePaths, opsRunPaths } from './settings';
 import { createOpsUpdater, type OpsUpdater } from './updater';
-import { bundleVersion, fetchLatestMac, servicePidFile, spawnApplyHelper, stageMacRelease } from './updaterMac';
+import {
+  bundleVersion,
+  fetchLatestMac,
+  releaseOffered,
+  servicePidFile,
+  spawnApplyHelper,
+  stageMacRelease,
+  stagingInstallId
+} from './updaterMac';
 
 /** Set by Factiii Desktop's setup in the daemon's plist: the app bundle this
  *  service runs from, which its updater keeps current. */
@@ -191,15 +199,18 @@ function macUpdater(opts: {
   if (process.platform !== 'darwin' || !app || !app.endsWith('.app')) return null;
   const current = bundleVersion(app);
   if (!current) return null;
+  const log = (line: string) => opts.log(`update: ${line}`);
+  const installId = stagingInstallId(opts.opsHome, log);
   return createOpsUpdater({
     current,
     intervalMs: UPDATE_INTERVAL_MS,
     now: Date.now,
     fetchLatest: () => fetchLatestMac(),
+    inRollout: (release) => releaseOffered(release, installId),
     activeJobs: () => [...opts.boards.values()].reduce((n, b) => n + b.jobActive().length, 0),
     stage: (release) => stageMacRelease({ release, opsHome: opts.opsHome, app }),
     apply: async (staged) => spawnApplyHelper({ app, staged, opsHome: opts.opsHome, runDir: opts.runDir }),
-    log: (line) => opts.log(`update: ${line}`)
+    log
   });
 }
 

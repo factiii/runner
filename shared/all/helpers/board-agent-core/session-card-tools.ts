@@ -53,7 +53,11 @@ const TOOLS = [
     name: 'session_card',
     description:
       'Which card this session is linked to, if any. A session (a chat or a code session on a runner) can be linked to one card on its board; the link is changed with link_card and unlink_card.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false
+    },
     annotations: { readOnlyHint: true, openWorldHint: false }
   },
   {
@@ -84,7 +88,11 @@ const TOOLS = [
     name: 'unlink_card',
     description:
       'Remove this session’s link to its card. The session and the card both stay; only the link goes.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false
+    },
     annotations: { readOnlyHint: false, openWorldHint: false }
   }
 ] as const;
@@ -216,12 +224,12 @@ export function withSessionCardTools(opts: {
           isError: true
         }))
         .then(({ text, isError }) =>
-        channel.send({
-          jsonrpc: '2.0',
-          id,
-          result: { content: [{ type: 'text', text }], isError }
-        })
-      );
+          channel.send({
+            jsonrpc: '2.0',
+            id,
+            result: { content: [{ type: 'text', text }], isError }
+          })
+        );
       return;
     }
     relay.receive(message);

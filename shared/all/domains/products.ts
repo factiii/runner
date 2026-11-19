@@ -39,6 +39,33 @@ export const TRONS_PER_CENT = TRONS_PER_USD / 100; // 10,000
 // apart. Every store price is DERIVED from it by storePriceCents below.
 export const PREMIUM_MONTHLY_CENTS = 999;
 
+/** How long Premium stays on after the paid days ran out while Stripe retries
+ *  a failed renewal (.specs/products.md → A failed renewal). The server's one
+ *  Premium answer honours it (helpers/paymentGrace.ts); the notices say it. */
+export const PAYMENT_GRACE_DAYS = 3;
+
+/** The line a plan screen and Purchase History show while a failed renewal is
+ *  being retried. `until` is null once the grace has run out. */
+export const paymentGraceLine = (until: Date | string | null): string =>
+  until && new Date(until) > new Date()
+    ? `Premium stays on until ${new Date(until).toLocaleDateString(undefined, {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      })} while we retry your card.`
+    : 'Premium is off until the payment goes through.';
+
+/** Purchase History, web and the Factiii phone, for a failed renewal: the
+ *  status, and the line in place of the renewal date while it is retried. */
+export const paymentFailedLabel = (state: 'retrying' | 'ended'): string =>
+  state === 'retrying' ? 'Payment failed' : 'Ended: payment failed';
+export const paymentFailedLine = (graceUntil: Date | string | null): string =>
+  `Update your card. ${paymentGraceLine(graceUntil)}`;
+
+/** Oakbox's plan screens, web and phone, for a failed renewal. */
+export const PLAN_PAYMENT_FAILED_LINE =
+  'Payment failed. Update your card to keep your plan.';
+
 // ---------------------------------------------------------------------------
 // Where a Founders Token can be sold
 // ---------------------------------------------------------------------------

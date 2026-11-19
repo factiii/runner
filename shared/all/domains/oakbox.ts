@@ -316,6 +316,87 @@ export const overageMessage = (
 });
 
 /**
+ * How full a plan is, as the steps a person is told about
+ * (.specs/oakbox-stores.md → Limits and warnings): a note at 80% and at 90%,
+ * `full` from 100% (the extra room is in use, and nightly backups stop), and
+ * `stopped` once the extra room is gone and new files are refused.
+ */
+export const STORAGE_NEAR_FRACTION = 0.8;
+export const STORAGE_NEARER_FRACTION = 0.9;
+export const STORAGE_LEVELS = [
+  'ok',
+  'near80',
+  'near90',
+  'full',
+  'stopped'
+] as const;
+export type StorageLevel = (typeof STORAGE_LEVELS)[number];
+
+export const storageLevel = ({
+  usedBytes,
+  limitBytes,
+  overageBytes
+}: {
+  usedBytes: number;
+  limitBytes: number;
+  overageBytes: number;
+}): StorageLevel => {
+  if (usedBytes >= limitBytes + overageBytes) return 'stopped';
+  if (usedBytes >= limitBytes) return 'full';
+  if (usedBytes >= limitBytes * STORAGE_NEARER_FRACTION) return 'near90';
+  if (usedBytes >= limitBytes * STORAGE_NEAR_FRACTION) return 'near80';
+  return 'ok';
+};
+
+/** True when `to` is a step further toward full than `from`. */
+export const storageLevelRose = (
+  from: StorageLevel,
+  to: StorageLevel
+): boolean => STORAGE_LEVELS.indexOf(to) > STORAGE_LEVELS.indexOf(from);
+
+/** How long a deleted Cloud file stays in the trash, and how long while the
+ *  plan is full (.specs/oakbox-stores.md → Trash for Cloud files). The server
+ *  purges by the same numbers (helpers/vaultTrash.ts). */
+export const TRASH_DAYS = 30;
+export const TRASH_DAYS_WHEN_FULL = 7;
+
+const TRASH_WHEN_FULL = `deleted files are kept in the trash for ${TRASH_DAYS_WHEN_FULL} days instead of ${TRASH_DAYS}`;
+const BACKUPS_STOPPED_LINE = `Nightly backups have stopped until there is room, and ${TRASH_WHEN_FULL}.`;
+
+const percent = (fraction: number): number => Math.round(fraction * 100);
+
+/**
+ * The words for a level, the same in both apps and in the email, or null
+ * while there is nothing to say. `format` renders a byte count.
+ */
+export const storageNotice = (
+  sizes: { usedBytes: number; limitBytes: number; overageBytes: number },
+  format: (bytes: number) => string
+): { level: StorageLevel; title: string; body: string } | null => {
+  const level = storageLevel(sizes);
+  if (level === 'ok') return null;
+  const overage = vaultOverage(sizes);
+  if (level === 'near80' || level === 'near90') {
+    const left = format(Math.max(0, sizes.limitBytes - sizes.usedBytes));
+    return {
+      level,
+      title: `${percent(level === 'near80' ? STORAGE_NEAR_FRACTION : STORAGE_NEARER_FRACTION)}% of your storage is used`,
+      body:
+        level === 'near80'
+          ? `${left} is left on your plan. Upgrade or delete something before it fills.`
+          : `Only ${left} is left on your plan. When it is full, nightly backups stop and ${TRASH_WHEN_FULL}.`
+    };
+  }
+  const message = overageMessage(overage, format);
+  return {
+    level,
+    // Exactly at the plan nothing is "over" yet, and "0 MB over" says nothing.
+    title: overage.overBytes > 0 ? message.title : 'Your storage plan is full',
+    body: `${message.body} ${BACKUPS_STOPPED_LINE}`
+  };
+};
+
+/**
  * The account's room on Factiii's servers (R2), by the name every app shows
  * it under: the runner's Status tab beside Machine Storage, Oakbox's storage
  * bars, its plans and its Storage sources. Machine storage is a runner's own
@@ -370,7 +451,8 @@ export const MAX_VAULT_FILE_BYTES = 5 * 1024 * 1024 * 1024;
 export const MAX_VAULT_FILE_LABEL = '5 GB';
 
 /**
- * The three things a vault's storage is made of, as each client shows them.
+ * The things a vault's storage is made of, as each client shows them: three
+ * always, and the nightly index backups as a fourth once there is one.
  *
  * `vaultStorage` on the server measures them and counts all three against the
  * quota: files in R2, the data read out of them in Postgres, and the embeds
@@ -382,7 +464,7 @@ export const MAX_VAULT_FILE_LABEL = '5 GB';
  * whole bar.
  */
 type StoragePart = {
-  key: 'files' | 'posts' | 'vectors';
+  key: 'files' | 'posts' | 'vectors' | 'backups';
   label: string;
   bytes: number;
   share: number;
@@ -392,8 +474,12 @@ export const storageParts = (sizes: {
   filesBytes: number;
   postsBytes: number;
   vectorsBytes: number;
+  /** Absent from a server older than the backups; shown only when there is one. */
+  backupsBytes?: number;
 }): StoragePart[] => {
-  const total = sizes.filesBytes + sizes.postsBytes + sizes.vectorsBytes;
+  const backupsBytes = sizes.backupsBytes ?? 0;
+  const total =
+    sizes.filesBytes + sizes.postsBytes + sizes.vectorsBytes + backupsBytes;
   const parts: Omit<StoragePart, 'share'>[] = [
     // Named for what the person gets, not for the table it sits in: "Data" is
     // the text we read out of their files so they can search it, and "Embeds"
@@ -401,7 +487,12 @@ export const storageParts = (sizes: {
     // "Indexes" named our rows and told the reader nothing.
     { key: 'files', label: 'Files', bytes: sizes.filesBytes },
     { key: 'posts', label: 'Data', bytes: sizes.postsBytes },
-    { key: 'vectors', label: 'Embeds', bytes: sizes.vectorsBytes }
+    { key: 'vectors', label: 'Embeds', bytes: sizes.vectorsBytes },
+    // The nightly copy of their index (.specs/oakbox-stores.md → A backup for
+    // each person). No row until the first one is taken.
+    ...(backupsBytes > 0
+      ? [{ key: 'backups' as const, label: 'Backups', bytes: backupsBytes }]
+      : [])
   ];
   return parts.map((part) => ({
     ...part,
@@ -999,6 +1090,11 @@ export type VaultDeletion =
 
 const plural = (n: number): string => (n === 1 ? 'file' : 'files');
 
+// A deleted file is not gone yet, and the prompt is where that is worth
+// knowing. Not said of a public post: that one does go at once.
+const TRASH_LINE_ONE = ` It can be restored from the trash for ${TRASH_DAYS} days.`;
+const TRASH_LINE_MANY = ` They can be restored from the trash for ${TRASH_DAYS} days.`;
+
 // The line a delete that takes public posts adds.
 const publicLine = (published: number): string =>
   published === 1
@@ -1019,7 +1115,7 @@ export const deletePrompt = (
       title: 'Delete this file?',
       // The whole path, not the leaf: `statement.txt` on its own does not say
       // which one.
-      body: `${what.name} and anything read from it.`
+      body: `${what.name} and anything read from it.${TRASH_LINE_ONE}`
     };
   }
   const published = what.published ?? 0;
@@ -1027,12 +1123,12 @@ export const deletePrompt = (
   if (what.kind === 'folder') {
     return {
       title: 'Delete this folder?',
-      body: `${what.name} and the ${what.files.toLocaleString()} ${plural(what.files)} in it, with anything read from them.${extra}`
+      body: `${what.name} and the ${what.files.toLocaleString()} ${plural(what.files)} in it, with anything read from them.${TRASH_LINE_MANY}${extra}`
     };
   }
   return {
     title: `Delete ${what.count.toLocaleString()} ${plural(what.count)}?`,
-    body: `They go with anything read from them.${extra}`
+    body: `They go with anything read from them.${TRASH_LINE_MANY}${extra}`
   };
 };
 

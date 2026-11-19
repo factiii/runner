@@ -43,4 +43,8 @@ export const VAULT_MIGRATIONS: { id: string; sql: string }[] = [
     id: "0010_2026-11-11",
     sql: "-- AlterEnum\n-- This migration adds more than one value to an enum.\n-- With PostgreSQL versions 11 and earlier, this is not possible\n-- in a single migration. This can be worked around by creating\n-- multiple migrations, each migration adding only one value to\n-- the enum.\n\n\nALTER TYPE \"UploadSource\" ADD VALUE 'RUNNER';\nALTER TYPE \"UploadSource\" ADD VALUE 'VAULT';"
   },
+  {
+    id: "0011_2026-11-18",
+    sql: "-- AlterTable\nALTER TABLE \"VaultFolder\" ADD COLUMN     \"deltaLink\" TEXT;"
+  },
 ];

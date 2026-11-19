@@ -2,13 +2,20 @@ import { z } from 'zod';
 
 import {
   SECURE_LIMITS,
+  SECURE_VAULT_LIMITS,
   type SecureEnvelopeInput,
-  type SecureSendInput
+  type SecureSendInput,
+  type SecureVaultAck,
+  type SecureVaultDeliver,
+  type SecureVaultFetch,
+  type SecureVaultHello,
+  type SecureVaultSetup
 } from '../domains/secureChat';
 import {
   b64Schema,
   e2eeDeviceIdSchema,
   e2eeDeviceKeysSchema,
+  e2eePublicKeySchema,
   e2eeSignatureSchema
 } from './e2ee';
 
@@ -102,6 +109,89 @@ export const secureFetchSchema = z.object({
   /** Rows after this id (the last one of the previous page). */
   cursor: z.number().int().min(0).optional()
 });
+
+// The Vault mailbox (.specs/secure-chat.md → Vault mailbox).
+
+/** secure.vaultAddressSet: the caller's primary device signs where their
+ *  mail goes (secureVaultAddressSigningText): a runner of theirs and its
+ *  mailbox key, or both null for this server's mailbox again. */
+export const secureVaultAddressSetSchema = z
+  .object({
+    deviceId: e2eeDeviceIdSchema,
+    version: z.number().int().positive(),
+    runnerId: z.number().int().positive().nullable(),
+    mailKey: e2eePublicKeySchema.nullable(),
+    signature: e2eeSignatureSchema
+  })
+  .refine((v) => (v.runnerId === null) === (v.mailKey === null), {
+    message: 'A Vault address names a runner and its mailbox key together.'
+  });
+
+/** secure.vaultAddresses: the signed addresses of some people. */
+export const secureVaultAddressesSchema = z.object({
+  userIds: z
+    .array(userIdSchema)
+    .min(1)
+    .max(SECURE_LIMITS.maxMembers)
+});
+
+/** secure.vaultRunnerSocket: one of the caller's own runners. */
+export const secureVaultRunnerSchema = z.object({
+  runnerId: z.number().int().positive()
+});
+
+// What a runner's Vault mailbox is sent over its direct link (the `mail*`
+// actions, apps/runner/src/mail/daemonMail.ts).
+
+const nonceSchema = z.string().regex(/^[A-Za-z0-9_-]{16,128}$/);
+
+export const secureVaultHelloSchema = z.object({
+  nonce: nonceSchema
+}) satisfies z.ZodType<SecureVaultHello['payload']>;
+
+const vaultDeviceAuthSchema = z.object({
+  deviceId: e2eeDeviceIdSchema,
+  curve25519: e2eePublicKeySchema,
+  ed25519: e2eePublicKeySchema,
+  linkSignature: e2eeSignatureSchema.optional(),
+  at: z.number().int().positive(),
+  signature: e2eeSignatureSchema
+});
+
+export const secureVaultSetupSchema = z.object({
+  userId: userIdSchema,
+  enabled: z.boolean(),
+  primary: z.object({
+    deviceId: e2eeDeviceIdSchema,
+    curve25519: e2eePublicKeySchema,
+    ed25519: e2eePublicKeySchema
+  }),
+  primarySignature: e2eeSignatureSchema,
+  at: z.number().int().positive(),
+  signature: e2eeSignatureSchema
+}) satisfies z.ZodType<SecureVaultSetup['payload']>;
+
+export const secureVaultDeliverSchema = z.object({
+  deliveryId: nonceSchema,
+  senderDeviceId: e2eeDeviceIdSchema,
+  senderCurve25519: e2eePublicKeySchema,
+  chatId: chatIdSchema.optional(),
+  envelopes: z
+    .array(envelopeSchema)
+    .min(1)
+    .max(SECURE_VAULT_LIMITS.maxEnvelopesPerDeliver),
+  notify: z.boolean()
+}) satisfies z.ZodType<SecureVaultDeliver['payload']>;
+
+export const secureVaultFetchSchema = z.object({
+  auth: vaultDeviceAuthSchema,
+  cursor: z.number().int().min(0).optional()
+}) satisfies z.ZodType<SecureVaultFetch['payload']>;
+
+export const secureVaultAckSchema = z.object({
+  auth: vaultDeviceAuthSchema,
+  ids: z.array(z.number().int().positive()).min(1).max(500)
+}) satisfies z.ZodType<SecureVaultAck['payload']>;
 
 // The history backup (.specs/secure-chat.md → History). Opaque base64.
 

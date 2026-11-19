@@ -25,6 +25,7 @@ import {
   serviceSpec
 } from './machine';
 import { registerDevVmCommands } from './devVm/cli';
+import { resetMailPrimary } from './mail/daemonMail';
 import { registerMigrateCommands } from './migrate';
 import { registerNukeCommand } from './nukeCli';
 import { registerOpsCommands } from './ops/cli';
@@ -301,6 +302,21 @@ registerPartsCommands(program);
 
 // Erase the whole runner, secrets included, behind a typed phrase (nuke.ts).
 registerNukeCommand(program);
+
+// A new phone: the Vault mailbox forgets the phone it answers to
+// (mail/daemonMail.ts). Only here, at the runner: nothing over a link can.
+program
+  .command('mail-reset')
+  .description(
+    'After a new phone: let the Vault mailbox of secure chat be set up again. Then turn Vault delivery on from the new phone.'
+  )
+  .action(() => {
+    console.log(
+      resetMailPrimary(CONFIG_DIR)
+        ? 'Done. Turn Vault delivery on again from your new phone.'
+        : 'This runner has no Vault mailbox yet.'
+    );
+  });
 
 // Heartbeats to a status page outside Factiii (statusPage.ts).
 const statusPage = program

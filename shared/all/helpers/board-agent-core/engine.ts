@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type {
   BoardAgentActionMap,
   PendingDangerousApproval,
+  RepoDefaults,
   RunnerCleanup,
   RunnerJobEndState,
   RunnerJobTargetWait,
@@ -33,6 +34,7 @@ import {
   teardownSession
 } from '../card-ai/card-session';
 import { ClaudeModeEngine } from '../card-ai/claude-mode';
+import type { ChatPane } from '../terminal-ai/chatCli';
 import { listConversations } from '../terminal-ai/chatHistory';
 import { ChatRuns } from '../terminal-ai/chatRun';
 import { pasteIntoAgent, terminalInterrupt } from '../terminal-ai/chatTerminal';
@@ -53,9 +55,11 @@ import {
 } from './boardTerminal';
 import { ClaudeLoginFlow } from './claude-login';
 import { CodexLoginFlow } from './codex-login';
-import type { ExecTarget } from './exec';
+import { EndedSessions, SESSION_ENDED_ERROR } from './ended-sessions';
+import { type ExecTarget, readSpacePorts } from './exec';
 import {
   commitAndPush,
+  gitInDir,
   isDisposableWorktree,
   NoChangesError,
   readWorkState,
@@ -130,6 +134,7 @@ import {
   readSkill,
   writeGlobalSkill
 } from './host-skills';
+import { InboxDeliverer } from './inbox-delivery';
 import { runnerJobTargets } from './job-targets';
 import {
   filledCommand,
@@ -153,10 +158,15 @@ import {
   OwnerApprovals
 } from './owner-approval';
 import { isFailedPasswordAttempt } from './password-throttle';
-import { allocateSessionPorts, pruneSessionPorts } from './port-blocks';
+import {
+  allocateSessionPorts,
+  pruneSessionPorts,
+  sessionPortBlocks
+} from './port-blocks';
 import { buildPrompt } from './prompt';
 import prompts from './prompts.json';
 import { type AgentProvider, resolveProvider } from './providers';
+import { detectRepoDefaults } from './repo-defaults';
 import { sessionRunsDangerousJobs } from './runner-access';
 import { ScratchpadStore } from './scratchpad-store';
 import {
@@ -185,8 +195,9 @@ import {
   type HypervisorBoard,
   type HypervisorSession
 } from './session-hypervisor';
-import { type InboxDelivery, SessionInbox } from './session-inbox';
+import { SessionInbox } from './session-inbox';
 import { SimulatorStore } from './simulator-store';
+import { BrowserStore } from './browser-store';
 import { SpaceCore, type SpaceCoreOptions } from './space-core';
 import {
   type CardRecord,
@@ -225,9 +236,13 @@ export type BoardAgentEngineOptions = SpaceCoreOptions & {
    *  connection's video track; anything without one leaves it unset and the
    *  panel simply never receives video. */
   onSimulatorFrame?: (accessUnit: Uint8Array, capturedAt: number) => void;
-  /** Fired before this space starts encoding, so the host can stop any other
-   *  space that is. One engine cannot see another; the runner holds them all. */
+  /** Fired before this space starts encoding (a simulator or a browser tab),
+   *  so the host can stop any other space that is. One engine cannot see
+   *  another; the runner holds them all. */
   onSimulatorAttach?: () => void;
+  /** Where the browser panel's frames go (.specs/browser-panel.md): the same
+   *  video track, under the same holder. */
+  onBrowserFrame?: (accessUnit: Uint8Array, capturedAt: number) => void;
   /** Asks the Factiii server to revoke one GitHub token at GitHub, when a
    *  board disconnects GitHub. Set on the headless runner, which can prove to
    *  the server who it is; unset on desktop, where a disconnect forgets the
@@ -350,6 +365,16 @@ const starterOf = (ctx: ActionContext): SessionStarter => ({
   role: isOwnerContext(ctx) ? 'owner' : 'member'
 });
 
+// Whether the transcript $1 holds a prompt: `none` when the file is not
+// there yet or has no `user` line, `some` otherwise. Anything else (the
+// shell failed) is neither.
+const NEVER_PROMPTED_SCRIPT = [
+  'f="$1"',
+  '[ -e "$f" ] || { echo none; exit 0; }',
+  '[ -r "$f" ] || exit 1',
+  'if grep -Eq \'"type" *: *"user"\' "$f"; then echo some; else echo none; fi'
+].join('\n');
+
 /** How long start_session's opening message waits for the workspace (a
  *  first clone can take minutes), and how often it looks. */
 const SEND_WHEN_READY_MS = 10 * 60_000;
@@ -437,6 +462,8 @@ export class BoardAgentEngine {
   /** message_session's inbox per session (session-inbox.ts): a message
    *  waits there until it can go in without cutting a turn short. */
   private sessionInbox: SessionInbox;
+  /** Launch ids ended here: never started again (ended-sessions.ts). */
+  private endedSessions = new EndedSessions();
   private workPathTimer: ReturnType<typeof setInterval>;
   private followingWorkPaths = false;
   private emitter: AgentEventSink;
@@ -444,6 +471,7 @@ export class BoardAgentEngine {
    *  of them draw on it, and it outlives every session on the board. */
   private scratchpad: ScratchpadStore;
   private simulator: SimulatorStore;
+  private browser: BrowserStore;
   /** Told before this space attaches, so the host can stop any other space's
    *  encoder. Held because `options` is not. */
   private onSimulatorAttach?: () => void;
@@ -527,8 +555,34 @@ export class BoardAgentEngine {
       // The session's CLI: its chat runs that one (chatCli.ts).
       provider: (id) => this.terminal.get(id)?.provider
     });
+    // One try at an inbox message, never over a turn (inbox-delivery.ts).
+    const inboxDeliverer = new InboxDeliverer<ChatPane>({
+      session: (id) => {
+        const session = this.terminal.get(id);
+        return session
+          ? {
+              phase: session.phase,
+              agentState: session.agentState,
+              agentLive: session.agentLive,
+              chatRunning: this.chatRuns.running(id),
+              reachable: Boolean(this.getCardTarget(id))
+            }
+          : null;
+      },
+      findPane: async (id) => {
+        const target = this.getCardTarget(id);
+        return target ? this.chatRuns.cli(id).findPane(target, id) : null;
+      },
+      neverPrompted: (id, pane) => this.neverPrompted(id, pane),
+      paste: async (id, pane, text) => {
+        const target = this.getCardTarget(id);
+        if (!target) throw new Error('The session is gone.');
+        await pasteIntoAgent(target, pane.paneId, text);
+      },
+      chatSend: (id, text) => this.chatRuns.send(id, text)
+    });
     this.sessionInbox = new SessionInbox({
-      deliver: (id, text) => this.deliverInbox(id, text)
+      deliver: (id, text) => inboxDeliverer.deliver(id, text)
     });
     this.scratchpad = new ScratchpadStore(
       () => this.core.target(),
@@ -540,6 +594,24 @@ export class BoardAgentEngine {
       () => this.core.hostTarget(),
       (unit, at) => options.onSimulatorFrame?.(unit, at),
       options.nativeDir ?? ''
+    );
+    // The encoder is this Mac's too. The ports are this board's only: its
+    // sessions' blocks and its own, where an agent starts its QA Chrome.
+    this.browser = new BrowserStore(
+      () => this.core.hostTarget(),
+      (unit, at) => options.onBrowserFrame?.(unit, at),
+      options.nativeDir ?? '',
+      {
+        ports: () => {
+          const dir = this.core.spaceDir();
+          return [
+            ...[...sessionPortBlocks(dir)].flatMap(([sessionId, ports]) =>
+              ports.map((port) => ({ port, sessionId }))
+            ),
+            ...readSpacePorts(dir).map((port) => ({ port, sessionId: '' }))
+          ];
+        }
+      }
     );
     this.onSimulatorAttach = options.onSimulatorAttach;
     this.onJobLog = options.onJobLog;
@@ -1585,6 +1657,34 @@ export class BoardAgentEngine {
   }
   bareWorkNames() {
     return this.core.bareWorkNames();
+  }
+  /** The repository's install and dev commands, from the names at the root
+   *  of its default branch and its package.json. Clones first when the repo
+   *  was only just picked, so this is also what makes it ready. */
+  async repoDefaults(): Promise<RepoDefaults> {
+    const config = this.core.readConfig();
+    if (!config.repoUrl || !config.githubToken) {
+      throw this.core.notConnectedError(
+        'Pick a repository for this board first.'
+      );
+    }
+    await this.core.ensureSetup();
+    const target = this.core.target();
+    const ref = `origin/${config.mainBranch || 'main'}`;
+    const files = (
+      await gitInDir(target, target.paths.repo, 'ls-tree', '--name-only', ref)
+    )
+      .split('\n')
+      .filter(Boolean);
+    const packageJson = files.includes('package.json')
+      ? await gitInDir(
+          target,
+          target.paths.repo,
+          'show',
+          `${ref}:package.json`
+        ).catch(() => null)
+      : null;
+    return detectRepoDefaults(files, packageJson);
   }
   // Deploy button entry: is the repo's deploy contract (SKILL.md +
   // required-variables.json) on the default branch? See .specs/deploy.md.
@@ -3238,6 +3338,8 @@ export class BoardAgentEngine {
   }
   simulatorAttach(p: BoardAgentActionMap['simulatorAttach']['payload']) {
     this.onSimulatorAttach?.();
+    // One encoder: the browser tab leaves the stream as the simulator takes it.
+    this.browser.detach();
     return this.simulator.attach(p);
   }
   simulatorDetach() {
@@ -3254,6 +3356,29 @@ export class BoardAgentEngine {
   }
   simulatorCreate(p: BoardAgentActionMap['simulatorCreate']['payload']) {
     return this.simulator.create(p);
+  }
+
+  // ── Browser panel (.specs/browser-panel.md) ──
+
+  browserList(p: BoardAgentActionMap['browserList']['payload']) {
+    return this.browser.list(p ?? {});
+  }
+  browserAttach(p: BoardAgentActionMap['browserAttach']['payload']) {
+    this.onSimulatorAttach?.();
+    // One encoder: the simulator leaves the stream as a tab takes it.
+    this.simulator.detach();
+    return this.browser.attach(p);
+  }
+  browserDetach() {
+    this.browser.detach();
+  }
+  browserInput(p: BoardAgentActionMap['browserInput']['payload']) {
+    return this.browser.input(p);
+  }
+  /** Stop whatever this board has on the video stream. */
+  stopVideo() {
+    this.simulator.detach();
+    this.browser.detach();
   }
 
   // ── Cross-mode coordinators ──
@@ -3298,6 +3423,8 @@ export class BoardAgentEngine {
     if (this.claude.isRunning(postId) || this.terminal.isRunning(postId)) {
       throw new Error('A session is already running for this card.');
     }
+    // A stale view on another client asking for a session that was ended.
+    if (this.endedSessions.has(postId)) throw new Error(SESSION_ENDED_ERROR);
 
     const provider = this.cardProvider(payload);
 
@@ -3351,6 +3478,10 @@ export class BoardAgentEngine {
         baseBranch: baseBranch ?? '',
         worktree: worktree !== false
       });
+      // The board's first session opens on a task (`sessionOpeningMessage`).
+      if (payload.message?.trim()) {
+        void this.sendWhenReady(postId, payload.message);
+      }
     } else {
       this.claude.start(base, {
         prompt,
@@ -3702,6 +3833,7 @@ export class BoardAgentEngine {
     } else {
       left = await this.dismissLost(postId, opts);
     }
+    this.endedSessions.note(postId);
     this.emitter.emitSessionRemoved(postId);
     return left;
   }
@@ -3769,9 +3901,18 @@ export class BoardAgentEngine {
         void this.sendWhenReady(postId, args.message);
         return postId;
       },
-      message: (id, text, messageId) =>
-        this.sessionInbox.add(id, text, messageId),
+      message: async (id, text, opts) => {
+        const entry = await this.sessionInbox.add(id, text, opts);
+        return {
+          id: entry.id,
+          // Just added: never `cancelled` yet.
+          state: entry.state === 'cancelled' ? 'failed' : entry.state,
+          hold: entry.hold
+        };
+      },
+      cancel: (messageId, from) => this.sessionInbox.cancel(messageId, from),
       waiting: (id) => this.sessionInbox.pending(id).length,
+      hold: (id) => this.sessionInbox.pending(id)[0]?.hold,
       transcript: async (id) =>
         (
           await this.bareChatTranscript({
@@ -3876,43 +4017,25 @@ export class BoardAgentEngine {
     );
   }
 
-  /** One try at an inbox message (session-inbox.ts), never over a turn:
-   *  - a chat turn running: queued behind it, as a second chat message is
-   *    (the chat holds the conversation, so no terminal CLI is closed);
-   *  - the CLI open in a tab: pasted in as its next prompt once its hooks
-   *    say idle; busy while it works or waits on a permission;
-   *  - neither: a chat turn, as the chat's own Send.
-   *  The chat's own send would close a CLI open in the terminal to take the
-   *  conversation (chatRun.ts drive), which is what closed the target's
-   *  Claude mid-turn before the inbox. */
-  private async deliverInbox(
+  /** The CLI open in `pane` has taken no prompt in its conversation: nothing
+   *  it could be in the middle of (inbox-delivery.ts). Told from its
+   *  transcript, which holds a `user` line from the first prompt on (a tool
+   *  result is one too). Only for a CLI that records its conversation and
+   *  folder (Claude); false when the file cannot be named or read. */
+  private async neverPrompted(
     postId: string,
-    text: string
-  ): Promise<InboxDelivery> {
-    const session = this.terminal.get(postId);
-    if (!session || session.phase === 'error') return 'gone';
-    if (session.phase !== 'bare-active') return 'busy';
-    if (this.chatRuns.running(postId)) {
-      this.chatRuns.send(postId, text);
-      return 'delivered';
-    }
+    pane: ChatPane
+  ): Promise<boolean> {
     const target = this.getCardTarget(postId);
-    if (!target) return 'gone';
-    if (session.agentState === 'working' || session.agentState === 'blocked') {
-      return 'busy';
-    }
-    const pane = await this.chatRuns.cli(postId).findPane(target, postId);
-    if (pane) {
-      // Unknown (no hooks reported yet) is not idle: it waits.
-      if (session.agentState !== 'idle') return 'busy';
-      await pasteIntoAgent(target, pane.paneId, text);
-      return 'delivered';
-    }
-    // A CLI in a tab the runner cannot find (no session record) while the
-    // hooks say one is there: never run a second CLI beside it.
-    if (session.agentLive && session.agentState !== 'idle') return 'busy';
-    this.chatRuns.send(postId, text);
-    return 'delivered';
+    if (!target || !pane.conversation || !pane.cwd) return false;
+    const file = await this.chatRuns
+      .cli(postId)
+      .transcriptFile(target, pane.cwd, pane.conversation);
+    if (!file) return false;
+    const out = await target
+      .run(['sh', '-c', NEVER_PROMPTED_SCRIPT, 'sh', file])
+      .catch(() => '');
+    return out.trim() === 'none';
   }
 
   /** start_session's opening message: into the chat once the session's
@@ -4207,6 +4330,7 @@ export class BoardAgentEngine {
     this.terminal.destroy();
     this.scratchpad.destroy();
     this.simulator.destroy();
+    this.browser.destroy();
     this.core.destroy();
   }
 
@@ -4369,6 +4493,8 @@ export class BoardAgentEngine {
         return (await this.cardRemoteBranches()) as BoardAgentActionMap[A]['result'];
       case 'bareWorkNames':
         return (await this.bareWorkNames()) as BoardAgentActionMap[A]['result'];
+      case 'repoDefaults':
+        return (await this.repoDefaults()) as BoardAgentActionMap[A]['result'];
       case 'deployStatus':
         return (await this.deployStatus()) as BoardAgentActionMap[A]['result'];
       case 'deployBranches':
@@ -4879,6 +5005,23 @@ export class BoardAgentEngine {
         return undefined as BoardAgentActionMap[A]['result'];
       case 'simulatorCatalog':
         return (await this.simulatorCatalog()) as BoardAgentActionMap[A]['result'];
+      case 'browserList':
+        return (await this.browserList(
+          payload as BoardAgentActionMap['browserList']['payload']
+        )) as BoardAgentActionMap[A]['result'];
+      case 'browserAttach':
+        await this.browserAttach(
+          payload as BoardAgentActionMap['browserAttach']['payload']
+        );
+        return undefined as BoardAgentActionMap[A]['result'];
+      case 'browserDetach':
+        this.browserDetach();
+        return undefined as BoardAgentActionMap[A]['result'];
+      case 'browserInput':
+        await this.browserInput(
+          payload as BoardAgentActionMap['browserInput']['payload']
+        );
+        return undefined as BoardAgentActionMap[A]['result'];
       case 'simulatorCreate':
         return (await this.simulatorCreate(
           payload as BoardAgentActionMap['simulatorCreate']['payload']

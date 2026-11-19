@@ -43,6 +43,20 @@ input="$(cat 2>/dev/null || true)"
 input="${input:0:8192}"
 input="${input//$'\n'/ }"
 input="${input//$'\r'/ }"
+
+# `started` (SessionStart): the CLI has opened and sits at its prompt, which
+# is idle. Without it a CLI that had run no turn had reported nothing, and a
+# message from another session waited until someone typed into it (card
+# 714c2360). Not after a compaction: SessionStart fires there too, in the
+# middle of a turn, and idle then would let a message be typed over it. The
+# source is read here, not by a matcher in hooks.json, so a CLI that ignores
+# the matcher cannot report idle mid-turn.
+if [ "$state" = started ]; then
+  case "$input" in
+    *'"source":"compact"'* | *'"source": "compact"'*) exit 0 ;;
+  esac
+  state=idle
+fi
 # The pane is the identity; the runner resolves it to a session. Keeping that
 # mapping on the runner is what stops this script from having to know how tmux
 # sessions are named.

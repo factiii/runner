@@ -28,6 +28,7 @@ import type {
   RunnerJobTargetWait
 } from './electron';
 import type { IcePair } from './iceLink';
+import type { JobStatus } from './jobs';
 import type { Post } from './posts';
 import type { RunnerJobStoppedMessage } from './runnerActivity';
 import type { ProtocolHello } from './runnerProtocol';
@@ -283,7 +284,8 @@ export interface ServerToClientEvents {
   // joined from another tab or device.
   audioRoomLeft: (data: { roomId: string }) => void;
   // Secure chat (.specs/secure-chat.md): one of this user's devices has
-  // mail. Contentless; each device fetches its own (secure.fetch).
+  // mail. Contentless; each device fetches its own (secure.fetch, and its
+  // Vault's mailbox when the person has Vault delivery on).
   e2eeToDevice: () => void;
   // A secure chat's members or name changed (created, added, removed, left,
   // renamed): re-read secure.chats / secure.chat.
@@ -443,8 +445,15 @@ export interface ServerToClientEvents {
   // or one was decided (server helpers/aiGate.ts). Contentless: refetch
   // aiConfirmations.pending.
   aiConfirmationsChanged: () => void;
+  // An action this person's AI proposed through the MCP is waiting for their
+  // approval, or one was answered, or a window ended (server
+  // helpers/mcpApprovals.ts). Contentless: refetch mcpApprovals.pending.
+  mcpApprovalsChanged: () => void;
   verificationSessionChanged: () => void;
   verificationQueueChanged: () => void;
+  // One server job's row, when a run starts or ends or it is paused
+  // (admins on the Jobs page only; server jobs/registry.ts).
+  jobChanged: (job: JobStatus) => void;
   // One-shot on admin approve. Offline sockets miss it; recovery is backup file or re-verify.
   verificationApproved: (payload: {
     approvedBios: string[];
@@ -771,6 +780,10 @@ export type RunnerScope =
       /** An accepted peer of the owner's shared vault whom the runner let
        *  into its Vault (.specs/runner-vault.md "Sharing"). */
       vault?: boolean;
+      /** They share a secure chat with the owner, whose signed Vault address
+       *  names this runner: they may deliver mail to its mailbox and nothing
+       *  else (.specs/secure-chat.md → Vault mailbox). */
+      mail?: boolean;
     };
 
 // ============================================
@@ -847,6 +860,8 @@ export interface ClientToServerEvents {
   // Verification (admin-only). Server-side handlers verify admin status before joining.
   joinVerificationQueue: () => void;
   leaveVerificationQueue: () => void;
+  joinAdminJobs: () => void;
+  leaveAdminJobs: () => void;
   joinVerificationSession: (userId: number) => void;
   leaveVerificationSession: (userId: number) => void;
 
@@ -1094,6 +1109,11 @@ export interface ClientToServerEvents {
     grants: RunnerGrants;
     vault?: string[];
   }) => void;
+  // Runner -> server: its owner's Vault mailbox took mail
+  // (.specs/secure-chat.md → Vault mailbox). The Signal way: no content, no
+  // sender, no chat. The server pings the owner's devices to check their
+  // Vault and, with `push`, sends them the contentless push.
+  'runner:mail-wake': (data: { push: boolean }) => void;
   // Runner -> server: its live sessions per board, what it offers and
   // whether its owner lets other runners start sessions there: the server's
   // session directory (.specs/card-sessions.md "Across runners"). On connect

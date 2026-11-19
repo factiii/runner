@@ -9,7 +9,9 @@
 // The decisions are a pure function (nextStep) and the loop takes every
 // effect as a dependency, so both are tested without a network or a bundle.
 
-export type Release = { version: string; url: string; sha512: string };
+/** `stagingPercentage` is the feed's own value when it has one: the share of
+ *  installs a staged release is offered to (.specs/desktop-release.md). */
+export type Release = { version: string; url: string; sha512: string; stagingPercentage?: string };
 
 export type UpdatePhase =
   | 'idle'
@@ -42,6 +44,9 @@ export type UpdaterDeps = {
   intervalMs: number;
   now: () => number;
   fetchLatest: () => Promise<Release | null>;
+  /** Whether a staged release is offered to this Mac. Without it every
+   *  release is. */
+  inRollout?: (release: Release) => boolean;
   /** Jobs running or queued on every board. */
   activeJobs: () => number;
   /** Download, check the hash, unpack and verify the signature. A refused
@@ -134,10 +139,15 @@ export function createOpsUpdater(deps: UpdaterDeps): OpsUpdater {
     phase = 'checking';
     lastCheckAt = deps.now();
     try {
-      latest = await deps.fetchLatest();
-      const newer = latest !== null && compareVersions(latest.version, deps.current) > 0;
-      phase = newer ? 'idle' : 'up-to-date';
-      message = latest ? null : 'No release could be read.';
+      const found = await deps.fetchLatest();
+      const newer = found !== null && compareVersions(found.version, deps.current) > 0;
+      // A staged release this Mac is outside the share of is not there for
+      // it yet: nothing to install, on a schedule or when asked.
+      const held = found !== null && newer && deps.inRollout !== undefined && !deps.inRollout(found);
+      latest = held ? null : found;
+      phase = newer && !held ? 'idle' : 'up-to-date';
+      if (held) message = `${found.version} is rolling out and has not reached this Mac yet.`;
+      else message = found ? null : 'No release could be read.';
     } catch (err) {
       phase = 'failed';
       message = `Could not check for a release: ${err instanceof Error ? err.message : String(err)}`;

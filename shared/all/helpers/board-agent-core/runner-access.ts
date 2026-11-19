@@ -201,7 +201,13 @@ const SCREEN_ACTIONS: ReadonlySet<BoardAgentAction> = new Set<BoardAgentAction>(
     // Booting or adding a simulator is the same machine's devices, not a shell.
     'simulatorBoot',
     'simulatorCatalog',
-    'simulatorCreate'
+    'simulatorCreate',
+    // A tab of the board's QA Chrome: the same picture-and-touches level
+    // (.specs/browser-panel.md).
+    'browserList',
+    'browserAttach',
+    'browserDetach',
+    'browserInput'
   ]
 );
 
@@ -400,6 +406,22 @@ export const VAULT_ACTIONS: ReadonlySet<BoardAgentAction> =
     'vaultErase'
   ]);
 
+/** The Vault mailbox of secure chat (.specs/secure-chat.md → Vault mailbox;
+ *  apps/runner/src/mail). The daemon answers these before any board. Who may
+ *  call which is the mailbox's own rule (mail/daemonMail.ts): anyone the
+ *  server vouches as in a chat with the owner delivers, the owner's devices
+ *  fetch and ack with their own keys, the owner's primary sets it up. Never
+ *  on a relayed link: a message for a Vault user never touches the server. */
+export const MAIL_ACTIONS: ReadonlySet<BoardAgentAction> =
+  new Set<BoardAgentAction>([
+    'mailHello',
+    'mailSetup',
+    'mailDeliver',
+    'mailFetch',
+    'mailAck',
+    'mailStatus'
+  ]);
+
 /** Oakbox > Account > Backend's models (.specs/runner-vault-ask.md "Oakbox's
  *  backend: setup, sign-ins, models"). The daemon answers these before any board, for the owner only:
  *  a pull fills the machine's disk and a remove deletes a model every board's
@@ -490,6 +512,9 @@ export type VouchedScope =
        *  runner reported them as let into its Vault. Both halves are checked
        *  again on the runner (apps/runner/src/vault/access.ts). */
       vault?: boolean;
+      /** The server found them in a secure chat with the owner, whose Vault
+       *  address names this runner: mail delivery only (MAIL_ACTIONS). */
+      mail?: boolean;
     };
 
 /** The scope a link arrived with, or null when it is missing or not one the
@@ -514,7 +539,8 @@ export function parseVouchedScope(raw: unknown): VouchedScope | null {
     spaceSlugs,
     userId,
     name,
-    vault: scope.vault === true
+    vault: scope.vault === true,
+    mail: scope.mail === true
   };
 }
 
@@ -582,6 +608,8 @@ export const RELAY_SECRETS_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is rel
 
 export const RELAY_VAULT_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server, which could read what it carries. Vault files only travel on a direct link to your runner.`;
 
+export const RELAY_MAIL_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. Messages for a Vault only travel on a direct link to its runner.`;
+
 export const RELAY_LOCAL_AI_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. Models are managed only on a direct link to your runner.`;
 
 export const RELAY_AI_PROMPT_REFUSAL = `${RELAY_REFUSES_SECRETS}: this link is relayed through Factiii’s server. Your runner runs AI only on a direct link, so the words never pass through Factiii.`;
@@ -643,6 +671,7 @@ export function relaySecretsRefusal(
   if (transport !== 'socket') return null;
   if (RELAY_REFUSED_ACTIONS.has(action)) return RELAY_SECRETS_REFUSAL;
   if (VAULT_ACTIONS.has(action)) return RELAY_VAULT_REFUSAL;
+  if (MAIL_ACTIONS.has(action)) return RELAY_MAIL_REFUSAL;
   if (LOCAL_AI_ACTIONS.has(action)) return RELAY_LOCAL_AI_REFUSAL;
   if (RUNNER_AI_ACTIONS.has(action)) return RELAY_AI_PROMPT_REFUSAL;
   if (action === 'runnerJobLog') return RELAY_JOB_LOG_REFUSAL;

@@ -51,6 +51,14 @@ import type {
 import type { SessionOp } from '../validators/sessionRelay';
 import type { MachineScanReport } from './machineScan';
 import type {
+  SecureVaultAck,
+  SecureVaultDeliver,
+  SecureVaultFetch,
+  SecureVaultHello,
+  SecureVaultSetup,
+  SecureVaultStatus
+} from './secureChat';
+import type {
   RunnerActivityView,
   RunnerJobHistoryPage,
   RunnerJobLog
@@ -1372,6 +1380,13 @@ export type SecureStoreStatus = {
   fix: string;
 };
 
+/** What a repository's own files say about how to install and run it
+ *  (board-agent-core/repo-defaults.ts). '' for what it cannot tell. */
+export type RepoDefaults = {
+  installCommand: string;
+  devCommand: string;
+};
+
 export type ConfigResponse = {
   repoUrl: string;
   mainBranch: string;
@@ -1947,6 +1962,45 @@ export type SimulatorCommand =
  *  knowing the udid. */
 export type SimulatorInput = SimulatorCommand & { udid: string };
 
+/** One tab of a Chrome an agent started for QA with a debugging port on one
+ *  of this board's session ports. See .specs/browser-panel.md. */
+export type BrowserTab = {
+  /** `<port>:<target id>`, what `browserAttach` takes. */
+  id: string;
+  port: number;
+  title: string;
+  url: string;
+  /** The session whose port block the Chrome listens on; '' for the board's
+   *  own block. */
+  sessionId: string;
+  /** This is the tab on the video stream now. */
+  attached: boolean;
+};
+
+/**
+ * One input event for the attached tab.
+ *
+ * Positions are 0..1 ratios of the picture, as the simulator's are: the
+ * runner knows the tab's viewport, the panel does not. A wheel's distance is
+ * a ratio of the viewport too, so a drag on a phone scrolls the page by what
+ * the finger covered.
+ */
+export type BrowserCommand =
+  | {
+      type: 'pointer';
+      phase: 'down' | 'move' | 'up';
+      x: number;
+      y: number;
+      /** Left when absent. */
+      button?: 'left' | 'middle' | 'right';
+    }
+  | { type: 'wheel'; x: number; y: number; dx: number; dy: number }
+  /** One key going down or up: `KeyboardEvent.code` and `.key`. The runner
+   *  keeps which modifiers are held. */
+  | { type: 'key'; code: string; key: string; down: boolean }
+  /** Typed in as text (a paste, a phone's keyboard). */
+  | { type: 'text'; text: string };
+
 /** What the owner gives one board member on a runner, lowest first. Each
  *  level includes the ones before it (runner-access.ts). */
 export const RUNNER_ACCESS_LEVELS = ['none', 'jobs', 'shell'] as const;
@@ -2007,11 +2061,11 @@ export type EnvironmentFix =
   | { by: 'install'; password: boolean; command: string }
   | { by: 'hand'; command?: string };
 
-/** Who has the runner's one video stream (the simulator), as the runner
- *  tells one channel. `mine` is true on the holder's own link only. See
- *  screen-holder.ts. */
+/** Who has the runner's one video stream (the simulator or a browser tab),
+ *  as the runner tells one channel. `mine` is true on the holder's own link
+ *  only. See screen-holder.ts. */
 export type ScreenHolderView = {
-  kind: 'simulator';
+  kind: 'simulator' | 'browser';
   userId: string;
   name: string;
   mine: boolean;
@@ -2151,6 +2205,10 @@ export type BoardAgentActionMap = {
        *  false to run in the board's workspace (a Chat session). Absent: a
        *  worktree whenever the board has a repository, as before. */
       worktree?: boolean;
+      /** Terminal mode: an opening message, sent to the session's chat once
+       *  its workspace is ready, as start_session's is. A runner without the
+       *  `sessionOpeningMessage` feature ignores it. */
+      message?: string;
     };
     result: { taskId: string; postId: string };
   };
@@ -2204,6 +2262,10 @@ export type BoardAgentActionMap = {
   /** Worktree names already in use, so the terminal launcher can refuse a
    *  duplicate name up front instead of failing the launch. */
   bareWorkNames: { payload: void; result: string[] };
+  /** The install and dev commands the board's repository names, read from
+   *  its default branch (cloning it first when it is not on the runner yet).
+   *  Shown as defaults; nothing runs them. The `repoDefaults` feature. */
+  repoDefaults: { payload: void; result: RepoDefaults };
   // Deploy button entry: does the default branch carry the deploy contract
   // (.agents/skills/deploy/SKILL.md + required-variables.json)? Missing
   // pieces route the UI to the skill creator. See .specs/deploy.md.
@@ -3767,6 +3829,21 @@ export type BoardAgentActionMap = {
     payload: EngagementQuery;
     result: EngagementQueryResult;
   };
+  /** The Vault mailbox of secure chat (.specs/secure-chat.md → Vault
+   *  mailbox), runner-wide, never on the relay. `mailHello`: the runner
+   *  proves it holds the mailbox key the owner's signed address names. */
+  mailHello: SecureVaultHello;
+  /** The owner's primary device turns Vault delivery on or off here. */
+  mailSetup: SecureVaultSetup;
+  /** Anyone in a chat with the owner: ciphertexts for the owner's devices.
+   *  Answered with the runner's signed receipt. */
+  mailDeliver: SecureVaultDeliver;
+  /** One of the owner's devices, proved by its own key: its waiting rows. */
+  mailFetch: SecureVaultFetch;
+  /** The same device: delete the rows it has filed. */
+  mailAck: SecureVaultAck;
+  /** The owner: whether delivery is on here and how much waits. */
+  mailStatus: SecureVaultStatus;
   /** "Scan this computer" (.specs/runner-vault.md "Scan this computer"):
    *  the runner's own machine, read-only: tracker cookie counts per browser
    *  (never values), extensions' wide permissions, login items and their
@@ -3856,6 +3933,26 @@ export type BoardAgentActionMap = {
     payload: { name: string; deviceTypeId: string; runtimeId: string };
     result: SimulatorDevice;
   };
+
+  // ── Browser: a tab of the Chrome an agent is QA'ing in ──
+  //
+  // On the same video stream as the simulator, under the same one holder
+  // (.specs/browser-panel.md).
+
+  /** The tabs of every QA Chrome listening on one of this board's session
+   *  ports. `scan` probes all of them; without it only the ports that
+   *  answered as Chrome last time are read again, so a dev server on a
+   *  session port is not asked every few seconds. */
+  browserList: { payload: { scan?: boolean }; result: BrowserTab[] };
+  /** Start pushing a tab's frames. Same options again is a no-op while the
+   *  tab is still open. */
+  browserAttach: {
+    payload: { id: string; width: number; fps: number; bitrate: number };
+    result: void;
+  };
+  browserDetach: { payload: Record<string, never>; result: void };
+  /** To the attached tab, from the holder only. */
+  browserInput: { payload: BrowserCommand; result: void };
 
   // ── Credential store (runner-wide, owner only) ──
   //

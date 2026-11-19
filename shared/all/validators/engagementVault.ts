@@ -67,6 +67,12 @@ export const engagementSnapshotRowSchema = z.object({
   anonymous: z.boolean(),
   factiiiNames: z.record(z.string(), z.string().max(NAME_MAX)),
   postCreatedAt: ms.nullable(),
+  // The "written by AI" mark as the post carried it, named and typed as the
+  // server's PostDto has it (.specs/ai-actions.md "The tag"). Optional: a
+  // device or runner older than the mark sends neither, which reads as not
+  // AI.
+  byAi: z.boolean().optional(),
+  editedByAi: z.boolean().optional(),
   savedAt: ms,
   updatedAt: ms
 });

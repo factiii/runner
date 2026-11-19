@@ -106,7 +106,15 @@ CREATE TABLE "RunnerFindings" (
   // The public tag-changes feed, attached to the history (tagFeed.ts).
   ...TAG_FEED_MIGRATIONS,
   // The owner's own dimensions and the local model's tags (privateTags.ts).
-  ...PRIVATE_TAG_MIGRATIONS
+  ...PRIVATE_TAG_MIGRATIONS,
+  {
+    // The "written by AI" mark a snapshot carries (.specs/ai-actions.md "The
+    // tag"), so History shows it from the Vault as from the device. A
+    // snapshot kept before this reads false: not AI.
+    id: 'runner_0107_post_snapshot_by_ai',
+    sql: `ALTER TABLE "RunnerPostSnapshot" ADD COLUMN "byAi" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "RunnerPostSnapshot" ADD COLUMN "editedByAi" BOOLEAN NOT NULL DEFAULT false;`
+  }
 ];
 
 type IntervalDbRow = {
@@ -142,6 +150,8 @@ type HistoryDbRow = {
   anonymous: boolean | null;
   factiiiNames: unknown;
   postCreatedAt: string | number | null;
+  byAi: boolean | null;
+  editedByAi: boolean | null;
   savedAt: string | number | null;
   updatedAt: string | number | null;
 };
@@ -271,8 +281,8 @@ WHERE "RunnerEngagementInterval"."userId" = EXCLUDED."userId"`,
         // The first device to send a post's snapshot keeps it.
         statements.push({
           sql: `INSERT INTO "RunnerPostSnapshot"
-  ("userId", "postId", "slug", "content", "authorUsername", "authorName", "anonymous", "factiiiNames", "postCreatedAt", "savedAt", "updatedAt")
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+  ("userId", "postId", "slug", "content", "authorUsername", "authorName", "anonymous", "factiiiNames", "postCreatedAt", "savedAt", "updatedAt", "byAi", "editedByAi")
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13)
 ON CONFLICT ("userId", "postId") DO NOTHING`,
           params: [
             userId,
@@ -285,7 +295,10 @@ ON CONFLICT ("userId", "postId") DO NOTHING`,
             JSON.stringify(row.factiiiNames),
             row.postCreatedAt,
             row.savedAt,
-            row.updatedAt
+            row.updatedAt,
+            // Absent from a device older than the mark: not AI.
+            row.byAi === true,
+            row.editedByAi === true
           ]
         });
       }
@@ -328,7 +341,7 @@ ON CONFLICT ("userId", "deviceId") DO UPDATE SET
       const rows = await this.db.query<HistoryDbRow>(
         `SELECT t."postId", t."viewedAt", t."ms",
   s."slug", s."content", s."authorUsername", s."authorName", s."anonymous", s."factiiiNames",
-  s."postCreatedAt", s."savedAt", s."updatedAt", (s."postId" IS NOT NULL) AS "hasSnapshot"
+  s."postCreatedAt", s."byAi", s."editedByAi", s."savedAt", s."updatedAt", (s."postId" IS NOT NULL) AS "hasSnapshot"
 FROM (
   SELECT "postId", MAX("endedAt") AS "viewedAt", SUM("endedAt" - "startedAt") AS "ms"
   FROM "RunnerEngagementInterval"
@@ -356,6 +369,8 @@ LIMIT $4 OFFSET $5`,
                 anonymous: row.anonymous === true,
                 factiiiNames: asNames(row.factiiiNames),
                 postCreatedAt: row.postCreatedAt === null ? null : Number(row.postCreatedAt),
+                byAi: row.byAi === true,
+                editedByAi: row.editedByAi === true,
                 savedAt: Number(row.savedAt),
                 updatedAt: Number(row.updatedAt)
               }

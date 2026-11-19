@@ -23,6 +23,10 @@ const FALLBACK = 'Could not be read';
 // provider output arrives in. Anything long is suspect regardless.
 const MACHINE = /^\s*(\d{3}\s*[{[]|[{[]|"\w+"\s*:)/;
 const TOO_LONG = 200;
+// The embedder refusing us (401, 403) or failing (5xx): our setup, not the
+// file, so its words ("invalid or missing api key") say nothing to the person.
+// A 422 keeps its detail: that one is about the file.
+const OUR_SIDE = /^Embedding failed \((40[13]|5\d\d)\)/;
 
 // `fallback` for a caller whose failure is not a file that could not be read:
 // the same check keeps a raw validation error out of a cancel toast.
@@ -32,6 +36,11 @@ export const readableIngestError = (
 ): string => {
   const trimmed = error?.trim();
   if (!trimmed) return fallback;
-  if (MACHINE.test(trimmed) || trimmed.length > TOO_LONG) return fallback;
+  if (
+    MACHINE.test(trimmed) ||
+    OUR_SIDE.test(trimmed) ||
+    trimmed.length > TOO_LONG
+  )
+    return fallback;
   return trimmed;
 };

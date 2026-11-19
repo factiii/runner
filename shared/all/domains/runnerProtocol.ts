@@ -42,6 +42,9 @@ export const RUNNER_FEATURES = [
   'activity',
   /** `simulatorBoot`, `simulatorCatalog`, `simulatorCreate`. */
   'simulatorBoot',
+  /** `browserList`, `browserAttach`, `browserDetach`, `browserInput`
+   *  (.specs/browser-panel.md). */
+  'browserPanel',
   /** `runner:session-op`: sessions across runners (card 6336db91). */
   'sessionOps',
   /** Reads the app's `client-hello`. */
@@ -56,7 +59,17 @@ export const RUNNER_FEATURES = [
    *  and the last update's outcome (runnerAutoUpdate.ts). */
   'autoUpdateSetting',
   /** `vaultErase`: erase a Vault whose key is lost. */
-  'vaultErase'
+  'vaultErase',
+  /** The Vault mailbox of secure chat: `mailHello`, `mailSetup`,
+   *  `mailDeliver`, `mailFetch`, `mailAck`, `mailStatus`, and
+   *  `runner:mail-wake` to the server. */
+  'vaultMail',
+  /** `message` on `cardExecute`: a terminal session's opening message, sent
+   *  once its workspace is ready (the board's first session). */
+  'sessionOpeningMessage',
+  /** `repoDefaults`: the install and dev commands a board's repository
+   *  names. */
+  'repoDefaults'
 ] as const;
 export type RunnerFeature = (typeof RUNNER_FEATURES)[number];
 
@@ -104,6 +117,10 @@ export const ACTION_FEATURE: Partial<Record<BoardAgentAction, RunnerFeature>> =
     simulatorBoot: 'simulatorBoot',
     simulatorCatalog: 'simulatorBoot',
     simulatorCreate: 'simulatorBoot',
+    browserList: 'browserPanel',
+    browserAttach: 'browserPanel',
+    browserDetach: 'browserPanel',
+    browserInput: 'browserPanel',
     aiPromptInfo: 'aiPromptImages',
     vaultKeyStatus: 'vaultKey',
     vaultKeySetupStart: 'vaultKey',
@@ -115,7 +132,14 @@ export const ACTION_FEATURE: Partial<Record<BoardAgentAction, RunnerFeature>> =
     vaultKeyChange: 'vaultKey',
     vaultErase: 'vaultErase',
     autoUpdateGet: 'autoUpdateSetting',
-    autoUpdateSet: 'autoUpdateSetting'
+    autoUpdateSet: 'autoUpdateSetting',
+    repoDefaults: 'repoDefaults',
+    mailHello: 'vaultMail',
+    mailSetup: 'vaultMail',
+    mailDeliver: 'vaultMail',
+    mailFetch: 'vaultMail',
+    mailAck: 'vaultMail',
+    mailStatus: 'vaultMail'
   };
 
 /** One side's announcement, as read off the wire. */

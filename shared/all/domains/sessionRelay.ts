@@ -82,6 +82,34 @@ export const RELAY_MESSAGE_STATES = [
 ] as const;
 export type RelayMessageState = (typeof RELAY_MESSAGE_STATES)[number];
 
+/** Why a message waits in its target's inbox (session-inbox.ts). `busy`: a
+ *  turn is running, or a permission prompt is waiting on the person.
+ *  `closed`: the session's terminal is not open (it is still starting, or in
+ *  review). `unreported`: a CLI is open in a tab and has not said what it is
+ *  doing, so nothing is typed into it. */
+export const RELAY_MESSAGE_HOLDS = ['busy', 'closed', 'unreported'] as const;
+export type RelayMessageHold = (typeof RELAY_MESSAGE_HOLDS)[number];
+
+/** A message's `hold` off the wire: an unknown word (a newer runner's) is no
+ *  reason at all, never passed on as one. */
+export const parseMessageHold = (
+  value: unknown
+): RelayMessageHold | undefined =>
+  RELAY_MESSAGE_HOLDS.find((hold) => hold === value);
+
+/** A waiting message's `hold` as a clause after the session's name: "it is
+ *  on a turn, and reads it when that ends". */
+export function messageHoldText(hold: RelayMessageHold | undefined): string {
+  switch (hold) {
+    case 'closed':
+      return 'its terminal is not open yet, and it reads it once that opens';
+    case 'unreported':
+      return 'the CLI open in its terminal has not reported what it is doing, so nothing is typed over it; it reads it once that CLI reports idle';
+    default:
+      return 'it is on a turn, and reads it when that ends';
+  }
+}
+
 /** The desktop app's local agent is named `desktop:<userId>` where a runner is
  *  `r<runnerId>`: one person's desktop apps share one name, since the server
  *  sees them only as that person's sockets. */
@@ -151,6 +179,9 @@ export type RelayRead = {
   answer: string;
   /** Messages still in its inbox, waiting for a turn to end. */
   waiting: number;
+  /** Why the oldest of them waits. Absent with none waiting, and from a
+   *  runner from before this was said. */
+  hold?: RelayMessageHold;
 };
 
 /** A message the asking session sent, as read_session lists them. */
@@ -175,6 +206,8 @@ export type SessionOpAck =
       ok: true;
       read?: RelayRead;
       state?: RelayMessageState;
+      /** Why a `waiting` message waits in the target's inbox. */
+      hold?: RelayMessageHold;
       sessionId?: string;
       /** A file op's answers: its description, or one chunk (base64). */
       file?: SessionFileInfo;
@@ -187,7 +220,7 @@ export type SessionRelayAnswer =
   | { runners: RelayRunner[] }
   | { sessions: RelaySessionRow[]; unreachable?: string[] }
   | { read: RelayRead; messages: RelayMessageStatus[] }
-  | { messageId: string; state: RelayMessageState }
+  | { messageId: string; state: RelayMessageState; hold?: RelayMessageHold }
   | { sessionId: string }
   | { file: SessionFileInfo }
   | { chunk: string };

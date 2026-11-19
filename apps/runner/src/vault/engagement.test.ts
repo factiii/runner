@@ -79,6 +79,9 @@ describe('the Vault’s viewing data', () => {
             anonymous: false,
             factiiiNames: { '7': 'Cooking' },
             postCreatedAt: NINE - MINUTE,
+            // The "written by AI" mark; `editedByAi` left out, as a device
+            // older than the mark leaves out both.
+            byAi: true,
             savedAt: NINE + 60 * MINUTE,
             updatedAt: NINE + 60 * MINUTE
           },
@@ -110,8 +113,17 @@ describe('the Vault’s viewing data', () => {
   it('answers history and day totals across devices', async () => {
     const range = { start: NINE - 60 * MINUTE, end: NINE + 600 * MINUTE };
     const history = (await vault.handle('engagementQuery', { kind: 'history', range }, OWNER)) as {
-      items: { postId: string; duration: number; snapshot: { content: string } | null }[];
+      items: {
+        postId: string;
+        duration: number;
+        snapshot: { content: string; byAi?: boolean; editedByAi?: boolean } | null;
+      }[];
     };
+    // The snapshot's AI mark comes back as it was pushed; one not sent is false.
+    assert.deepEqual(
+      [history.items[0]?.snapshot?.byAi, history.items[0]?.snapshot?.editedByAi],
+      [true, false]
+    );
     assert.deepEqual(
       history.items.map((item) => [item.postId, item.duration, item.snapshot?.content ?? null]),
       [

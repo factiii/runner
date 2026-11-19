@@ -52,6 +52,12 @@ if [ "$(uname -s)" = Darwin ] && xcrun simctl help >/dev/null 2>&1; then
 else
   echo '- Simulator: not available here (no Xcode simulator tools on this machine). Show app changes with screenshots in the Scratchpad instead.'
 fi
+# The Browser panel streams a tab over Chrome's DevTools protocol and encodes
+# it with VideoToolbox, so it needs a Mac with a compiler. It finds a Chrome
+# only on one of the board's session ports.
+if [ "$(uname -s)" = Darwin ] && xcrun --find clang >/dev/null 2>&1; then
+  echo '- Browser: streams and controls a tab of the Chrome you test web pages in. Start that Chrome or Chromium (headless is fine) with `--remote-debugging-port=<a port from $FACTIII_PORTS>` and `--user-data-dir="$BUILDS_DIR/qa-chrome-profile"`, the board'"'"'s QA profile, so logins survive between runs; with Playwright pass the port in `args` to `chromium.launchPersistentContext("$BUILDS_DIR/qa-chrome-profile", ...)`. Then tell the user to open the Browser panel and pick the tab. Never point it at the user'"'"'s own Chrome profile.'
+fi
 # Screen Sharing needs macOS Screen Sharing turned on and Tailscale, which
 # carries the vnc:// link.
 if [ "$(uname -s)" = Darwin ] && command -v tailscale >/dev/null 2>&1 &&

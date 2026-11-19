@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+
+import { isInStagedShare, isStagingInstallId } from '@shared/all/domains/desktopStaging';
 
 import type { Release, StageResult } from './updater';
 import { type Exec, installRelease, realExec, type Verdict, verifyMacApp } from './updateVerify';
@@ -19,14 +21,60 @@ const RELEASES = 'https://github.com/factiii/desktop-releases/releases';
 /** The health check's window after a restart (spec: 60 s). */
 const HEALTH_MS = 60_000;
 
-/** `latest-mac.yml` (electron-builder): the version and the arm64 zip. */
+/** `latest-mac.yml` (electron-builder): the version, the arm64 zip and the
+ *  staged share when the feed carries one. */
 export function parseLatestMacYml(text: string): Release | null {
   const version = /^version:\s*['"]?([0-9][0-9A-Za-z.-]*)['"]?\s*$/m.exec(text)?.[1];
   if (!version) return null;
   const files = [...text.matchAll(/^\s*-\s*url:\s*(\S+)\s*\n\s*sha512:\s*(\S+)/gm)];
   const zip = files.find(([, url]) => /arm64.*\.zip$/.test(url ?? '')) ?? files.find(([, url]) => /\.zip$/.test(url ?? ''));
   if (!zip?.[1] || !zip[2] || !/^[\w.-]+$/.test(zip[1])) return null;
-  return { version, url: `${RELEASES}/download/v${version}/${zip[1]}`, sha512: zip[2] };
+  const staging = /^stagingPercentage:[ \t]*['"]?([^'"\s]+)['"]?[ \t]*$/m.exec(text)?.[1];
+  return {
+    version,
+    url: `${RELEASES}/download/v${version}/${zip[1]}`,
+    sha512: zip[2],
+    ...(staging === undefined ? {} : { stagingPercentage: staging })
+  };
+}
+
+/** The file this Mac's staged-rollout id is kept in, beside the ops config. */
+export function stagingIdFile(opsHome: string): string {
+  return path.join(opsHome, 'updater-id');
+}
+
+/**
+ * This Mac's id for staged rollouts: a random UUID made once and kept in the
+ * ops home, tied to nothing else. It is the ops updater's counterpart of
+ * electron-updater's `.updaterId`, so the same Mac is in or out of a share
+ * every time and stays in as the share is raised. '' when it could not be
+ * kept.
+ */
+export function stagingInstallId(opsHome: string, log: (line: string) => void = () => undefined): string {
+  const file = stagingIdFile(opsHome);
+  try {
+    const id = fs.readFileSync(file, 'utf-8').trim();
+    if (isStagingInstallId(id)) return id;
+  } catch {
+    // Not made yet.
+  }
+  const id = randomUUID();
+  try {
+    fs.writeFileSync(file, `${id}\n`, { mode: 0o600 });
+  } catch (err) {
+    // Not kept: the next run would draw another, and a Mac that draws anew
+    // every run lands inside a staged share sooner or later. No id is outside
+    // every staged share (isInStagedShare), so only a full rollout reaches it.
+    log(`could not keep the staged-rollout id: ${err instanceof Error ? err.message : String(err)}`);
+    return '';
+  }
+  return id;
+}
+
+/** Whether a release's staged share reaches the install with this id
+ *  (electron-updater's rule: no share means everyone, 0 means nobody). */
+export function releaseOffered(release: Release, installId: string): boolean {
+  return isInStagedShare(installId, release.stagingPercentage);
 }
 
 export async function fetchLatestMac(fetchImpl: typeof fetch = fetch): Promise<Release | null> {

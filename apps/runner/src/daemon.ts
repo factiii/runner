@@ -51,6 +51,7 @@ import {
   LOCAL_AI_ACTIONS,
   RUNNER_ACTIVITY_ACTIONS,
   RUNNER_AI_ACTIONS,
+  MAIL_ACTIONS,
   RELAY_SIGNIN_REFUSAL,
   RUNNER_SIGNIN_ACTIONS,
   refusal,
@@ -206,6 +207,7 @@ import { createLocalAiTags, createPartsManager } from './runnerParts';
 import { type AiPromptEngines, aiPromptInfo, answerAiPrompt } from './vault/aiPrompt';
 import { machineAskEngines, ollamaBaseUrl } from './vault/askEngines';
 import { machineCategorizeEngines } from './vault/categorizeEngine';
+import { createDaemonMail, type DaemonMail, isMailOnly, mailLinkAllowed } from './mail/daemonMail';
 import { createDaemonVault, type DaemonVault } from './vault/daemonVault';
 import { FindingsJob } from './vault/findingsJob';
 import { createApi } from './remote/api';
@@ -817,9 +819,31 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
   /** A member with no level on any board the server named gets no link at
    *  all: the server should not have relayed it, and the runner does not rely
    *  on that. */
-  const mayConnect = (scope: ChannelScope): boolean =>
+  // The Vault mailbox of secure chat (mail/daemonMail.ts), runner-wide too.
+  // When it takes mail the server is asked to wake the owner's devices: no
+  // content, no sender.
+  const mail = createDaemonMail(CONFIG_DIR, ownerUserId, {
+    wake: (push) => {
+      if (socket.connected) socket.emit('runner:mail-wake', { push });
+    }
+  });
+  /** A link for a board or Runner Cloud, not only for mail. */
+  const reachesMore = (scope: ChannelScope): boolean =>
     reaches(scope, 'jobs') ||
     (scope.role === 'member' && scope.vault === true && vault.isMember(scope.userId));
+  /** Someone in a secure chat with the owner who comes only to deliver mail
+   *  to the Vault mailbox. Admitted while the owner has delivery on. */
+  const mailOnly = (scope: ChannelScope): boolean => isMailOnly(scope, reachesMore(scope));
+  const mayConnect = (scope: ChannelScope): boolean =>
+    reachesMore(scope) || (mailOnly(scope) && mail.enabled());
+  /** Mail-only links are capped, in all and per person (SECURE_VAULT_LIMITS):
+   *  anyone in a chat with the owner may open one. */
+  const mailLinkOk = (scope: ChannelScope): boolean =>
+    !mailOnly(scope) ||
+    mailLinkAllowed(
+      [...channelScopes.values()].filter((open) => mailOnly(open)),
+      scope.userId
+    );
   void vault.load().catch((err: unknown) => {
     console.error(`[vault] could not read who is let in: ${err instanceof Error ? err.message : String(err)}`);
   });
@@ -837,7 +861,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   // ── Who has the video stream (screen-holder.ts) ──
   // One holder for the machine: there is one encoder, and each peer has one
-  // video track, which the simulator uses.
+  // video track, which the simulator and the browser panel share.
   let screenHold: ScreenHold<ChannelScope> | null = null;
 
   /** Tell every channel that may watch who has the stream. A channel is told
@@ -864,7 +888,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
     const hold = screenHold;
     if (!hold) return;
     screenHold = null;
-    engines.get(hold.spaceSlug)?.simulatorDetach();
+    engines.get(hold.spaceSlug)?.stopVideo();
     tellScreenHolder();
   };
 
@@ -909,6 +933,11 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
 
   const sendSimulatorFrame = (accessUnit: Uint8Array, capturedAt: number) => {
     sendVideoFrame('simulator', accessUnit, capturedAt);
+  };
+  /** A browser tab's frames (.specs/browser-panel.md): the same track, and
+   *  only while the holder has the browser up. */
+  const sendBrowserFrame = (accessUnit: Uint8Array, capturedAt: number) => {
+    sendVideoFrame('browser', accessUnit, capturedAt);
   };
   // terminal sessions are per-channel: terminal output is not multi-device sync.
   const terminalByChannel = new WeakMap<Wire, TerminalManager>();
@@ -1285,13 +1314,14 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           }
         },
         onSimulatorFrame: sendSimulatorFrame,
+        onBrowserFrame: sendBrowserFrame,
         // One encoder for the machine. Every peer has a single video track, so
         // a second space attaching would put two H.264 streams on it —
         // different SPS, independent sequence numbers and timestamps — and
         // neither would decode.
         onSimulatorAttach: () => {
           for (const [slug, other] of engines) {
-            if (slug !== spaceSlug) other.simulatorDetach();
+            if (slug !== spaceSlug) other.stopVideo();
           }
         },
         // Re-report connection facts after any config write so the UI badges
@@ -2219,7 +2249,8 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           connections: () => runnerConnections.connections(linkId),
           logs: (payload) => runnerConnections.logs(payload)
         },
-        activity
+        activity,
+        mail
       );
     });
 
@@ -2262,7 +2293,9 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       socket.emit('runnerSocketClose', { targetSocketId: fromSocketId, linkId });
       return;
     }
-    if (!mayConnect(channelScope)) {
+    // Mail never rides the relay (MAIL_ACTIONS), so a link that could only
+    // carry mail is not opened on it.
+    if (!mayConnect(channelScope) || mailOnly(channelScope)) {
       console.error(
         `Refused socket link from ${fromSocketId}: no level on any board`
       );
@@ -2350,6 +2383,13 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
       );
       return;
     }
+    if (!mailLinkOk(scope)) {
+      // Unanswered too: too many people delivering mail at once.
+      console.error(
+        `Refused WebRTC offer from ${data.fromSocketId}: too many mail links`
+      );
+      return;
+    }
 
     try {
       // Never let building this list cost the answer. A throw here used to
@@ -2376,6 +2416,12 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
           .join(', ')}`
       );
       const peer = new PeerConnection('runner', { iceServers });
+      // The Vault mailbox's hello signs this link's two DTLS certificates
+      // (mail/daemonMail.ts): the answer made here, the offer taken.
+      mail.bindLink(scope, () => ({
+        local: peer.localDescription()?.sdp,
+        remote: data.offer.sdp
+      }));
 
       // What this side of the handshake managed, reported once it settles. The
       // runner used to be the only party that knew whether it had allocated a
@@ -2749,6 +2795,7 @@ export async function startDaemon(config: RunnerConfig): Promise<void> {
    *  stuck database cannot hold the exit. */
   async function closeVault(): Promise<void> {
     findingsJob.stop();
+    mail.close();
     stopActivityPurge();
     sessionsReporter.stop();
     await Promise.race([
@@ -2929,7 +2976,9 @@ async function handleDataChannelMessage(
     logs: RunnerConnectionsHost['logs'];
   },
   /** The runner's Activity (activity/daemonActivity.ts). */
-  activity: ActivityHost
+  activity: ActivityHost,
+  /** The Vault mailbox of secure chat (mail/daemonMail.ts). */
+  mail: DaemonMail
 ): Promise<void> {
   let msg: DispatchMessage;
   try {
@@ -2957,6 +3006,19 @@ async function handleDataChannelMessage(
       error: relayRefusal,
       code: RELAY_REFUSES_SECRETS
     });
+    return;
+  }
+
+  // The Vault mailbox is runner-wide and has its own rules (mail/daemonMail.ts):
+  // answered before the per-board gate, since a sender has no board here.
+  if (MAIL_ACTIONS.has(action)) {
+    try {
+      sendResult({ type: 'result', requestId, result: mail.handle(action, payload, scope) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${ts()}] ✗ ${action} refused: ${message}`);
+      sendResult({ type: 'result', requestId, error: message });
+    }
     return;
   }
 
@@ -3354,7 +3416,10 @@ async function handleDataChannelMessage(
 
   const engine = getEngine(msg.spaceSlug, msg.spaceId);
 
-  console.log(`[${ts()}] ← ${action} (${requestId})`);
+  // A pointer over the browser panel is an event per move, hover included:
+  // logged, it would be most of the runner's log.
+  const quiet = action === 'browserInput';
+  if (!quiet) console.log(`[${ts()}] ← ${action} (${requestId})`);
 
   const askLogSender = (entry: { type: string; content: string }) => {
     const event: EventMessage = {
@@ -3386,7 +3451,7 @@ async function handleDataChannelMessage(
       channelContext(scope, access.dangerous(scope, msg.spaceSlug))
     );
     askJob?.end('done');
-    console.log(`[${ts()}] → ${action} OK`);
+    if (!quiet) console.log(`[${ts()}] → ${action} OK`);
     const response: ResultMessage = {
       type: 'result',
       requestId,

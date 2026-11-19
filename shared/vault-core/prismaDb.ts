@@ -115,6 +115,17 @@ export type PrismaVaultDbOptions<T extends PrismaVaultTypes> = {
   deleteObjects(keys: string[]): Promise<void>;
   /** A folder emptied for good: drop its skip marks, if this backend keeps any. */
   folderEmptied(userId: number, path: string): Promise<void>;
+  /**
+   * A backend with a trash (the server's Cloud Storage,
+   * apps/server/src/helpers/vaultTrash.ts) records these files in it before
+   * their rows go, and returns the keys whose bytes it is keeping. Called with
+   * the files whose posts are not public: a public file's bytes go at once.
+   * Absent on a backend with no trash, where every delete is for good.
+   */
+  keepInTrash?(
+    userId: number,
+    files: { id: string; key: string; posts: { id: number }[] }[]
+  ): Promise<string[]>;
 };
 
 /** One account, or a shared vault's. */
@@ -430,7 +441,7 @@ export const prismaVaultDb = <T extends PrismaVaultTypes>(
 export const deleteFiles = async (
   options: Pick<
     PrismaVaultDbOptions<PrismaVaultTypes>,
-    'client' | 'scope' | 'deleteObjects' | 'folderEmptied'
+    'client' | 'scope' | 'deleteObjects' | 'folderEmptied' | 'keepInTrash'
   >,
   userId: number,
   {
@@ -502,6 +513,17 @@ export const deleteFiles = async (
   // server's `deleteVaultUpload` keeps for one file, and for the same reasons.
   //
   // In pages, because a folder has no size limit.
+  // Before any row goes: the trash copies what it needs from them.
+  const inTrash = new Set(
+    options.keepInTrash
+      ? await options.keepInTrash(
+          userId,
+          mine.filter((row) =>
+            row.posts.every((post) => post.status !== 'PUBLISHED')
+          )
+        )
+      : []
+  );
   const postIds = mine.flatMap((row) => row.posts.map((post) => post.id));
   // Posts first: they hold the text, and their SearchVector rows cascade.
   for (const page of pagesOf(postIds)) {
@@ -520,7 +542,9 @@ export const deleteFiles = async (
   // back because the bucket was briefly unreachable. An orphaned object costs
   // storage, which is the cheaper of the two mistakes.
   await options
-    .deleteObjects(mine.map((row) => row.key))
+    .deleteObjects(
+      mine.map((row) => row.key).filter((key) => !inTrash.has(key))
+    )
     .catch(() => undefined);
 
   // A folder emptied for good takes its skip marks with it (it and any folder

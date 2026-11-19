@@ -9,6 +9,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/report-state.sh\" started",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

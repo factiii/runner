@@ -33,7 +33,15 @@ Factiii's server:
 - `message_session { session, text, board?, runner? }`: lands in its inbox
   and goes in once any turn in progress ends; it never interrupts one. A
   session on an offline runner gets it when that runner is back (held 7
-  days, then expired). Says whether it was delivered or is waiting.
+  days, then expired). Says whether it was delivered or is waiting, and why
+  it waits: on a turn, its terminal not open yet, or a CLI that has not
+  reported what it is doing. `expiresIn` (minutes, a session on this runner
+  only) drops it if it still waits after that long: set it when you would
+  otherwise do the work another way.
+- `cancel_message { message }`: takes back a message of yours that is still
+  waiting on this runner (the id `message_session` returned). Do this before
+  you do the work yourself, or the session does it again when the message
+  goes in.
 - `read_session { session, board?, runner?, limit?, wait? }`: its recent
   transcript and, for Code, branch, dirty files, ahead/behind and unpushed
   commits. `wait` (seconds, up to 600) waits for its turn to end and adds its

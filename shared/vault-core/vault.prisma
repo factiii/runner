@@ -275,6 +275,11 @@ model VaultFolder {
   status       VaultFolderStatus @default(PENDING)
   error        String?
   lastSyncedAt DateTime?
+  // Where the next sync picks up: the change feed's bookmark from the last
+  // complete pass (.specs/oakbox-stores.md → OneDrive auto sync). Null until
+  // one completes, or after Graph refused it as too old; a sync without it
+  // walks the whole folder.
+  deltaLink    String?
   // Where new Oakbox files go (.specs/file-vault.md → Primary storage). At most
   // one per user (helpers/vaultPrimary.ts enforces it); none means R2.
   primary      Boolean           @default(false)
